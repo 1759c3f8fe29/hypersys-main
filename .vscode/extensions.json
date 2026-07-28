@@ -1,5 +1,6 @@
 {
     "recommendations": [
-        "kilocode.kilo-code"
+        "kilocode.kilo-code",
+        "openai.chatgpt"
     ]
 }

@@ -253,7 +253,7 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
                           ? `Describe an image for ${modelName} to create...`
                           : modelKind === 'Vision'
                             ? `Upload an image and ask ${modelName} about it...`
-                            : `Ask ${modelName} anything or upload an image/file...`
+                            : `Ask ${modelName} anything...`
                     }
                     disabled={disabled || isRecording}
                     rows={1}

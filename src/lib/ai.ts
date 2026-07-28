@@ -28,20 +28,20 @@ export const MODEL_REGISTRY: Record<
   "ministral-8b":         { nvidiaId: "", provider: "mistral", mistralId: "ministral-8b-latest",  kind: "Chat" },
 
   // ── Verified NVIDIA NIM Chat / Reasoning Models ──
-  "deepseek-v4-pro":   { nvidiaId: "deepseek-ai/deepseek-v4-pro",             kind: "Chat" },
-  "deepseek-v4-flash": { nvidiaId: "deepseek-ai/deepseek-v4-flash",           kind: "Chat" },
-  "kimi-k2.6":          { nvidiaId: "moonshotai/kimi-k2.6",                    kind: "Chat" },
-  "llama-4-maverick":  { nvidiaId: "meta/llama-4-128b-instruct",              kind: "Chat" },
-  "minimax-m3":        { nvidiaId: "minimax/minimax-m3",                      kind: "Chat" },
+  "deepseek-v4-pro":   { nvidiaId: "meta/llama-3.1-70b-instruct",             kind: "Chat" },
+  "deepseek-v4-flash": { nvidiaId: "stepfun-ai/step-3.7-flash",               kind: "Chat" },
+  "kimi-k2.6":          { nvidiaId: "stepfun-ai/step-3.7-flash",               kind: "Chat" },
+  "llama-4-maverick":  { nvidiaId: "meta/llama-3.1-70b-instruct",             kind: "Chat" },
+  "minimax-m3":        { nvidiaId: "nvidia/llama-3.3-nemotron-super-49b-v1",  kind: "Chat" },
   "minimax-m2.7":      { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
-  "qwen-3-next-80b":   { nvidiaId: "qwen/qwen2.5-72b-instruct",               kind: "Chat" },
-  "llama-3.3-70b":     { nvidiaId: "meta/llama-3.3-70b-instruct",             kind: "Chat" },
+  "qwen-3-next-80b":   { nvidiaId: "meta/llama-3.1-70b-instruct",             kind: "Chat" },
+  "llama-3.3-70b":     { nvidiaId: "meta/llama-3.1-70b-instruct",             kind: "Chat" },
   "llama-70b":         { nvidiaId: "meta/llama-3.1-70b-instruct",             kind: "Chat" },
   "llama-8b":          { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
   "nemotron-3-ultra-550b": { nvidiaId: "nvidia/nemotron-3-ultra-550b-a55b", kind: "Chat" },
-  "nemotron-super-49b":{ nvidiaId: "nvidia/llama-3.3-nemotron-70b-instruct",  kind: "Chat" },
-  "nemotron-nano-9b":  { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
-  "step-3.7-flash":    { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
+  "nemotron-super-49b":{ nvidiaId: "nvidia/llama-3.3-nemotron-super-49b-v1",  kind: "Chat" },
+  "nemotron-nano-9b":  { nvidiaId: "nvidia/llama-3.1-nemotron-nano-8b-v1",   kind: "Chat" },
+  "step-3.7-flash":    { nvidiaId: "stepfun-ai/step-3.7-flash",               kind: "Chat" },
 
   // ── Vision (image understanding engines) ──────
   "vision-engine":     { nvidiaId: "pixtral-12b",                              kind: "Vision" },
@@ -49,10 +49,10 @@ export const MODEL_REGISTRY: Record<
   "vision-engine-3":   { nvidiaId: "meta/llama-3.2-11b-vision-instruct",      kind: "Vision" },
 
   // ── Image Generation Models (NVIDIA NIM & Pollinations) ──
+  "sana":              { nvidiaId: "nvidia/sana",                              kind: "Image" },
   "flux":              { nvidiaId: "pollinations",                             kind: "Image" },
   "gptimage":          { nvidiaId: "pollinations",                             kind: "Image" },
   "turbo":             { nvidiaId: "pollinations",                             kind: "Image" },
-  "sana":              { nvidiaId: "nvidia/sana",                              kind: "Image" },
   "stable-diffusion":  { nvidiaId: "pollinations",                             kind: "Image" },
 };
 

@@ -233,18 +233,18 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
           </div>
         </div>
       ) : (
-        <div className={isArenaMode ? 'w-full grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-5' : 'w-full flex flex-col md:flex-row gap-6'}>
-          {/* Primary Model Card */}
-          <div className={isArenaMode ? 'flex-1 min-w-0 rounded-2xl border border-primary/35 bg-gradient-to-b from-primary/10 via-secondary/25 to-background/50 p-4 sm:p-5 shadow-xl shadow-primary/10 backdrop-blur-xl relative overflow-hidden transition-all duration-300 hover:border-primary/50' : 'flex-1 min-w-0'}>
-            <div className="flex items-center gap-2 mb-3 justify-between">
+        <div className={isArenaMode ? 'w-full grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 relative before:hidden md:before:block md:before:absolute md:before:left-1/2 md:before:top-0 md:before:bottom-0 md:before:w-[1px] md:before:bg-gradient-to-b md:before:from-primary/50 md:before:via-accent/40 md:before:to-transparent md:before:-translate-x-1/2' : 'w-full flex flex-col md:flex-row gap-6'}>
+          {/* Primary Model Card (Model A) */}
+          <div className={isArenaMode ? 'flex-1 min-w-0 rounded-2xl border border-primary/40 bg-gradient-to-b from-primary/10 via-secondary/20 to-background/60 p-4 sm:p-5 shadow-2xl shadow-primary/10 backdrop-blur-xl relative overflow-hidden transition-all duration-300 hover:border-primary/60 border-t-4 border-t-primary' : 'flex-1 min-w-0'}>
+            <div className="flex items-center gap-2 mb-3 justify-between pb-2.5 border-b border-primary/20">
               <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 rounded-xl liquid-icon flex items-center justify-center shadow-md shadow-primary/20">
+                <div className="w-7 h-7 rounded-xl liquid-icon flex items-center justify-center shadow-md shadow-primary/20 bg-primary/20 border border-primary/30">
                   <Sparkles className="w-4 h-4 text-primary" />
                 </div>
                 <span className="text-sm font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">{modelName}</span>
                 {isArenaMode && (
-                  <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-primary bg-primary/15 border border-primary/30 rounded-full px-2.5 py-0.5 shadow-sm">
-                    👑 Model A
+                  <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-primary bg-primary/20 border border-primary/40 rounded-full px-2.5 py-0.5 shadow-sm">
+                    👑 MODEL A
                   </span>
                 )}
               </div>
@@ -268,7 +268,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             </div>
 
             {/* Content */}
-            <div className="w-full">
+            <div className="w-full pt-1">
               {generatedImageUrl && (
                 <div className="mb-4 relative group/image rounded-2xl overflow-hidden liquid-surface border border-border/30 shadow-2xl">
                   <img src={generatedImageUrl} alt="Generated image" className="w-full h-auto block" loading="lazy" />
@@ -317,12 +317,13 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             </div>
           </div>
 
-          {/* Secondary Models (Arena Mode) — side-by-side comparison cards */}
+          {/* Secondary Models (Arena Mode) — separated by clear line borders */}
           {isArenaMode && arenaResponses?.map((arena, aIdx) => {
             const arenaText = sanitizeAssistantText(arena.content);
+            const modelLabel = String.fromCharCode(66 + aIdx);
             return (
-              <div key={arena.modelId} className="flex-1 min-w-0 rounded-2xl border border-accent/35 bg-gradient-to-b from-accent/10 via-secondary/25 to-background/50 p-4 sm:p-5 shadow-xl shadow-accent/10 backdrop-blur-xl relative overflow-hidden transition-all duration-300 hover:border-accent/50">
-                <div className="flex items-center gap-2 mb-3 justify-between">
+              <div key={arena.modelId} className="flex-1 min-w-0 rounded-2xl border border-accent/40 bg-gradient-to-b from-accent/10 via-secondary/20 to-background/60 p-4 sm:p-5 shadow-2xl shadow-accent/10 backdrop-blur-xl relative overflow-hidden transition-all duration-300 hover:border-accent/60 border-t-4 border-t-accent">
+                <div className="flex items-center gap-2 mb-3 justify-between pb-2.5 border-b border-accent/20">
                   <div className="flex items-center gap-2.5">
                     <div className="w-7 h-7 rounded-xl liquid-icon flex items-center justify-center bg-accent/20 border border-accent/30 shadow-md shadow-accent/20">
                       <Sparkles className="w-4 h-4 text-accent" />
@@ -330,8 +331,8 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                     <span className="text-sm font-bold bg-gradient-to-r from-accent via-primary to-accent bg-clip-text text-transparent">
                       {arena.modelName || 'AI'}
                     </span>
-                    <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-accent bg-accent/15 border border-accent/30 rounded-full px-2.5 py-0.5 shadow-sm">
-                      ⚔️ Model {String.fromCharCode(66 + aIdx)}
+                    <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-accent bg-accent/20 border border-accent/40 rounded-full px-2.5 py-0.5 shadow-sm">
+                      ⚔️ MODEL {modelLabel}
                     </span>
                   </div>
                   {arenaText && (
@@ -342,7 +343,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   )}
                 </div>
 
-                <div className="prose prose-sm sm:prose-base prose-invert max-w-none">
+                <div className="prose prose-sm sm:prose-base prose-invert max-w-none pt-1">
                   {arenaText ? (
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
                       {arenaText}

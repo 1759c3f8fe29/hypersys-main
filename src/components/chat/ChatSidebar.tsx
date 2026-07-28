@@ -48,11 +48,11 @@ export const AI_MODELS: AIModel[] = [
   { id: 'nemotron-nano-9b', name: 'Nemotron Nano 9B', label: 'Nemotron Nano', description: 'Compact NVIDIA reasoning (NVIDIA NIM)', emoji: '🔱', kind: 'Chat', featured: false },
   { id: 'step-3.7-flash', name: 'Step 3.7 Flash', label: 'Step 3.7', description: 'StepFun fast reasoning (NVIDIA NIM)', emoji: '🌀', kind: 'Chat', featured: false },
 
-  // ── Image Generation Models (Pollinations, verified live) ──
+  // ── Image Generation Models (NVIDIA NIM & Pollinations) ──
+  { id: 'sana', name: 'NVIDIA Sana', label: 'NVIDIA Sana', description: 'Fast, crisp flagship NVIDIA NIM diffusion engine', emoji: '✨', kind: 'Image', featured: true },
   { id: 'flux', name: 'FLUX', label: 'FLUX', description: 'Highest-quality photorealistic images', emoji: '🖼️', kind: 'Image', featured: true },
   { id: 'gptimage', name: 'GPT Image', label: 'GPT Image', description: 'Newest ChatGPT-style generation', emoji: '🎨', kind: 'Image', featured: true },
-  { id: 'turbo', name: 'FLUX Turbo', label: 'Turbo', description: 'Fastest image generation', emoji: '⚡', kind: 'Image', featured: true },
-  { id: 'sana', name: 'NVIDIA Sana', label: 'Sana', description: 'Fast, crisp NVIDIA diffusion', emoji: '✨', kind: 'Image', featured: false },
+  { id: 'turbo', name: 'FLUX Turbo', label: 'Turbo', description: 'Fastest image generation', emoji: '⚡', kind: 'Image', featured: false },
   { id: 'stable-diffusion', name: 'Stable Diffusion', label: 'Stable Diffusion', description: 'Classic versatile image model', emoji: '🌈', kind: 'Image', featured: false },
 ];
 

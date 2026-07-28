@@ -26,42 +26,44 @@ export default async function handler(req, res) {
     return;
   }
 
-  const requestedModel = model || "meta/llama-3.3-70b-instruct";
-  let upstream = await fetch(NVIDIA_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify({
-      model: requestedModel,
-      messages,
-      stream: true,
-      temperature: temperature ?? 0.7,
-      top_p: top_p ?? 0.95,
-      max_tokens: max_tokens ?? 2048,
-    }),
-  });
+  const requestedModel = model || "meta/llama-3.1-70b-instruct";
+  const candidateModels = [
+    requestedModel,
+    "meta/llama-3.1-70b-instruct",
+    "meta/llama-3.1-8b-instruct",
+    "nvidia/llama-3.3-nemotron-super-49b-v1",
+    "stepfun-ai/step-3.7-flash"
+  ];
+  // Deduplicate preserving order
+  const modelsToTry = [...new Set(candidateModels)];
 
-  if (upstream.status === 404 && requestedModel !== "meta/llama-3.1-8b-instruct") {
-    console.log("NVIDIA 404 for model:", requestedModel, "--> retrying with meta/llama-3.1-8b-instruct");
-    upstream = await fetch(NVIDIA_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
-        Accept: "text/event-stream",
-      },
-      body: JSON.stringify({
-        model: "meta/llama-3.1-8b-instruct",
-        messages,
-        stream: true,
-        temperature: temperature ?? 0.7,
-        top_p: top_p ?? 0.95,
-        max_tokens: max_tokens ?? 2048,
-      }),
-    });
+  let upstream = null;
+  for (const mId of modelsToTry) {
+    try {
+      upstream = await fetch(NVIDIA_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          model: mId,
+          messages,
+          stream: true,
+          temperature: temperature ?? 0.7,
+          top_p: top_p ?? 0.95,
+          max_tokens: max_tokens ?? 2048,
+        }),
+      });
+
+      if (upstream.ok && upstream.body) {
+        break;
+      }
+      console.warn(`NVIDIA NIM model ${mId} returned status ${upstream.status}, trying fallback...`);
+    } catch (e) {
+      console.warn(`NVIDIA NIM model ${mId} fetch failed:`, e);
+    }
   }
 
   if (!upstream.ok || !upstream.body) {

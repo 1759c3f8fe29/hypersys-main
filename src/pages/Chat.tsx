@@ -81,7 +81,7 @@ function buildFlyerSystemPrompt(modelName: string): string {
       'direct 1-2 sentence answer or summary  at last',
     'ACCURACY & CITATIONS:',
      '- Ground your responses in factual precision.',
-     '- When web search context is provided, synthesize it accurately and cite inline [1], [2].',
+     '- When web search context is provided, synthesize it accurately and cite inline .',
      '- Never output private scratchpad or <think> reasoning blocks — output ONLY the final answer.',
   ].join('\n');
 }

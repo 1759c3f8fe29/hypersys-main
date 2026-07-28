@@ -151,7 +151,7 @@ export function buildSearchContext(search: SearchResponse | null): string | null
 
   return [
     "You have access to the following up-to-date web search results.",
-    "Use them to answer the user's question accurately and cite sources inline as [1], [2], etc. where relevant.",
+    "Use them to answer the user's question accurately and cite sources inline . where relevant.",
     "If the results do not contain the answer, say so rather than guessing.",
     "",
     `Web results for "${search.query}":`,
