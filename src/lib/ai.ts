@@ -714,41 +714,64 @@ export async function generateImageResponse(
 
 /**
  * Smart Short Title Generator for Chat Conversations (ChatGPT-style).
- * Generates a concise 2 to 4 word summary title for the chat.
+ * Strictly uses Mistral 8B (ministral-8b) via Mistral API to generate a concise 2 to 4 word summary title.
  */
 export async function generateSmartChatTitle(
   firstMessage: string,
   signal?: AbortSignal,
 ): Promise<string> {
   const text = (firstMessage || "").trim();
-  if (!text || text.length < 3) return "New Chat";
+  if (!text || text.length < 2) return "New Chat";
 
   try {
     const prompt: ChatMessage[] = [
       {
         role: "system",
         content:
-          "You are an AI Title Generator. Generate a concise, clear 2 to 4 word summary title for the user's chat prompt. Output ONLY the short title text. Do NOT use quotation marks, punctuation, or words like 'Title:'. Keep it under 35 characters.",
+          "You are an AI Title Generator. Generate a concise, clear 2 to 4 word title summarizing the user's prompt. Output ONLY the raw title text. Do NOT use quotation marks, punctuation, or words like 'Title:'. Keep it under 35 characters.",
       },
       { role: "user", content: text },
     ];
 
-    const titleResponse = await getCompleteChatResponse(
+    let titleText = "";
+    // Strictly invoke Mistral 8B (ministral-8b) on Mistral API
+    await generateMistralResponse(
       prompt,
       "ministral-8b",
+      (chunk) => { titleText += chunk; },
       signal,
     );
 
-    const cleaned = titleResponse
-      .replace(/["'`]/g, "")
+    const cleaned = titleText
+      .replace(/<\s*think\s*>[\s\S]*?<\s*\/\s*think\s*>/gi, "")
+      .replace(/["'`#*._]/g, "")
       .replace(/^title:\s*/i, "")
       .replace(/\n+/g, " ")
       .trim();
 
-    return cleaned.length >= 2 && cleaned.length <= 45 ? cleaned : text.slice(0, 30);
-  } catch {
-    return text.slice(0, 30);
+    if (cleaned.length >= 2 && cleaned.length <= 45) {
+      return cleaned
+        .split(" ")
+        .slice(0, 5)
+        .map((w) => (w.length > 0 ? w.charAt(0).toUpperCase() + w.slice(1) : ""))
+        .join(" ")
+        .trim();
+    }
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw err;
+    console.warn("Mistral 8B title generation fallback:", err);
   }
+
+  // Clean fallback: Extract 2-4 clean words from user message
+  const words = text.replace(/[^a-zA-Z0-9\s]/g, "").split(/\s+/).filter(Boolean);
+  if (words.length > 0) {
+    return words
+      .slice(0, 4)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(" ");
+  }
+
+  return text.slice(0, 30);
 }
 
 // ---------------------------------------------------------------------------
