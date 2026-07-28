@@ -6,7 +6,7 @@ import ChatMessage from '@/components/chat/ChatMessage';
 import ChatInput from '@/components/chat/ChatInput';
 import ModelSelector from '@/components/chat/ModelSelector';
 import WelcomeScreen from '@/components/chat/WelcomeScreen';
-import { generateChatResponse, generateVisionResponse, generateImageResponse, craftImagePrompt, craftVisionPrompt, evaluateImageIntent, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
+import { generateChatResponse, generateVisionResponse, generateImageResponse, craftImagePrompt, craftVisionPrompt, evaluateUserIntent, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
 import { evaluateSmartWebSearch, webSearch, buildSearchContext } from '@/lib/search';
 import type { ChatAttachment } from '@/components/chat/types';
 import { Menu, Sparkles } from 'lucide-react';
@@ -27,6 +27,7 @@ interface Message {
   imageUrl?: string;
   attachments?: ChatAttachment[];
   modelName?: string;
+  statusText?: string;
   // Arena Mode
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
@@ -53,51 +54,39 @@ const DEFAULT_VISION_MODEL = VISION_ENGINE_MODEL;
 const DEFAULT_IMAGE_MODEL = 'flux';
 const DEFAULT_CHAT_MODEL_ID = 'mistral-large-latest';
 
-// Brand persona — makes the assistant identify as Flyer (ChatGPT-style feel)
-// rather than leaking the underlying model provider. Injected as the first
-// system message on every chat turn.
-const Flyer_SYSTEM_PROMPT = [
-  'You are Flyer, a world-class, highly intelligent AI assistant designed to provide accurate, master-level answers.',
-  'Always refer to yourself as Flyer — never mention underlying provider names or internal system architecture.',
-  '',
-  'CORE RESPONSE PRINCIPLES:',
-  '- Open with a clear, direct 1-2 sentence answer or summary before going into technical depth.',
-  '- For complex analytical, coding, or technical questions, think step-by-step to produce pristine, well-structured output.',
-  '- Use "## " headings to logically divide multi-section responses.',
-  '- Bold key concepts with **term** to make answers skimmable and engaging.',
-  '- Put ALL code in clean, fenced code blocks with language tags (e.g. ```python, ```typescript, ```bash). Include docstrings and error handling for production code.',
-  '- Use inline `code` for function names, variables, commands, and file paths.',
-  '- Use Markdown tables when comparing options, attributes, or benchmarks.',
-  '- Format bullet points cleanly for lists, and numbered lists for sequential steps.',
-  '- Keep paragraphs short (1-3 sentences) and leave blank lines for readability.',
-  '- Conclude complex answers with a "Summary / Bottom Line" or "Next Steps" section.',
-  '---a clear, direct 1-2 sentence answer or summary at end ',
-  'ACCURACY & INTEGRITY:',
-  '- Be concise for simple queries and thorough for complex technical questions.',
-  '- When real-time or search data is provided, synthesize it accurately and cite inline [1], [2].',
-  '- Never output private scratchpad or <think> reasoning blocks — present only the final, polished response.',
-].join('\n');
+// Dynamic Brand Persona Prompt Generator
+// Makes the assistant identify as Flyer, Powered by (modelName).
+function buildFlyerSystemPrompt(modelName: string): string {
+  return [
+    `You are Flyer, a world-class AI assistant (Powered by ${modelName}).`,
+    `When asked about your identity or what model is running, state: "I am Flyer, powered by ${modelName}".`,
+    '',
+    'RESPONSE BREVITY & QUALITY DIRECTIVES:',
+    '- DEFAULT BREVITY: By default, keep your answers CONCISE, SHARP, AND TO THE POINT (1-3 short paragraphs or clean bullet points). Do not output long essays unless necessary.',
+    '- DETAILED RESPONSES: Provide comprehensive, multi-section step-by-step responses ONLY when the user prompt explicitly asks for detailed explanations, complex code writing, architectural breakdown, math derivation, or structured technical analysis.',
+    '- Open directly with the core answer or solution. Eliminate preamble, filler intros, and repetitive greetings.',
+    '- Put code inside clean fenced code blocks with language tags (e.g. ```python, ```typescript, ```bash).',
+    '- Use bolding (**term**) and bullet points to make responses clean and skimmable.',
+    '',
+    'ACCURACY & CITATIONS:',
+    '- Ground your responses in factual precision.',
+    '- When web search context is provided, synthesize it accurately and cite inline [1], [2].',
+    '- Never output private scratchpad or <think> reasoning blocks — output ONLY the final answer.',
+  ].join('\n');
+}
 
-// Vision turns use a purpose-built prompt: it forces a clean, skimmable,
-// ChatGPT-style breakdown of what is actually in the image instead of a single
-// unstructured paragraph, and guards against the model inventing details.
-const VISION_SYSTEM_PROMPT = [
-  'You are Flyer, a sharp-eyed visual analysis assistant. You are shown one or more images and must describe and reason about what you actually see.',
-  'Always refer to yourself as Flyer — never mention the underlying model or provider.',
-  '',
-  'HOW TO ANSWER:',
-  "- If the user asked a specific question about the image, answer THAT first in one or two direct sentences, then add supporting detail.",
-  '- Otherwise, lead with a one-line summary of what the image is, then break it down under "## " headings such as **Overview**, **Key details**, **Text in image** (transcribe any visible text verbatim), and **Notable observations**.',
-  '- Use bullet points for lists of objects, people, colors, or details so the answer is easy to skim.',
-  '- Bold the important elements with **term**.',
-  '',
-  'ACCURACY RULES:',
-  '- Describe only what is genuinely visible. Never invent objects, text, brands, or people that are not clearly there.',
-  '- If something is blurry, cropped, or ambiguous, say so plainly instead of guessing.',
-  '- Do not claim to identify a specific real, named private individual from their face.',
-  '- If asked to read text or code in the image, transcribe it exactly inside the appropriate fenced block or inline `code`.',
-  '- Never show private reasoning or <think> blocks — reply only with the final answer.',
-].join('\n');
+function buildVisionSystemPrompt(modelName: string): string {
+  return [
+    `You are Flyer, a visual analysis assistant (Powered by ${modelName}).`,
+    `When asked about your identity, state: "I am Flyer, powered by ${modelName}".`,
+    '',
+    'RESPONSE BREVITY & ACCURACY:',
+    '- Answer specific questions about the image directly in 1-2 concise sentences first.',
+    '- Keep visual breakdowns short, clear, and structured under headings (**Overview**, **Key Details**, **Text in Image**).',
+    '- Describe only what is genuinely visible in the image. Never invent unverified details.',
+    '- Never output private reasoning or <think> blocks.',
+  ].join('\n');
+}
 
 const compressImage = (file: File, maxWidth = 1024, maxHeight = 1024, quality = 0.8): Promise<string> => {
   return new Promise((resolve, reject) => {
@@ -380,14 +369,14 @@ export default function Chat() {
     const imageAttachments = pendingAttachments.filter((a) => a.type === 'image');
     const hasImages = imageAttachments.length > 0;
 
-    // Route the request:
-    //  - AI intent classifier or explicit Image model => generate image with 1000-word master prompt
-    //  - otherwise chat/vision.
-    const isImageGen = await evaluateImageIntent(
+    // 1. Fast AI Intent Evaluator (uses ministral-8b for Mistral or deepseek-v4-flash for NIM)
+    const intentEval = await evaluateUserIntent(
       requestContent,
       selectedModel,
       abortControllerRef.current?.signal,
     );
+
+    const isImageGen = intentEval.needsImage;
 
     let effectiveModelId = selectedModel;
     if (!isImageGen && hasImages && !isVisionCapableModel(selectedModel)) {
@@ -395,8 +384,22 @@ export default function Chat() {
     }
     const usedVisionFallback = effectiveModelId !== selectedModel;
 
+    const initialStatusText = isImageGen
+      ? '🖼️ Generating image...'
+      : intentEval.needsSearch
+      ? '🔎 Searching the web...'
+      : hasImages
+      ? '👁️ Analyzing uploaded image...'
+      : '🧠 Thinking...';
+
     const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: trimmedContent, attachments: pendingAttachments };
-    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', modelName: selectedModelMeta.name };
+    const assistantMessage: Message = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: '',
+      modelName: selectedModelMeta.name,
+      statusText: initialStatusText,
+    };
 
     // Build the API message history (text only) and the current turn (multimodal
     // when the effective model can accept images).
@@ -411,9 +414,8 @@ export default function Chat() {
             ],
           }
         : { role: 'user', content: requestContent };
-    const usesVision = hasImages && isVisionCapableModel(effectiveModelId);
     const allMessages: AiChatMessage[] = [
-      { role: 'system', content: hasImages ? VISION_SYSTEM_PROMPT : Flyer_SYSTEM_PROMPT },
+      { role: 'system', content: hasImages ? buildVisionSystemPrompt(selectedModelMeta.name) : buildFlyerSystemPrompt(selectedModelMeta.name) },
       ...historyMessages,
       currentTurn,
     ];
@@ -540,20 +542,20 @@ export default function Chat() {
           }
         }
 
-        if (!hasImages) {
+        // Web search execution grounded by fast intent evaluator
+        if (!hasImages && intentEval.needsSearch && intentEval.searchQuery) {
           try {
-            const searchEval = await evaluateSmartWebSearch(
-              requestContent,
-              selectedModel,
-              abortControllerRef.current?.signal,
-            );
-            if (searchEval.shouldSearch && searchEval.searchQuery) {
-              setIsSearching(true);
-              const search = await webSearch(searchEval.searchQuery, abortControllerRef.current?.signal);
-              const context = buildSearchContext(search);
-              if (context) {
-                messagesForModel.splice(messagesForModel.length - 1, 0, { role: 'system', content: context });
-              }
+            setIsSearching(true);
+            const search = await webSearch(intentEval.searchQuery, abortControllerRef.current?.signal);
+            const context = buildSearchContext(search);
+            if (context) {
+              messagesForModel.splice(messagesForModel.length - 1, 0, {
+                role: 'system',
+                content: [
+                  `[FAST INTENT CLASSIFIER (${intentEval.fastModelUsed}) TRIGGERED WEB SEARCH FOR QUERY: "${intentEval.searchQuery}"]`,
+                  context
+                ].join('\n\n')
+              });
             }
           } catch (err) {
             if (err instanceof Error && err.name === 'AbortError') throw err;
@@ -592,7 +594,7 @@ export default function Chat() {
             receivedAssistantContent = true;
             const liveContent = sanitizeAssistantText(fullContent) || fullContent;
             setMessages((prev) =>
-              prev.map((m) => (m.id === assistantMessage.id ? { ...m, content: liveContent } : m)),
+              prev.map((m) => (m.id === assistantMessage.id ? { ...m, content: liveContent, statusText: '✍️ Generating response...' } : m)),
             );
           };
 
@@ -610,7 +612,7 @@ export default function Chat() {
               {
                 role: 'system',
                 content: [
-                  Flyer_SYSTEM_PROMPT,
+                  buildFlyerSystemPrompt(selectedModelMeta.name),
                   '',
                   '=== INTERNAL VISION ENGINE ANALYSIS ===',
                   'Our internal vision engine analyzed the user\'s uploaded image(s)/file(s) and produced this detailed visual breakdown:',
@@ -807,35 +809,10 @@ export default function Chat() {
               <h1 className="font-display font-semibold text-base sm:text-lg truncate text-foreground/90">
                 {activeConversationId ? conversations.find((c) => c.id === activeConversationId)?.title || 'Chat' : 'Flyer'}
               </h1>
-              {isLoading && (
-                <motion.div className="flex items-center gap-2" initial={{ opacity: 0, y: -5 }} animate={{ opacity: 1, y: 0 }}>
-                  {isSearching ? (
-                    <>
-                      <motion.span
-                        className="text-sm"
-                        animate={{ rotate: [0, 360] }}
-                        transition={{ duration: 2.4, repeat: Infinity, ease: 'linear' }}
-                      >
-                        🌐
-                      </motion.span>
-                      <span className="text-xs text-primary/90 font-medium">Searching the web…</span>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex gap-1">
-                        {[0, 0.2, 0.4].map((d, i) => (
-                          <motion.span key={i} className="w-1.5 h-1.5 rounded-full bg-primary" animate={{ scale: [1, 1.3, 1], opacity: [0.5, 1, 0.5] }} transition={{ duration: 1, repeat: Infinity, delay: d }} />
-                        ))}
-                      </div>
-                      <span className="text-xs text-primary/80 font-medium">Generating...</span>
-                    </>
-                  )}
-                </motion.div>
-              )}
-              {!isLoading && !isGuest && (
+              {!isGuest && (
                 <span className="text-xs text-muted-foreground/70 truncate block">{selectedModelMeta?.name || 'Default'} · {selectedModelMeta?.kind || 'Chat'}</span>
               )}
-              {isGuest && !isLoading && (
+              {isGuest && (
                 <span className="text-xs text-muted-foreground/60">Guest mode • <a href="/auth" className="text-primary hover:underline">Sign in to save chats</a></span>
               )}
             </div>
@@ -950,6 +927,7 @@ export default function Chat() {
                     attachments={msg.attachments}
                     isStreaming={isLoading && msg.role === 'assistant' && index === messages.length - 1}
                     modelName={msg.modelName || 'AI'}
+                    statusText={msg.statusText}
                     onRegenerate={handleRegenerate}
                     canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}
                     isArenaMode={msg.isArenaMode}

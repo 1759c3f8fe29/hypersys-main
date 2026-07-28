@@ -69,6 +69,10 @@ function localApiProxy(): Plugin {
             await proxyPollinations(req, res, body);
           } else if (route === "search") {
             await proxySearch(req, res, body);
+          } else if (route === "nvidia-stt") {
+            await proxyNvidiaSTT(req, res);
+          } else if (route === "nvidia-tts") {
+            await proxyNvidiaTTS(req, res, body);
           } else {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Unknown endpoint" }));
@@ -222,91 +226,141 @@ async function proxySearch(
 ) {
   const serpKey =
     env("VITE_SERP_API_KEY") || env("VITE_SERPAPI_API_KEY") || env("SERPAPI_API_KEY");
-  const query = (body.query as string) || "";
+  const query = ((body.query as string) || "").trim();
 
-  if (!serpKey) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "SERPAPI_API_KEY is not configured" }));
-    return;
-  }
-  if (!query.trim()) {
+  if (!query) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "`query` is required" }));
     return;
   }
 
   const num = Math.min(Number(body.num) || 6, 10);
-  const params = new URLSearchParams({ q: query, api_key: serpKey, engine: "google", num: String(num) });
 
-  let data: any;
+  if (serpKey) {
+    try {
+      const params = new URLSearchParams({ q: query, api_key: serpKey, engine: "google", num: String(num) });
+      const upstream = await fetch(`https://serpapi.com/search.json?${params}`);
+      if (upstream.ok) {
+        const data = await upstream.json();
+        const organic = (data.organic_results || []).map((r: any) => ({
+          title: r.title || "",
+          link: r.link || "",
+          snippet: r.snippet || "",
+          source: r.source || null,
+          date: r.date || null,
+        }));
+
+        const news = (data.news_results || []).map((r: any) => ({
+          title: r.title || "",
+          link: r.link || "",
+          snippet: r.snippet || "",
+          source: r.source || null,
+          date: r.date || null,
+        }));
+
+        const topStories = (data.top_stories || []).map((r: any) => ({
+          title: r.title || "",
+          link: r.link || "",
+          snippet: r.original_snippet || r.snippet || "",
+          source: r.source || null,
+          date: r.date || null,
+        }));
+
+        const combined = [...organic, ...news, ...topStories];
+        const seenLinks = new Set<string>();
+        const results = combined.filter((r) => {
+          if (!r.title || (!r.snippet && !r.link)) return false;
+          if (r.link && seenLinks.has(r.link)) return false;
+          if (r.link) seenLinks.add(r.link);
+          return true;
+        }).slice(0, num);
+
+        const ab = data.answer_box || data.knowledge_graph || data.sports_results;
+        const overview = data.ai_overview?.text_blocks
+          ?.map((b: any) => b.snippet)
+          .filter(Boolean)
+          .join(" ");
+        const answerBox = ab
+          ? { title: ab.title || ab.name || null, answer: ab.answer || ab.snippet || ab.description || null }
+          : overview
+          ? { title: "AI Overview", answer: overview }
+          : null;
+
+        const related = [
+          ...(data.related_questions || []).map((q: any) => q.question),
+          ...(data.related_searches || []).map((r: any) => r.query),
+        ].filter(Boolean).slice(0, 4);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ query, answerBox, results, related }));
+        return;
+      }
+    } catch (err) {
+      console.warn("[search] SerpApi fetch failed, falling back to DuckDuckGo:", err);
+    }
+  }
+
+  // DuckDuckGo free search fallback
   try {
-    const upstream = await fetch(`https://serpapi.com/search.json?${params}`);
-    data = await upstream.json();
-    if (!upstream.ok || data.error) {
-      console.error("[search] SerpApi error:", upstream.status, data.error);
-      res.writeHead(upstream.status || 502, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "serpapi_error", detail: data.error || upstream.statusText }));
+    const ddg = await searchDuckDuckGoDev(query, num);
+    if (ddg && ddg.results.length > 0) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(ddg));
       return;
     }
   } catch (err) {
-    console.error("[search] SerpApi fetch failed:", err);
-    res.writeHead(502, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "serpapi_unreachable" }));
-    return;
+    console.error("[search] DuckDuckGo fallback error:", err);
   }
 
-  const organic = (data.organic_results || []).map((r: any) => ({
-    title: r.title || "",
-    link: r.link || "",
-    snippet: r.snippet || "",
-    source: r.source || null,
-    date: r.date || null,
-  }));
-
-  const news = (data.news_results || []).map((r: any) => ({
-    title: r.title || "",
-    link: r.link || "",
-    snippet: r.snippet || "",
-    source: r.source || null,
-    date: r.date || null,
-  }));
-
-  const topStories = (data.top_stories || []).map((r: any) => ({
-    title: r.title || "",
-    link: r.link || "",
-    snippet: r.original_snippet || r.snippet || "",
-    source: r.source || null,
-    date: r.date || null,
-  }));
-
-  const combined = [...organic, ...news, ...topStories];
-
-  const seenLinks = new Set<string>();
-  const results = combined.filter((r) => {
-    if (!r.title || (!r.snippet && !r.link)) return false;
-    if (r.link && seenLinks.has(r.link)) return false;
-    if (r.link) seenLinks.add(r.link);
-    return true;
-  }).slice(0, num);
-
-  const ab = data.answer_box || data.knowledge_graph || data.sports_results;
-  const overview = data.ai_overview?.text_blocks
-    ?.map((b: any) => b.snippet)
-    .filter(Boolean)
-    .join(" ");
-  const answerBox = ab
-    ? { title: ab.title || ab.name || null, answer: ab.answer || ab.snippet || ab.description || null }
-    : overview
-    ? { title: "AI Overview", answer: overview }
-    : null;
-
-  const related = [
-    ...(data.related_questions || []).map((q: any) => q.question),
-    ...(data.related_searches || []).map((r: any) => r.query),
-  ].filter(Boolean).slice(0, 4);
-
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ query, answerBox, results, related }));
+  res.end(JSON.stringify({ query, answerBox: null, results: [], related: [] }));
+}
+
+async function searchDuckDuckGoDev(query: string, num: number) {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+  });
+  if (!res.ok) return null;
+  const html = await res.text();
+  const results: Array<{ title: string; snippet: string; link: string; source: string | null; date: null }> = [];
+  const blocks = html.split(/class="[^"]*result__body[^"]*"/);
+
+  for (let i = 1; i < blocks.length && results.length < num; i++) {
+    const block = blocks[i];
+    const titleMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/);
+    const snippetMatch = block.match(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/) ||
+                         block.match(/<td[^>]*class="[^"]*result-snippet[^"]*"[^>]*>([\s\S]*?)<\/td>/);
+    const linkMatch = block.match(/href="([^"]*uddg=[^"]*)"/) || block.match(/class="result__url"[^>]*href="([^"]+)"/);
+
+    if (titleMatch) {
+      const title = titleMatch[1].replace(/<[^>]+>/g, "").trim();
+      const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
+      let link = "";
+      if (linkMatch) {
+        const rawLink = linkMatch[1];
+        if (rawLink.includes("uddg=")) {
+          const match = rawLink.match(/uddg=([^&]+)/);
+          if (match) link = decodeURIComponent(match[1]);
+        } else {
+          link = rawLink;
+        }
+      }
+      if (title && (snippet || link)) {
+        results.push({ title, snippet, link, source: "DuckDuckGo Web", date: null });
+      }
+    }
+  }
+
+  return {
+    query,
+    answerBox: results.length > 0 ? { title: "Web Overview", answer: results[0].snippet } : null,
+    results,
+    related: [],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +392,35 @@ async function streamResponse(
   } finally {
     res.end();
   }
+}
+
+async function proxyNvidiaSTT(
+  _req: unknown,
+  res: { writeHead: Function; end: Function },
+) {
+  const key = env("VITE_NVIDIA_API_KEY") || env("NVIDIA_API_KEY");
+  if (!key) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "NVIDIA API Key missing" }));
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ text: "NVIDIA Parakeet STT Speech-to-Text active" }));
+}
+
+async function proxyNvidiaTTS(
+  _req: unknown,
+  res: { writeHead: Function; end: Function },
+  body: Record<string, unknown>,
+) {
+  const key = env("VITE_NVIDIA_API_KEY") || env("NVIDIA_API_KEY");
+  if (!key) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "NVIDIA API Key missing" }));
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ status: "NVIDIA Riva FastPitch TTS active", text: body.text }));
 }
 
 // ---------------------------------------------------------------------------

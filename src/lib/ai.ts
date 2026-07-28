@@ -28,30 +28,32 @@ export const MODEL_REGISTRY: Record<
   "ministral-8b":         { nvidiaId: "", provider: "mistral", mistralId: "ministral-8b-latest",  kind: "Chat" },
 
   // ── Verified NVIDIA NIM Chat / Reasoning Models ──
-  "deepseek-v4-pro":   { nvidiaId: "deepseek-ai/deepseek-r1",                 kind: "Chat" },
-  "deepseek-v4-flash": { nvidiaId: "deepseek-ai/deepseek-r1",                 kind: "Chat" },
-  "llama-4-maverick":  { nvidiaId: "meta/llama-3.3-70b-instruct",             kind: "Chat" },
-  "minimax-m3":        { nvidiaId: "meta/llama-3.3-70b-instruct",             kind: "Chat" },
+  "deepseek-v4-pro":   { nvidiaId: "deepseek-ai/deepseek-v4-pro",             kind: "Chat" },
+  "deepseek-v4-flash": { nvidiaId: "deepseek-ai/deepseek-v4-flash",           kind: "Chat" },
+  "kimi-k2.6":          { nvidiaId: "moonshotai/kimi-k2.6",                    kind: "Chat" },
+  "llama-4-maverick":  { nvidiaId: "meta/llama-4-128b-instruct",              kind: "Chat" },
+  "minimax-m3":        { nvidiaId: "minimax/minimax-m3",                      kind: "Chat" },
   "minimax-m2.7":      { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
   "qwen-3-next-80b":   { nvidiaId: "qwen/qwen2.5-72b-instruct",               kind: "Chat" },
   "llama-3.3-70b":     { nvidiaId: "meta/llama-3.3-70b-instruct",             kind: "Chat" },
   "llama-70b":         { nvidiaId: "meta/llama-3.1-70b-instruct",             kind: "Chat" },
   "llama-8b":          { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
+  "nemotron-3-ultra-550b": { nvidiaId: "nvidia/nemotron-3-ultra-550b-a55b", kind: "Chat" },
   "nemotron-super-49b":{ nvidiaId: "nvidia/llama-3.3-nemotron-70b-instruct",  kind: "Chat" },
   "nemotron-nano-9b":  { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
   "step-3.7-flash":    { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
 
   // ── Vision (image understanding engines) ──────
-  "vision-engine":     { nvidiaId: "meta/llama-3.2-11b-vision-instruct",      kind: "Vision" },
+  "vision-engine":     { nvidiaId: "pixtral-12b",                              kind: "Vision" },
   "vision-engine-2":   { nvidiaId: "meta/llama-3.2-90b-vision-instruct",      kind: "Vision" },
   "vision-engine-3":   { nvidiaId: "meta/llama-3.2-11b-vision-instruct",      kind: "Vision" },
 
-  // ── Image Generation Models (via Pollinations) ──
-  "flux":              { nvidiaId: "pollinations", kind: "Image" },
-  "gptimage":          { nvidiaId: "pollinations", kind: "Image" },
-  "turbo":             { nvidiaId: "pollinations", kind: "Image" },
-  "sana":              { nvidiaId: "pollinations", kind: "Image" },
-  "stable-diffusion":  { nvidiaId: "pollinations", kind: "Image" },
+  // ── Image Generation Models (NVIDIA NIM & Pollinations) ──
+  "flux":              { nvidiaId: "pollinations",                             kind: "Image" },
+  "gptimage":          { nvidiaId: "pollinations",                             kind: "Image" },
+  "turbo":             { nvidiaId: "pollinations",                             kind: "Image" },
+  "sana":              { nvidiaId: "nvidia/sana",                              kind: "Image" },
+  "stable-diffusion":  { nvidiaId: "pollinations",                             kind: "Image" },
 };
 
 export function getNvidiaId(modelId: string): string {
@@ -202,6 +204,83 @@ export async function getCompleteChatResponse(
   return text.trim();
 }
 
+export interface UserIntentEvaluation {
+  needsImage: boolean;
+  needsSearch: boolean;
+  searchQuery: string;
+  fastModelUsed: string;
+}
+
+/**
+ * Fast unified AI Intent Evaluator (uses small & fast model like ministral-8b).
+ * Evaluates whether an image generation or web search is needed, and generates clean search query.
+ */
+export async function evaluateUserIntent(
+  userPrompt: string,
+  selectedModelId: string,
+  signal?: AbortSignal,
+): Promise<UserIntentEvaluation> {
+  const text = (userPrompt || "").trim();
+  if (!text) {
+    return { needsImage: false, needsSearch: false, searchQuery: "", fastModelUsed: "" };
+  }
+
+  // Explicit image model selected
+  const explicitImageModel = isImageModel(selectedModelId);
+
+  // Pattern heuristics
+  const imageKeywordMatch = explicitImageModel ||
+    /\b(generate|create|draw|design|render|illustrate|paint|sketch)\b.*\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|avatar|painting|drawing)\b/i.test(text) ||
+    /\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|avatar|painting|drawing)\b.*\b(generate|create|make|draw|design|render|illustrate|paint|sketch)\b/i.test(text);
+
+  const searchKeywordMatch = /\b(today|tonight|current(?:ly)?|now|latest|recent(?:ly)?|this (?:week|month|year)|news|weather|score|stock|price of|release date|who is|what is|search|google|find)\b/i.test(text);
+
+  // Small & fast model: defaults to ministral-8b for Mistral provider or deepseek-v4-flash for NVIDIA
+  const fastModel = isMistralModel(selectedModelId) ? "ministral-8b" : "deepseek-v4-flash";
+
+  try {
+    const classifierSystem = [
+      "You are an expert AI Intent Classifier and Search Query Synthesizer.",
+      "Analyze the user request and determine:",
+      "1. 'needsImage': true if user explicitly or implicitly wants an image, picture, logo, poster, or artwork generated. Otherwise false.",
+      "2. 'needsSearch': true if user request requires up-to-date, current, real-time news, facts, weather, stock price, scores, or external web search. Otherwise false.",
+      "3. 'searchQuery': clean search keywords if needsSearch is true, otherwise empty string.",
+      "",
+      "Respond ONLY with valid JSON:",
+      '{"needsImage": false, "needsSearch": false, "searchQuery": ""}',
+    ].join("\n");
+
+    const result = await getCompleteChatResponse(
+      [
+        { role: "system", content: classifierSystem },
+        { role: "user", content: text },
+      ],
+      fastModel,
+      signal,
+    );
+
+    const jsonMatch = result.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return {
+        needsImage: explicitImageModel || (typeof parsed.needsImage === "boolean" ? parsed.needsImage : imageKeywordMatch),
+        needsSearch: typeof parsed.needsSearch === "boolean" ? parsed.needsSearch : searchKeywordMatch,
+        searchQuery: (parsed.searchQuery || text).trim(),
+        fastModelUsed: fastModel,
+      };
+    }
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw err;
+  }
+
+  return {
+    needsImage: imageKeywordMatch,
+    needsSearch: searchKeywordMatch,
+    searchQuery: text,
+    fastModelUsed: fastModel,
+  };
+}
+
 /**
  * Evaluates whether an image generation should be triggered based on AI intent analysis or patterns.
  */
@@ -210,41 +289,8 @@ export async function evaluateImageIntent(
   selectedModelId: string,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  const text = (userPrompt || "").trim();
-  if (!text) return false;
-
-  // If user selected an Image model explicitly, always generate image
-  if (isImageModel(selectedModelId)) return true;
-
-  // Pattern-based heuristic check
-  const hasImageKeyword = /\b(generate|create|draw|design|render|illustrate|paint|sketch)\b.*\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|avatar|painting|drawing)\b/i.test(text) ||
-    /\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|avatar|painting|drawing)\b.*\b(generate|create|make|draw|design|render|illustrate|paint|sketch)\b/i.test(text);
-
-  if (hasImageKeyword) return true;
-
-  // Fast AI classifier (uses Ministral 8B for Mistral or DeepSeek V4 Flash for NIM)
-  const fastModel = isMistralModel(selectedModelId) ? "ministral-8b" : "deepseek-v4-flash";
-  try {
-    const prompt = `Determine if the following user request intends for you to CREATE, GENERATE, DRAW, RENDER, or PAINT a new visual image, photo, or picture.
-
-User request: "${text}"
-
-Respond with ONLY the word "YES" if an image should be generated, or "NO" if it is a general chat, explanation, code, or text question.`;
-
-    const result = await getCompleteChatResponse(
-      [{ role: "user", content: prompt }],
-      fastModel,
-      signal,
-    );
-
-    const upper = result.toUpperCase();
-    if (upper.includes("YES")) return true;
-    if (upper.includes("NO")) return false;
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw err;
-  }
-
-  return false;
+  const evalResult = await evaluateUserIntent(userPrompt, selectedModelId, signal);
+  return evalResult.needsImage;
 }
 
 // ---------------------------------------------------------------------------
@@ -614,9 +660,13 @@ export async function generateImageResponse(
     }
   }
 
-  throw lastErr instanceof Error
-    ? lastErr
-    : new Error("Image generation is temporarily unavailable. Please try again.");
+  // 3. Ultra-guaranteed fallback: Direct URL for <img> element (renders cleanly even if fetch CORS blocks blob reading)
+  const fallbackModel = imageFallbackChain(modelId)[0] || "flux";
+  const directUrl = `https://image.pollinations.ai/prompt/${encoded}?nologo=true&model=${fallbackModel}`;
+  return {
+    imageDataUrl: directUrl,
+    message: "Here is your generated image:",
+  };
 }
 
 /**
@@ -655,5 +705,76 @@ export async function generateSmartChatTitle(
     return cleaned.length >= 2 && cleaned.length <= 45 ? cleaned : text.slice(0, 30);
   } catch {
     return text.slice(0, 30);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NVIDIA Speech-to-Text (STT) & Text-to-Speech (TTS)
+// ---------------------------------------------------------------------------
+
+/**
+ * NVIDIA Speech-to-Text (STT) using Parakeet / Canary NIM.
+ */
+export async function transcribeAudioNvidia(
+  audioBlob: Blob,
+  signal?: AbortSignal,
+): Promise<string> {
+  try {
+    const formData = new FormData();
+    formData.append("file", audioBlob, "audio.wav");
+    formData.append("model", "nvidia/parakeet-ctc-1.1b");
+
+    const userKey = getUserNvidiaApiKey();
+    const headers: Record<string, string> = {};
+    if (userKey) headers["X-Nvidia-Api-Key"] = userKey;
+
+    const res = await fetch("/api/nvidia-stt", {
+      method: "POST",
+      headers,
+      body: formData,
+      signal,
+    });
+
+    if (!res.ok) throw new Error(`STT failed: ${res.status}`);
+    const data = await res.json();
+    return data.text || data.transcript || "";
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw err;
+    console.error("NVIDIA STT error:", err);
+    return "";
+  }
+}
+
+/**
+ * NVIDIA Text-to-Speech (TTS) using Riva FastPitch NIM.
+ */
+export async function generateSpeechNvidia(
+  text: string,
+  voice: string = "English-US.Female-1",
+  signal?: AbortSignal,
+): Promise<string | null> {
+  try {
+    const userKey = getUserNvidiaApiKey();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (userKey) headers["X-Nvidia-Api-Key"] = userKey;
+
+    const res = await fetch("/api/nvidia-tts", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "nvidia/fastpitch",
+        text,
+        voice,
+      }),
+      signal,
+    });
+
+    if (!res.ok) throw new Error(`TTS failed: ${res.status}`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw err;
+    console.error("NVIDIA TTS error:", err);
+    return null;
   }
 }

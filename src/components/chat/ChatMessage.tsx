@@ -22,6 +22,7 @@ interface ChatMessageProps {
   attachments?: ChatAttachment[];
   imageUrl?: string;
   modelName?: string;
+  statusText?: string;
   onRegenerate?: () => void;
   canRegenerate?: boolean;
   isArenaMode?: boolean;
@@ -146,7 +147,7 @@ const MARKDOWN_COMPONENTS: any = {
   },
 };
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", onRegenerate, canRegenerate, isArenaMode, arenaResponses }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, onRegenerate, canRegenerate, isArenaMode, arenaResponses }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedArenaIdx, setCopiedArenaIdx] = useState<number | null>(null);
@@ -301,7 +302,9 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                       />
                     ))}
                   </div>
-                  <span className="text-xs text-primary/80 font-medium">Generating response...</span>
+                  <span className="text-xs text-primary/90 font-medium tracking-wide">
+                    {statusText || "Generating response..."}
+                  </span>
                 </div>
               ) : null}
 

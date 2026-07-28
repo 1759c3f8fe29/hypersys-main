@@ -28,6 +28,8 @@ export const AI_MODELS: AIModel[] = [
   { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', label: 'DeepSeek V4', description: 'DeepSeek flagship reasoning (NVIDIA NIM)', emoji: '🧠', kind: 'Chat', featured: true },
   { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', label: 'DeepSeek V4 Flash', description: 'Fast DeepSeek V4 reasoning (NVIDIA NIM)', emoji: '⚡', kind: 'Chat', featured: true },
   { id: 'llama-4-maverick', name: 'Llama 4 Maverick', label: 'Llama 4', description: 'Meta Llama 4 128-expert MoE (NVIDIA NIM)', emoji: '🦅', kind: 'Chat', featured: true },
+  { id: 'kimi-k2.6', name: 'Kimi K2.6', label: 'Kimi K2.6', description: 'Moonshot AI Kimi K2.6 reasoning (NVIDIA NIM)', emoji: '🌙', kind: 'Chat', featured: true },
+  { id: 'nemotron-3-ultra-550b', name: 'Nemotron 3 Ultra 550B', label: 'Nemotron 3 Ultra', description: 'NVIDIA 550B flagship reasoning (NVIDIA NIM)', emoji: '🔱', kind: 'Chat', featured: true },
   { id: 'minimax-m3', name: 'MiniMax M3', label: 'MiniMax M3', description: 'MiniMax flagship chat model (NVIDIA NIM)', emoji: '🚀', kind: 'Chat', featured: true },
   { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', label: 'Llama 3.3 70B', description: 'Meta flagship instruct model (NVIDIA NIM)', emoji: '🐘', kind: 'Chat', featured: true },
   { id: 'pixtral-12b', name: 'Pixtral 12B', label: 'Pixtral 12B', description: 'Multimodal vision & chat (Mistral API)', emoji: '👁️', kind: 'Chat', featured: true },
