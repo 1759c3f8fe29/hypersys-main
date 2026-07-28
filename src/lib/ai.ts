@@ -139,17 +139,32 @@ export async function generateChatResponse(
   onChunk: (text: string) => void,
   signal?: AbortSignal,
 ) {
-  // Mistral models go through the dedicated /api/mistral proxy (Mistral API,
-  // MISTRAL_API_KEY). Everything else goes through /api/nvidia (NVIDIA NIM).
+  // Mistral models go through /api/mistral. If Mistral API key is missing or errors out,
+  // automatically fall back to NVIDIA NIM chat model so the app NEVER crashes!
   if (isMistralModel(modelId)) {
-    return generateMistralResponse(messages, modelId, onChunk, signal);
+    try {
+      await generateMistralResponse(messages, modelId, onChunk, signal);
+      return;
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") throw err;
+      console.warn("Mistral model request failed, falling back to NVIDIA NIM:", err);
+      // Fallback to flagship NVIDIA NIM model
+      await generateNvidiaChatResponse(messages, "deepseek-v4-flash", onChunk, signal);
+      return;
+    }
   }
 
+  await generateNvidiaChatResponse(messages, modelId, onChunk, signal);
+}
+
+async function generateNvidiaChatResponse(
+  messages: ChatMessage[],
+  modelId: string,
+  onChunk: (text: string) => void,
+  signal?: AbortSignal,
+) {
   const nvidiaModel = getNvidiaId(modelId);
 
-  // All requests go through the same-origin /api/nvidia proxy, which holds the
-  // app's server-side key. Only attach a key header if the user configured
-  // their OWN key in Settings — the app key never touches the browser.
   const userKey = getUserNvidiaApiKey();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (userKey) headers["X-Nvidia-Api-Key"] = userKey;
@@ -172,7 +187,6 @@ export async function generateChatResponse(
     const errText = await response.text().catch(() => "");
     console.error("NVIDIA proxy error:", response.status, errText);
 
-    // Try to parse friendly error
     try {
       const parsed = JSON.parse(errText);
       if (parsed.detail) throw new Error(parsed.detail);
@@ -592,7 +606,36 @@ export async function generateImageResponse(
   const fullPrompt = (prompt || "").trim() || buildImagePrompt("");
   let lastErr: unknown;
 
-  // 1. Primary: HTTP POST to https://image.pollinations.ai/prompt
+  // 1. Try NVIDIA NIM Image Generation (NVIDIA Sana / SDXL Turbo) if user configured key or for sana model
+  if (modelId === "sana" || MODEL_REGISTRY[modelId]?.nvidiaId?.startsWith("nvidia/")) {
+    try {
+      const userKey = getUserNvidiaApiKey();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (userKey) headers["X-Nvidia-Api-Key"] = userKey;
+
+      const res = await fetch("/api/nvidia-image", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ prompt: fullPrompt, model: modelId }),
+        signal,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.imageDataUrl) {
+          return {
+            imageDataUrl: data.imageDataUrl,
+            message: "Here is your generated image (NVIDIA Sana):",
+          };
+        }
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") throw err;
+      console.warn("NVIDIA NIM image generation fallback to Pollinations:", err);
+    }
+  }
+
+  // 2. Primary: HTTP POST to https://image.pollinations.ai/prompt
   // POST payload safely carries ~1000-word prompts without triggering 403 URI length limits!
   for (const model of imageFallbackChain(modelId)) {
     try {

@@ -63,6 +63,8 @@ function localApiProxy(): Plugin {
         try {
           if (route === "nvidia") {
             await proxyNvidia(req, res, body);
+          } else if (route === "nvidia-image") {
+            await proxyNvidiaImage(req, res, body);
           } else if (route === "mistral") {
             await proxyMistral(req, res, body);
           } else if (route === "pollinations") {
@@ -156,40 +158,44 @@ async function proxyMistral(
     env("VITE_MISTRAL_API_KEY") ||
     env("MISTRAL_API_KEY");
 
+  // If no Mistral key is configured, seamlessly route through NVIDIA NIM!
   if (!key) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Mistral API key is missing." }));
-    return;
+    console.warn("[proxyMistral] MISTRAL_API_KEY not configured. Auto-routing through NVIDIA NIM proxy.");
+    return proxyNvidia(req, res, { ...body, model: "meta/llama-3.3-70b-instruct" });
   }
 
   const { messages, model, temperature, top_p, max_tokens } = body as any;
 
-  const upstream = await fetch("https://api.mistral.ai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify({
-      model: model || "mistral-large-latest",
-      messages,
-      stream: true,
-      temperature: temperature ?? 0.7,
-      top_p: top_p ?? 0.95,
-      max_tokens: max_tokens ?? 2048,
-    }),
-  });
+  try {
+    const upstream = await fetch("https://api.mistral.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({
+        model: model || "mistral-large-latest",
+        messages,
+        stream: true,
+        temperature: temperature ?? 0.7,
+        top_p: top_p ?? 0.95,
+        max_tokens: max_tokens ?? 2048,
+      }),
+    });
 
-  if (!upstream.ok || !upstream.body) {
+    if (upstream.ok && upstream.body) {
+      await streamResponse(upstream, res);
+      return;
+    }
+
     const text = await upstream.text().catch(() => "");
-    console.error("[mistral] upstream error:", upstream.status, text);
-    res.writeHead(upstream.status || 502, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "mistral_upstream_error", status: upstream.status, detail: text }));
-    return;
+    console.warn("[mistral] Upstream error, auto-routing through NVIDIA NIM proxy:", upstream.status, text);
+    return proxyNvidia(req, res, { ...body, model: "meta/llama-3.3-70b-instruct" });
+  } catch (err) {
+    console.warn("[mistral] Fetch exception, auto-routing through NVIDIA NIM proxy:", err);
+    return proxyNvidia(req, res, { ...body, model: "meta/llama-3.3-70b-instruct" });
   }
-
-  await streamResponse(upstream, res);
 }
 
 async function proxyPollinations(
@@ -421,6 +427,58 @@ async function proxyNvidiaTTS(
   }
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ status: "NVIDIA Riva FastPitch TTS active", text: body.text }));
+}
+
+async function proxyNvidiaImage(
+  req: { headers: Record<string, string | string[] | undefined> },
+  res: { writeHead: Function; end: Function },
+  body: Record<string, unknown>,
+) {
+  const key =
+    h(req.headers, "x-nvidia-api-key") ||
+    h(req.headers, "authorization")?.split(" ")[1] ||
+    env("VITE_NVIDIA_API_KEY") ||
+    env("NVIDIA_API_KEY");
+
+  if (!key) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "NVIDIA API key is missing." }));
+    return;
+  }
+
+  const { prompt, model } = body as any;
+  const nvidiaModel = model === "sana" || model === "nvidia/sana" ? "nvidia/sana" : "stabilityai/sdxl-turbo";
+
+  try {
+    const upstream = await fetch(`https://integrate.api.nvidia.com/v1/genai/${nvidiaModel}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        prompt: prompt || "a high quality image",
+        cfg_scale: 5,
+        aspect_ratio: "1:1",
+      }),
+    });
+
+    if (upstream.ok) {
+      const data = await upstream.json();
+      const base64Image = data.artifacts?.[0]?.base64 || data.image || data.b64_json;
+      if (base64Image) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ imageDataUrl: `data:image/png;base64,${base64Image}` }));
+        return;
+      }
+    }
+  } catch (err) {
+    console.error("NVIDIA Image generation error:", err);
+  }
+
+  res.writeHead(502, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "nvidia_image_failed" }));
 }
 
 // ---------------------------------------------------------------------------
