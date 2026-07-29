@@ -175,14 +175,17 @@ async function proxyMistral(
     env("VITE_MISTRAL_API_KEY") ||
     env("MISTRAL_API_KEY");
 
-  // If no Mistral key is configured, seamlessly route through NVIDIA NIM!
   if (!key) {
-    console.warn("[proxyMistral] MISTRAL_API_KEY not configured. Auto-routing through NVIDIA NIM proxy.");
-    return proxyNvidia(req, res, { ...body, model: "meta/llama-3.3-70b-instruct" });
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "MISTRAL_API_KEY is not configured" }));
+    return;
   }
 
   const { messages, model, temperature, top_p, max_tokens } = body as any;
+  const requestedModel = model || "mistral-large-latest";
 
+  // Serve exactly the model that was asked for — mirrors api/mistral.js. Never
+  // re-route to another provider, which would misattribute the reply.
   try {
     const upstream = await fetch("https://api.mistral.ai/v1/chat/completions", {
       method: "POST",
@@ -192,7 +195,7 @@ async function proxyMistral(
         Accept: "text/event-stream",
       },
       body: JSON.stringify({
-        model: model || "mistral-large-latest",
+        model: requestedModel,
         messages,
         stream: true,
         temperature: temperature ?? 0.7,
@@ -207,11 +210,13 @@ async function proxyMistral(
     }
 
     const text = await upstream.text().catch(() => "");
-    console.warn("[mistral] Upstream error, auto-routing through NVIDIA NIM proxy:", upstream.status, text);
-    return proxyNvidia(req, res, { ...body, model: "meta/llama-3.3-70b-instruct" });
+    console.error("[mistral] upstream error:", upstream.status, text);
+    res.writeHead(upstream.status || 502, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "mistral_upstream_error", model: requestedModel, status: upstream.status, detail: text }));
   } catch (err) {
-    console.warn("[mistral] Fetch exception, auto-routing through NVIDIA NIM proxy:", err);
-    return proxyNvidia(req, res, { ...body, model: "meta/llama-3.3-70b-instruct" });
+    console.error("[mistral] fetch exception:", err);
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "mistral_upstream_error", model: requestedModel, detail: String(err) }));
   }
 }
 
