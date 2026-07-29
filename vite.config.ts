@@ -119,50 +119,45 @@ async function proxyNvidia(
     return;
   }
 
-  const requestedModel = model || "meta/llama-3.1-70b-instruct";
-  const candidateModels = [
-    requestedModel,
-    "meta/llama-3.1-70b-instruct",
-    "meta/llama-3.1-8b-instruct",
-    "nvidia/llama-3.3-nemotron-super-49b-v1",
-    "stepfun-ai/step-3.7-flash"
-  ];
-  const modelsToTry = [...new Set(candidateModels)];
-
-  let upstream: Response | null = null;
-  for (const mId of modelsToTry) {
-    try {
-      upstream = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`,
-          Accept: "text/event-stream",
-        },
-        body: JSON.stringify({
-          model: mId,
-          messages,
-          stream: true,
-          temperature: temperature ?? 0.7,
-          top_p: top_p ?? 0.95,
-          max_tokens: max_tokens ?? 2048,
-        }),
-      });
-
-      if (upstream.ok && upstream.body) {
-        break;
-      }
-      console.warn(`[nvidia] Model ${mId} status ${upstream.status}, trying fallback...`);
-    } catch (err) {
-      console.warn(`[nvidia] Model ${mId} fetch error:`, err);
-    }
+  if (!model) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "`model` is required" }));
+    return;
   }
 
-  if (!upstream || !upstream.ok || !upstream.body) {
-    const text = upstream ? await upstream.text().catch(() => "") : "";
-    console.error("[nvidia] upstream error:", upstream?.status, text);
-    res.writeHead(upstream?.status || 502, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "nvidia_upstream_error", status: upstream?.status, detail: text }));
+  // Serve exactly the model that was asked for — mirrors api/nvidia.js.
+  // Substituting another model on failure used to mask outages and silently
+  // answer with the wrong model.
+  let upstream: Response | null = null;
+  try {
+    upstream = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: true,
+        temperature: temperature ?? 0.7,
+        top_p: top_p ?? 0.95,
+        max_tokens: max_tokens ?? 2048,
+      }),
+    });
+  } catch (err) {
+    console.error(`[nvidia] Model ${model} fetch error:`, err);
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "nvidia_upstream_error", model, detail: String(err) }));
+    return;
+  }
+
+  if (!upstream.ok || !upstream.body) {
+    const text = await upstream.text().catch(() => "");
+    console.error("[nvidia] upstream error:", upstream.status, text);
+    res.writeHead(upstream.status || 502, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "nvidia_upstream_error", model, status: upstream.status, detail: text }));
     return;
   }
 

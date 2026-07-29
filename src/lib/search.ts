@@ -29,7 +29,7 @@ const LOOKUP_INTENT = /\b(who (?:is|are|won)|what (?:is|are) the (?:latest|curre
 // Phrases that clearly do NOT need the web (creative / self-referential / code).
 const NON_FACTUAL = /\b(write|compose|generate|create|draft|imagine|story|poem|joke|rewrite|refactor|debug|translate|summari[sz]e this|explain this code)\b/i;
 
-import { getCompleteChatResponse, isMistralModel } from "@/lib/ai";
+import { getCompleteChatResponse } from "@/lib/ai";
 
 export interface SmartSearchEvaluation {
   shouldSearch: boolean;

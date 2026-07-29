@@ -139,19 +139,12 @@ export async function generateChatResponse(
   onChunk: (text: string) => void,
   signal?: AbortSignal,
 ) {
-  // Mistral models go through /api/mistral. If Mistral API key is missing or errors out,
-  // automatically fall back to NVIDIA NIM chat model so the app NEVER crashes!
+  // Mistral models go through /api/mistral, NIM models through /api/nvidia.
+  // A failure surfaces as an error rather than being answered by a different
+  // model — a silent substitution hides outages and misattributes the reply.
   if (isMistralModel(modelId)) {
-    try {
-      await generateMistralResponse(messages, modelId, onChunk, signal);
-      return;
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") throw err;
-      console.warn("Mistral model request failed, falling back to NVIDIA NIM:", err);
-      // Fallback to flagship NVIDIA NIM model
-      await generateNvidiaChatResponse(messages, "deepseek-v4-flash", onChunk, signal);
-      return;
-    }
+    await generateMistralResponse(messages, modelId, onChunk, signal);
+    return;
   }
 
   await generateNvidiaChatResponse(messages, modelId, onChunk, signal);

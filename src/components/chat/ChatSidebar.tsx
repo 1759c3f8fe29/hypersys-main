@@ -20,18 +20,18 @@ export interface AIModel {
 }
 
 // NOTE: Every id here maps 1:1 to a verified-working entry in MODEL_REGISTRY
-// (src/lib/ai.ts). Models that NVIDIA NIM returns 404/DEGRADED for — or that
+// (src/lib/ai.ts). Models tha returns 404/DEGRADED for — or that
 // hang — were removed so the picker never offers a model that fails to fetch.
 export const AI_MODELS: AIModel[] = [
   // ── Featured Chat / Reasoning Models ──────────
-  { id: 'mistral-large-latest', name: 'Flyer AI', label: 'Mistral Large', description: 'Fast flagship chat & vision (Default - Mistral API)', emoji: '🧬', kind: 'Chat', featured: true },
-  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', label: 'DeepSeek V4', description: 'DeepSeek flagship reasoning (NVIDIA NIM)', emoji: '🧠', kind: 'Chat', featured: true },
-  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', label: 'DeepSeek V4 Flash', description: 'Fast DeepSeek V4 reasoning (NVIDIA NIM)', emoji: '⚡', kind: 'Chat', featured: true },
-  { id: 'llama-4-maverick', name: 'Llama 4 Maverick', label: 'Llama 4', description: 'Meta Llama 4 128-expert MoE (NVIDIA NIM)', emoji: '🦅', kind: 'Chat', featured: true },
-  { id: 'kimi-k2.6', name: 'Kimi K2.6', label: 'Kimi K2.6', description: 'Moonshot AI Kimi K2.6 reasoning (NVIDIA NIM)', emoji: '🌙', kind: 'Chat', featured: true },
-  { id: 'nemotron-3-ultra-550b', name: 'Nemotron 3 Ultra 550B', label: 'Nemotron 3 Ultra', description: 'NVIDIA 550B flagship reasoning (NVIDIA NIM)', emoji: '🔱', kind: 'Chat', featured: true },
-  { id: 'minimax-m3', name: 'MiniMax M3', label: 'MiniMax M3', description: 'MiniMax flagship chat model (NVIDIA NIM)', emoji: '🚀', kind: 'Chat', featured: true },
-  { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', label: 'Llama 3.3 70B', description: 'Meta flagship instruct model (NVIDIA NIM)', emoji: '🐘', kind: 'Chat', featured: true },
+  { id: 'deepseek-v4-flash', name: 'Flyer AI', label: 'Flyer AI', description: 'Fast DeepSeek V4 reasoning (Default )', emoji: '⚡', kind: 'Chat', featured: true },
+  { id: 'mistral-large-latest', name: 'Mistral Large', label: 'Mistral Large', description: 'Fast flagship chat & vision (Mistral API)', emoji: '🧬', kind: 'Chat', featured: true },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', label: 'DeepSeek V4', description: 'DeepSeek flagship reasoning)', emoji: '🧠', kind: 'Chat', featured: true },
+  { id: 'llama-4-maverick', name: 'Llama 4 Maverick', label: 'Llama 4', description: 'Meta Llama 4 128-expert MoE)', emoji: '🦅', kind: 'Chat', featured: true },
+  { id: 'kimi-k2.6', name: 'Kimi K2.6', label: 'Kimi K2.6', description: 'Moonshot AI Kimi K2.6 reasoning)', emoji: '🌙', kind: 'Chat', featured: true },
+  { id: 'nemotron-3-ultra-550b', name: 'Nemotron 3 Ultra 550B', label: 'Nemotron 3 Ultra', description: 'NVIDIA 550B flagship reasoning)', emoji: '🔱', kind: 'Chat', featured: true },
+  { id: 'minimax-m3', name: 'MiniMax M3', label: 'MiniMax M3', description: 'MiniMax flagship chat model)', emoji: '🚀', kind: 'Chat', featured: true },
+  { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', label: 'Llama 3.3 70B', description: 'Meta flagship instruct model)', emoji: '🐘', kind: 'Chat', featured: true },
   { id: 'pixtral-12b', name: 'Pixtral 12B', label: 'Pixtral 12B', description: 'Multimodal vision & chat (Mistral API)', emoji: '👁️', kind: 'Chat', featured: true },
   { id: 'codestral-latest', name: 'Codestral', label: 'Codestral', description: 'Code & programming specialist (Mistral API)', emoji: '💻', kind: 'Chat', featured: true },
 
@@ -40,16 +40,16 @@ export const AI_MODELS: AIModel[] = [
   { id: 'mistral-small', name: 'Mistral Small', label: 'Mistral Small', description: 'Fast lightweight Mistral (Mistral API)', emoji: '🥖', kind: 'Chat', featured: false },
   { id: 'devstral-latest', name: 'Devstral', label: 'Devstral', description: 'Developer AI model (Mistral API)', emoji: '🛠️', kind: 'Chat', featured: false },
   { id: 'ministral-8b', name: 'Ministral 8B', label: 'Ministral 8B', description: 'Edge AI chat model (Mistral API)', emoji: '📱', kind: 'Chat', featured: false },
-  { id: 'qwen-3-next-80b', name: 'Qwen 3 Next 80B', label: 'Qwen 3 80B', description: 'Qwen 3 Next generation reasoning (NVIDIA NIM)', emoji: '👑', kind: 'Chat', featured: false },
-  { id: 'nemotron-super-49b', name: 'Nemotron Super 49B', label: 'Nemotron 49B', description: 'NVIDIA mid-tier reasoning (NVIDIA NIM)', emoji: '🦁', kind: 'Chat', featured: false },
-  { id: 'llama-70b', name: 'Llama 3.1 70B', label: 'Llama 70B', description: 'Meta 3.1 instruct model (NVIDIA NIM)', emoji: '🐘', kind: 'Chat', featured: false },
-  { id: 'minimax-m2.7', name: 'MiniMax M2.7', label: 'MiniMax M2.7', description: 'MiniMax mid-tier chat model (NVIDIA NIM)', emoji: '✨', kind: 'Chat', featured: false },
-  { id: 'llama-8b', name: 'Llama 3.1 8B', label: 'Llama 8B', description: 'Fast, lightweight model (NVIDIA NIM)', emoji: '🦙', kind: 'Chat', featured: false },
-  { id: 'nemotron-nano-9b', name: 'Nemotron Nano 9B', label: 'Nemotron Nano', description: 'Compact NVIDIA reasoning (NVIDIA NIM)', emoji: '🔱', kind: 'Chat', featured: false },
-  { id: 'step-3.7-flash', name: 'Step 3.7 Flash', label: 'Step 3.7', description: 'StepFun fast reasoning (NVIDIA NIM)', emoji: '🌀', kind: 'Chat', featured: false },
+  { id: 'qwen-3-next-80b', name: 'Qwen 3 Next 80B', label: 'Qwen 3 80B', description: 'Qwen 3 Next generation reasoning)', emoji: '👑', kind: 'Chat', featured: false },
+  { id: 'nemotron-super-49b', name: 'Nemotron Super 49B', label: 'Nemotron 49B', description: 'NVIDIA mid-tier reasoning)', emoji: '🦁', kind: 'Chat', featured: false },
+  { id: 'llama-70b', name: 'Llama 3.1 70B', label: 'Llama 70B', description: 'Meta 3.1 instruct model)', emoji: '🐘', kind: 'Chat', featured: false },
+  { id: 'minimax-m2.7', name: 'MiniMax M2.7', label: 'MiniMax M2.7', description: 'MiniMax mid-tier chat model)', emoji: '✨', kind: 'Chat', featured: false },
+  { id: 'llama-8b', name: 'Llama 3.1 8B', label: 'Llama 8B', description: 'Fast, lightweight model)', emoji: '🦙', kind: 'Chat', featured: false },
+  { id: 'nemotron-nano-9b', name: 'Nemotron Nano 9B', label: 'Nemotron Nano', description: 'Compact NVIDIA reasoning)', emoji: '🔱', kind: 'Chat', featured: false },
+  { id: 'step-3.7-flash', name: 'Step 3.7 Flash', label: 'Step 3.7', description: 'StepFun fast reasoning)', emoji: '🌀', kind: 'Chat', featured: false },
 
-  // ── Image Generation Models (NVIDIA NIM & Pollinations) ──
-  { id: 'sana', name: 'NVIDIA Sana', label: 'NVIDIA Sana', description: 'Fast, crisp flagship NVIDIA NIM diffusion engine', emoji: '✨', kind: 'Image', featured: true },
+  // ── Image Generation Models & Pollinations) ──
+  { id: 'sana', name: 'NVIDIA Sana', label: 'NVIDIA Sana', description: 'Fast, crisp flagshi diffusion engine', emoji: '✨', kind: 'Image', featured: true },
   { id: 'flux', name: 'FLUX', label: 'FLUX', description: 'Highest-quality photorealistic images', emoji: '🖼️', kind: 'Image', featured: true },
   { id: 'gptimage', name: 'GPT Image', label: 'GPT Image', description: 'Newest ChatGPT-style generation', emoji: '🎨', kind: 'Image', featured: true },
   { id: 'turbo', name: 'FLUX Turbo', label: 'Turbo', description: 'Fastest image generation', emoji: '⚡', kind: 'Image', featured: false },
@@ -366,7 +366,7 @@ export default function ChatSidebar({
               Configure API Keys
             </DialogTitle>
             <DialogDescription className="text-muted-foreground/80 text-xs">
-              Provide your own API keys for NVIDIA NIM and Mistral AI. These keys are stored safely on your device and never sent to external servers other than the API proxy endpoints.
+              Provide your own API keys fo and Mistral AI. These keys are stored safely on your device and never sent to external servers other than the API proxy endpoints.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-4">

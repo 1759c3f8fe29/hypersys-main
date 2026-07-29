@@ -299,7 +299,7 @@ export default function Chat() {
   const [statusText, setStatusText] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
-  const [selectedModel, setSelectedModel] = useState('mistral-large-latest');
+  const [selectedModel, setSelectedModel] = useState('deepseek-v4-flash');
   
   // Arena Mode state
   const [isArenaMode, setIsArenaMode] = useState(false);
