@@ -53,8 +53,9 @@ export async function evaluateSmartWebSearch(
   // Fast pattern heuristic check
   const heuristicMatch = shouldWebSearch(text);
 
-  // Fast AI classifier (Ministral 8B for Mistral or DeepSeek V4 Flash for NIM)
-  const fastModel = isMistralModel(chatModelId) ? "ministral-8b" : "deepseek-v4-flash";
+  // Classification always runs on Ministral 8B via the Mistral API — see the
+  // matching note in evaluateUserIntent (src/lib/ai.ts).
+  const fastModel = "ministral-8b";
 
   try {
     const systemPrompt = [

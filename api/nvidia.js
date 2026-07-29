@@ -26,50 +26,41 @@ export default async function handler(req, res) {
     return;
   }
 
-  const requestedModel = model || "meta/llama-3.1-70b-instruct";
-  const candidateModels = [
-    requestedModel,
-    "meta/llama-3.1-70b-instruct",
-    "meta/llama-3.1-8b-instruct",
-    "nvidia/llama-3.3-nemotron-super-49b-v1",
-    "stepfun-ai/step-3.7-flash"
-  ];
-  // Deduplicate preserving order
-  const modelsToTry = [...new Set(candidateModels)];
+  if (!model) {
+    res.status(400).json({ error: "`model` is required" });
+    return;
+  }
 
+  // Serve exactly the model that was asked for. Substituting a different model
+  // on failure used to mask outages and answer with the wrong model entirely.
   let upstream = null;
-  for (const mId of modelsToTry) {
-    try {
-      upstream = await fetch(NVIDIA_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`,
-          Accept: "text/event-stream",
-        },
-        body: JSON.stringify({
-          model: mId,
-          messages,
-          stream: true,
-          temperature: temperature ?? 0.7,
-          top_p: top_p ?? 0.95,
-          max_tokens: max_tokens ?? 2048,
-        }),
-      });
-
-      if (upstream.ok && upstream.body) {
-        break;
-      }
-      console.warn(`NVIDIA NIM model ${mId} returned status ${upstream.status}, trying fallback...`);
-    } catch (e) {
-      console.warn(`NVIDIA NIM model ${mId} fetch failed:`, e);
-    }
+  try {
+    upstream = await fetch(NVIDIA_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: true,
+        temperature: temperature ?? 0.7,
+        top_p: top_p ?? 0.95,
+        max_tokens: max_tokens ?? 2048,
+      }),
+    });
+  } catch (e) {
+    console.error(`NVIDIA NIM model ${model} fetch failed:`, e);
+    res.status(502).json({ error: "nvidia_upstream_error", model, detail: String(e) });
+    return;
   }
 
   if (!upstream.ok || !upstream.body) {
     const text = await upstream.text().catch(() => "");
     console.error("NVIDIA upstream error:", upstream.status, text);
-    res.status(upstream.status || 502).json({ error: "nvidia_upstream_error", status: upstream.status });
+    res.status(upstream.status || 502).json({ error: "nvidia_upstream_error", model, status: upstream.status, detail: text });
     return;
   }
 

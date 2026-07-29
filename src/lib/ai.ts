@@ -249,8 +249,10 @@ export async function evaluateUserIntent(
 
   const searchKeywordMatch = /\b(today|tonight|current(?:ly)?|now|latest|recent(?:ly)?|this (?:week|month|year)|news|weather|score|stock|price of|release date|who is|what is|search|google|find)\b/i.test(text);
 
-  // Small & fast model: defaults to ministral-8b for Mistral provider or deepseek-v4-flash for NVIDIA
-  const fastModel = isMistralModel(selectedModelId) ? "ministral-8b" : "deepseek-v4-flash";
+  // Classification always runs on Ministral 8B via the Mistral API. It returns
+  // plain JSON in `content`, unlike the NIM reasoning models which spend their
+  // output on `reasoning_content` and leave the classifier with nothing to parse.
+  const fastModel = "ministral-8b";
 
   try {
     const classifierSystem = [
@@ -397,6 +399,8 @@ async function pumpOpenAiStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let reasoning = "";
+  let sawContent = false;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -415,13 +419,26 @@ async function pumpOpenAiStream(
 
       try {
         const parsed = JSON.parse(payload);
-        const delta = parsed.choices?.[0]?.delta?.content;
-        if (delta) onChunk(delta);
+        const delta = parsed.choices?.[0]?.delta;
+        // Reasoning models (deepseek-v4-*) stream their chain of thought in
+        // `reasoning_content` and the answer in `content`. Emit content when it
+        // exists; only fall back to reasoning when a turn produced nothing else,
+        // so a thinking-only response is never silently empty.
+        if (delta?.content) {
+          sawContent = true;
+          onChunk(delta.content);
+        } else if (delta?.reasoning_content) {
+          reasoning += delta.reasoning_content;
+        }
       } catch {
         // ignore JSON parse errors for incomplete chunks
       }
     }
   }
+
+  // Some reasoning models spend their whole budget in `reasoning_content` and
+  // never emit `content`. Surface the thinking rather than an empty answer.
+  if (!sawContent && reasoning) onChunk(reasoning);
 }
 
 function friendlyHttpError(status: number, providerLabel: string): string {
