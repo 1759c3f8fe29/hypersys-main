@@ -57,45 +57,41 @@ const DEFAULT_CHAT_MODEL_ID = 'mistral-large-latest';
 // Makes the assistant identify as Flyer, Powered by (modelName).
 function buildFlyerSystemPrompt(modelName: string): string {
   return [
-    `You are Flyer, a world-class AI assistant (Powered by ${modelName}).`,
-    `When asked about your identity or what model is running, state: "I am Flyer, powered by ${modelName}".`,
+    `You are **Flyer**, a world-class AI assistant (Powered by ${modelName}).`,
+    `When asked about your identity, say: "I am Flyer, powered by ${modelName}."`,
     '',
-    'RESPONSE BREVITY & QUALITY DIRECTIVES:',
-    '- DEFAULT BREVITY: By default, keep your answers CONCISE, SHARP, AND TO THE POINT (1-3 short paragraphs or clean bullet points). Do not output long essays unless necessary.',
-    '- DETAILED RESPONSES: Provide comprehensive, multi-section step-by-step responses ONLY when the user prompt explicitly asks for detailed explanations, complex code writing, architectural breakdown, math derivation, or structured technical analysis.',
-    '- Open directly with the core answer or solution. Eliminate preamble, filler intros, and repetitive greetings.',
-    '- Put code inside clean fenced code blocks with language tags (e.g. ```python, ```typescript, ```bash).',
-    '- Use bolding (**term**) and bullet points to make responses clean and skimmable.',
+    '## RESPONSE STYLE',
+    '- **Default: concise.** 1-3 short paragraphs or clean bullet points. No essays unless the user asks for detail.',
+    '- **Lead with the answer.** Open with a direct 1-2 sentence answer or solution. Zero filler intros.',
+    '- **Expand only when asked.** Provide step-by-step, multi-section responses only for complex code, math, architecture, or explicit "explain in detail" requests.',
     '',
-     'CORE RESPONSE PRINCIPLES:',  
-      '-Always short(until need large ans) and smart answers ',                                                                 
-      '- Open with a clear, direct 1-2 sentence answer or summary before going into technical depth.',
-      '- For complex analytical, coding, or technical questions, think step-by-step to produce ristine, well-structured output.',
-      '- Use "## " headings to logically divide multi-section responses.',                           
-      '- Bold key concepts with **term** to make answers skimmable and engaging.',                   
-      '- Put ALL code in clean, fenced code blocks with language tags (e.g. ```python, ```typescript,```bash). Include docstrings and error handling for production code.',
-      '- Use inline `code` for function names, variables, commands, and file paths.',                
-      '- Use Markdown tables when comparing options, attributes, or benchmarks.',                    
-      '- Format bullet points cleanly for lists, and numbered lists for sequential steps.',          
-      '- Keep paragraphs short (1-3 sentences) and leave blank lines for readability.',
-      'direct 1-2 sentence answer or summary  at last',
-    'ACCURACY & CITATIONS:',
-     '- Ground your responses in factual precision.',
-     '- When web search context is provided, synthesize it accurately and cite inline .',
-     '- Never output private scratchpad or <think> reasoning blocks — output ONLY the final answer.',
+    '## FORMATTING',
+    '- Use `## ` headings to divide multi-section answers logically.',
+    '- **Bold** key terms for skimmability.',
+    '- All code in fenced blocks with language tags (```python, ```ts, ```bash). Production code should include error handling.',
+    '- Use `inline code` for function names, variables, CLI commands, and paths.',
+    '- Markdown tables for comparisons. Numbered lists for sequential steps. Bullet points for unordered lists.',
+    '- Keep paragraphs to 1-3 sentences max with blank lines between them.',
+    '',
+    '## ACCURACY',
+    '- Be factually precise. When web search context is provided, synthesize it and cite sources inline [1], [2].',
+    '- Never output <think> blocks, scratchpad, or internal reasoning — final answer only.',
+    '- If you are unsure, say so honestly rather than fabricating information.',
   ].join('\n');
 }
 
 function buildVisionSystemPrompt(modelName: string): string {
   return [
-    `You are Flyer, a visual analysis assistant (Powered by ${modelName}).`,
-    `When asked about your identity, state: "I am Flyer, powered by ${modelName}".`,
+    `You are **Flyer**, an expert visual analysis assistant (Powered by ${modelName}).`,
+    `When asked about your identity, say: "I am Flyer, powered by ${modelName}."`,
     '',
-    'RESPONSE BREVITY & ACCURACY:',
-    '- Answer specific questions about the image directly in 1-2 concise sentences first.',
-    '- Keep visual breakdowns short, clear, and structured under headings (**Overview**, **Key Details**, **Text in Image**).',
-    '- Describe only what is genuinely visible in the image. Never invent unverified details.',
-    '- Never output private reasoning or <think> blocks.',
+    '## VISION ANALYSIS RULES',
+    '- **Lead with the answer.** If the user asked a specific question, answer it directly in 1-2 sentences first.',
+    '- Structure detailed breakdowns under clear headings: **Overview**, **Key Details**, **Text/OCR in Image**, **Technical Analysis**.',
+    '- Transcribe ALL visible text, numbers, code, labels, and headers verbatim.',
+    '- Describe spatial layout, colors, objects, UI elements, diagrams, and relationships accurately.',
+    '- Only describe what is genuinely visible. Never invent or hallucinate details.',
+    '- Never output <think> blocks or internal reasoning — final analysis only.',
   ].join('\n');
 }
 
@@ -197,10 +193,49 @@ export default function Chat() {
   const [isArenaMode, setIsArenaMode] = useState(false);
   const [compareModels, setCompareModels] = useState<string[]>(['llama-8b']);
 
+  // Drag and Drop File System state
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const dragCounterRef = useRef(0);
+
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isNewConversationRef = useRef(false);
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDraggingOver(true);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDraggingOver(false);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+    dragCounterRef.current = 0;
+
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length > 0) {
+      handleSendMessage('', files);
+    }
+  };
 
   const createSparkleBurst = () => {
     const sendBtn = document.querySelector('button[aria-label="Send message"]');
@@ -380,7 +415,14 @@ export default function Chat() {
     const imageAttachments = pendingAttachments.filter((a) => a.type === 'image');
     const hasImages = imageAttachments.length > 0;
 
-    // 1. Fast AI Intent Evaluator (uses ministral-8b for Mistral or deepseek-v4-flash for NIM)
+    const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: trimmedContent, attachments: pendingAttachments };
+    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', modelName: selectedModelMeta.name };
+
+    // ── INSTANT UI UPDATE — show user message + thinking placeholder NOW ──
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+
+    // ── Run intent evaluation AFTER the UI has been updated ──
     const intentEval = await evaluateUserIntent(
       requestContent,
       selectedModel,
@@ -394,9 +436,6 @@ export default function Chat() {
       effectiveModelId = DEFAULT_VISION_MODEL;
     }
     const usedVisionFallback = effectiveModelId !== selectedModel;
-
-    const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: trimmedContent, attachments: pendingAttachments };
-    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', modelName: selectedModelMeta.name };
 
     // Build the API message history (text only) and the current turn (multimodal
     // when the effective model can accept images).
@@ -416,10 +455,6 @@ export default function Chat() {
       ...historyMessages,
       currentTurn,
     ];
-
-    // Show user message and assistant response placeholder immediately!
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
-    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
 
     let convId = activeConversationId;
     const isAuthenticated = !!user && !isGuest;
@@ -762,7 +797,36 @@ export default function Chat() {
   const selectedModelMeta = AI_MODELS.find((model) => model.id === selectedModel) || AI_MODELS[0];
 
   return (
-    <div className="h-screen h-[100dvh] flex w-full bg-background overflow-hidden liquid-app">
+    <div 
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      className="h-screen h-[100dvh] flex w-full bg-background overflow-hidden liquid-app relative"
+    >
+      {/* Full screen Drag and Drop Overlay */}
+      <AnimatePresence>
+        {isDraggingOver && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.96 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-background/85 backdrop-blur-2xl border-4 border-dashed border-primary/70 p-6 pointer-events-none shadow-[0_0_80px_hsla(var(--primary)/0.3)]"
+          >
+            <div className="w-20 h-20 rounded-3xl bg-primary/20 border border-primary/40 flex items-center justify-center shadow-2xl shadow-primary/30 mb-4 animate-bounce">
+              <Sparkles className="w-10 h-10 text-primary" />
+            </div>
+            <h3 className="text-2xl font-bold bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent mb-2">
+              Drop Files to Analyze
+            </h3>
+            <p className="text-sm text-muted-foreground max-w-md text-center">
+              Release image or document files anywhere to attach and send to Flyer AI.
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {isAuthenticated && (
         <ChatSidebar
           conversations={conversations}
@@ -920,7 +984,7 @@ export default function Chat() {
         </header>
 
         {/* Messages */}
-        <div ref={scrollContainerRef} className="relative z-10 flex-1 overflow-y-auto scrollbar-thin min-h-0 overflow-anchor-none scroll-smooth" style={{ overscrollBehaviorY: 'none', overscrollBehaviorX: 'none', overscrollBehavior: 'none', WebkitOverflowScrolling: 'touch' }}>
+        <div ref={scrollContainerRef} className="relative z-10 flex-1 overflow-y-auto scrollbar-thin min-h-0 overflow-anchor-none" style={{ overscrollBehavior: 'none' }}>
           <AnimatePresence mode="wait">
             {isMessagesLoading ? (
               <div key="loading-messages" className="flex flex-col items-center justify-center h-full min-h-[50dvh]">

@@ -72,8 +72,10 @@
 
   html {
     scroll-behavior: smooth;
-    overscroll-behavior-y: none;
-    overscroll-behavior-x: none;
+    overscroll-behavior: none !important;
+    overscroll-behavior-y: none !important;
+    overscroll-behavior-x: none !important;
+    -webkit-overflow-scrolling: auto !important;
     -webkit-tap-highlight-color: transparent;
   }
 
@@ -84,7 +86,9 @@
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
     overflow-x: hidden;
-    overscroll-behavior-y: none;
+    overscroll-behavior: none !important;
+    overscroll-behavior-y: none !important;
+    -webkit-overflow-scrolling: auto !important;
     position: relative;
     background:
       linear-gradient(135deg, hsl(224 34% 5%) 0%, hsl(222 28% 7%) 52%, hsl(224 34% 4%) 100%);
