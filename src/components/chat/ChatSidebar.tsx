@@ -159,7 +159,7 @@ export default function ChatSidebar({
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden bg-black/10">
-                  <img src="/flyer-logo.jpg" alt="Flyer AI" className="w-full h-full object-cover" />
+                  <img src="/flyer-logo.png" alt="Flyer AI" className="w-full h-full object-cover" />
                 </div>
                 <span className="font-display font-bold text-lg gradient-text">
                   Flyer

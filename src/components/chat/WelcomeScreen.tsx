@@ -95,7 +95,7 @@ export default function WelcomeScreen({ onSuggestionClick ,
                 animate={{ '--angle': ['0deg', '360deg'] } as any}
                 transition={{ duration: 3, repeat: Infinity, ease: 'linear' }}
               />
-              <img src="/flyer-logo.jpg" alt="Flyer AI" className="w-full h-full object-cover relative z-10 rounded-2xl" />
+              <img src="/flyer-logo.png" alt="Flyer AI" className="w-full h-full object-cover relative z-10 rounded-2xl" />
             </motion.div>
           </motion.div>
           

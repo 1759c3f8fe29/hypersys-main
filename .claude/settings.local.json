@@ -12,7 +12,9 @@
       "Bash(curl -s -X POST http://localhost:5199/api/mistral -H \"Content-Type: application/json\" -d '{\"model\":\"mistral-small-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"say hi\"}],\"stream\":true,\"max_tokens\":20}' -w \"\\\\n[HTTP %{http_code}]\\\\n\")",
       "Bash(curl -s -o /tmp/img_out.bin -w \"HTTP %{http_code} type=%{content_type} bytes=%{size_download}\\\\n\" \"http://localhost:5199/\")",
       "Bash(curl -s -o /tmp/img_out.bin -w \"HTTP %{http_code} type=%{content_type} bytes=%{size_download}\\\\n\" \"https://image.pollinations.ai/prompt/a%20red%20cube?nologo=true&enhance=true&model=flux\")",
-      "Bash(curl -s -X POST http://localhost:5199/api/nvidia -H \"Content-Type: application/json\" -d '{\"model\":\"meta/llama-3.2-11b-vision-instruct\",\"messages\":[{\"role\":\"user\",\"content\":\"reply with the word OK\"}],\"stream\":true,\"max_tokens\":5}' -w \"\\\\n[HTTP %{http_code}]\\\\n\")"
+      "Bash(curl -s -X POST http://localhost:5199/api/nvidia -H \"Content-Type: application/json\" -d '{\"model\":\"meta/llama-3.2-11b-vision-instruct\",\"messages\":[{\"role\":\"user\",\"content\":\"reply with the word OK\"}],\"stream\":true,\"max_tokens\":5}' -w \"\\\\n[HTTP %{http_code}]\\\\n\")",
+      "Bash(npx eslint *)",
+      "Bash(echo \"EXIT:$?\")"
     ]
   }
 }

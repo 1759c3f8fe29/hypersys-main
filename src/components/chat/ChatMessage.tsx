@@ -239,7 +239,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             <div className="flex items-center gap-2 mb-3 justify-between pb-2.5 border-b border-primary/20">
               <div className="flex items-center gap-2.5">
                 <div className="w-7 h-7 rounded-xl flex items-center justify-center overflow-hidden bg-black/10 shadow-md shadow-primary/20 border border-primary/30">
-                  <img src="/flyer-logo.jpg" alt="Flyer AI" className="w-full h-full object-cover" />
+                  <img src="/flyer-logo.png" alt="Flyer AI" className="w-full h-full object-cover" />
                 </div>
                 <span className="text-sm font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">{modelName}</span>
                 {isArenaMode && (
