@@ -509,3 +509,16 @@
     animation: shimmer 2s infinite;
   }
 }
+
+/* Responsive code blocks */
+pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Touch-friendly targets */
+@media (max-width: 640px) {
+  button, a, [role="button"] {
+    min-height: 44px;
+  }
+}

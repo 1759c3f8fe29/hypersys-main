@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Sparkles, Zap, Globe, Shield, Rocket } from 'lucide-react';
+import { Zap, Globe, Shield, Rocket } from 'lucide-react';
 
 interface WelcomeScreenProps {
   modelName?: string;
@@ -95,7 +95,7 @@ export default function WelcomeScreen({ onSuggestionClick ,
                 animate={{ '--angle': ['0deg', '360deg'] } as any}
                 transition={{ duration: 3, repeat: Infinity, ease: 'linear' }}
               />
-              <Sparkles className="w-12 h-12 sm:w-14 sm:h-14 md:w-16 md:h-16 text-primary relative z-10" />
+              <img src="/flyer-logo.jpg" alt="Flyer AI" className="w-full h-full object-cover relative z-10 rounded-2xl" />
             </motion.div>
           </motion.div>
           

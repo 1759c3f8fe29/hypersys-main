@@ -292,6 +292,7 @@ export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [statusText, setStatusText] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [selectedModel, setSelectedModel] = useState('mistral-large-latest');
@@ -528,6 +529,7 @@ export default function Chat() {
     // ── INSTANT UI UPDATE — show user message + thinking placeholder NOW ──
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+    setStatusText('Understanding your request...');
 
     // ── Run intent evaluation AFTER the UI has been updated ──
     const intentEval = await evaluateUserIntent(
@@ -600,6 +602,7 @@ export default function Chat() {
       );
     }
 
+    setStatusText('Preparing response...');
     setIsLoading(true);
     abortControllerRef.current = new AbortController();
 
@@ -627,12 +630,14 @@ export default function Chat() {
 
         // The 1000-word master prompt is crafted BY the chat model (ChatGPT-style).
         const promptAuthorModel = isImageModel(selectedModel) ? DEFAULT_CHAT_MODEL_ID : selectedModel;
+        setStatusText('Crafting image prompt...');
         const imagePrompt = await craftImagePrompt(
           rawPrompt,
           promptAuthorModel,
           abortControllerRef.current.signal,
         );
 
+        setStatusText('Generating image...');
         const { imageDataUrl, message } = await generateImageResponse(
           imagePrompt,
           renderModelId,
@@ -659,6 +664,7 @@ export default function Chat() {
         // master vision analysis prompt to supply internally to the vision engine.
         if (hasImages) {
           try {
+            setStatusText('Analyzing image...');
             const masterVisionPrompt = await craftVisionPrompt(
               requestContent,
               pendingAttachments.map((a) => a.name),
@@ -685,6 +691,7 @@ export default function Chat() {
         if (!hasImages && intentEval.needsSearch && intentEval.searchQuery) {
           try {
             setIsSearching(true);
+            setStatusText('Searching the web...');
             const search = await webSearch(intentEval.searchQuery, abortControllerRef.current?.signal);
             const context = buildSearchContext(search);
             if (context) {
@@ -740,6 +747,7 @@ export default function Chat() {
           if (hasImages) {
             // Step 1: Run Vision Engine (Mistral Pixtral 12B by default) to extract raw visual breakdown
             let rawVisionOutput = '';
+            setStatusText('Running vision analysis...');
             await generateVisionResponse(
               messagesForModel,
               (delta) => { rawVisionOutput += delta; },
@@ -767,6 +775,7 @@ export default function Chat() {
               { role: 'user', content: requestContent },
             ];
 
+            setStatusText('Synthesizing analysis...');
             await generateChatResponse(
               refinedChatMessages,
               selectedModel,
@@ -774,6 +783,7 @@ export default function Chat() {
               abortControllerRef.current!.signal,
             );
           } else {
+            setStatusText('Generating response...');
             await generateChatResponse(messagesForModel, effectiveModelId, handleDelta, abortControllerRef.current!.signal);
           }
 
@@ -858,6 +868,7 @@ export default function Chat() {
     } finally {
       clearTimeout(timeoutId);
       setIsLoading(false);
+      setStatusText('');
       setIsSearching(false);
       abortControllerRef.current = null;
     }
@@ -1120,6 +1131,7 @@ export default function Chat() {
                     attachments={msg.attachments}
                     isStreaming={isLoading && msg.role === 'assistant' && index === messages.length - 1}
                     modelName={msg.modelName || 'AI'}
+                    statusText={isLoading && msg.role === 'assistant' && index === messages.length - 1 ? statusText : undefined}
                     onRegenerate={handleRegenerate}
                     canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}
                     isArenaMode={msg.isArenaMode}
