@@ -48,10 +48,10 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
     };
   }, [previews]);
 
-  // Auto-focus on mount
+  // Auto-focus on mount (only on desktop to avoid keyboard springing up on mobile)
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (textareaRef.current && !disabled) {
+      if (textareaRef.current && !disabled && window.innerWidth > 768) {
         textareaRef.current.focus();
       }
     }, 300);

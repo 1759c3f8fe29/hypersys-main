@@ -238,8 +238,8 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
           <div className={isArenaMode ? 'flex-1 min-w-0 rounded-2xl border border-primary/40 bg-gradient-to-b from-primary/10 via-secondary/20 to-background/60 p-4 sm:p-5 shadow-2xl shadow-primary/10 backdrop-blur-xl relative overflow-hidden transition-all duration-300 hover:border-primary/60 border-t-4 border-t-primary' : 'flex-1 min-w-0'}>
             <div className="flex items-center gap-2 mb-3 justify-between pb-2.5 border-b border-primary/20">
               <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 rounded-xl liquid-icon flex items-center justify-center shadow-md shadow-primary/20 bg-primary/20 border border-primary/30">
-                  <Sparkles className="w-4 h-4 text-primary" />
+                <div className="w-7 h-7 rounded-xl flex items-center justify-center overflow-hidden bg-black/10 shadow-md shadow-primary/20 border border-primary/30">
+                  <img src="/flyer-logo.jpg" alt="Flyer AI" className="w-full h-full object-cover" />
                 </div>
                 <span className="text-sm font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">{modelName}</span>
                 {isArenaMode && (

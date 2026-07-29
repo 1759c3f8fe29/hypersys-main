@@ -635,73 +635,14 @@ export async function generateImageResponse(
     }
   }
 
-  // 2. Primary: HTTP POST to https://image.pollinations.ai/prompt
-  // POST payload safely carries ~1000-word prompts without triggering 403 URI length limits!
-  for (const model of imageFallbackChain(modelId)) {
-    try {
-      const res = await fetch("https://image.pollinations.ai/prompt", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: fullPrompt,
-          model,
-          width: 1024,
-          height: 1024,
-          nologo: true,
-          enhance: false,
-        }),
-        signal,
-      });
+  // 2. Pollinations fallback: direct URL via img tag
+  // We skip POST since it is frequently blocked by CORS or AdBlockers.
+  // The direct URL loads perfectly in an <img> tag without needing JS fetch.
 
-      if (!res.ok) {
-        lastErr = new Error(`POST image generation failed (${model}): ${res.status} ${res.statusText}`);
-        continue;
-      }
-
-      const blob = await res.blob();
-      if (blob.size === 0 || (blob.type && !blob.type.startsWith("image/"))) {
-        lastErr = new Error(`Image generation returned no image blob (${model}).`);
-        continue;
-      }
-
-      return {
-        imageDataUrl: URL.createObjectURL(blob),
-        message: "Here is your generated image:",
-      };
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") throw err;
-      lastErr = err;
-    }
-  }
-
-  // 2. Fallback: GET with condensed 250-character prompt summary to guarantee success
   const condensedPrompt = fullPrompt.length > 250
     ? fullPrompt.slice(0, 247).replace(/\s+\S*$/, "") + "..."
     : fullPrompt;
   const encoded = encodeURIComponent(condensedPrompt);
-
-  for (const model of imageFallbackChain(modelId)) {
-    const url = `https://image.pollinations.ai/prompt/${encoded}?nologo=true&model=${model}`;
-    try {
-      const res = await fetch(url, { signal });
-      if (!res.ok) {
-        lastErr = new Error(`GET image generation failed (${model}): ${res.status} ${res.statusText}`);
-        continue;
-      }
-      const blob = await res.blob();
-      if (blob.size === 0 || (blob.type && !blob.type.startsWith("image/"))) {
-        lastErr = new Error(`Image generation returned no image blob (${model}).`);
-        continue;
-      }
-      return {
-        imageDataUrl: URL.createObjectURL(blob),
-        message: "Here is your generated image:",
-      };
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") throw err;
-      lastErr = err;
-    }
-  }
 
   // 3. Ultra-guaranteed fallback: Direct URL for <img> element (renders cleanly even if fetch CORS blocks blob reading)
   const fallbackModel = imageFallbackChain(modelId)[0] || "flux";

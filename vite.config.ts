@@ -345,50 +345,54 @@ async function proxySearch(
 }
 
 async function searchDuckDuckGoDev(query: string, num: number) {
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const url = `https://lite.duckduckgo.com/lite/`;
   const res = await fetch(url, {
+    method: "POST",
     headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
       "Accept-Language": "en-US,en;q=0.9",
     },
+    body: `q=${encodeURIComponent(query)}`
   });
   if (!res.ok) return null;
   const html = await res.text();
   const results: Array<{ title: string; snippet: string; link: string; source: string | null; date: null }> = [];
-  const blocks = html.split(/class="[^"]*result__body[^"]*"/);
-
-  for (let i = 1; i < blocks.length && results.length < num; i++) {
-    const block = blocks[i];
-    const titleMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/);
-    const snippetMatch = block.match(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/) ||
-                         block.match(/<td[^>]*class="[^"]*result-snippet[^"]*"[^>]*>([\s\S]*?)<\/td>/);
-    const linkMatch = block.match(/href="([^"]*uddg=[^"]*)"/) || block.match(/class="result__url"[^>]*href="([^"]+)"/);
-
-    if (titleMatch) {
-      const title = titleMatch[1].replace(/<[^>]+>/g, "").trim();
-      const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
-      let link = "";
-      if (linkMatch) {
-        const rawLink = linkMatch[1];
-        if (rawLink.includes("uddg=")) {
-          const match = rawLink.match(/uddg=([^&]+)/);
-          if (match) link = decodeURIComponent(match[1]);
-        } else {
-          link = rawLink;
+  const rows = html.split('<tr');
+  
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (row.includes('class="result-snippet"')) {
+      const prevRow = rows[i-1];
+      if (!prevRow) continue;
+      
+      const titleMatch = prevRow.match(/<a[^>]*class="result-title"[^>]*>([\s\S]*?)<\/a>/);
+      const linkMatch = prevRow.match(/href="([^"]+)"/);
+      const snippetMatch = row.match(/class="result-snippet"[^>]*>([\s\S]*?)<\/td>/);
+      
+      if (titleMatch && snippetMatch) {
+        let link = linkMatch ? linkMatch[1] : "";
+        if (link.includes("uddg=")) {
+          const m = link.match(/uddg=([^&]+)/);
+          if (m) link = decodeURIComponent(m[1]);
+        } else if (link.startsWith('//')) {
+          link = "https:" + link;
         }
-      }
-      if (title && (snippet || link)) {
-        results.push({ title, snippet, link, source: "DuckDuckGo Web", date: null });
+        
+        results.push({
+          title: titleMatch[1].replace(/<[^>]+>/g, "").trim(),
+          link,
+          snippet: snippetMatch[1].replace(/<[^>]+>/g, "").trim(),
+          source: null,
+          date: null
+        });
+        
+        if (results.length >= num) break;
       }
     }
   }
 
-  return {
-    query,
-    answerBox: results.length > 0 ? { title: "Web Overview", answer: results[0].snippet } : null,
-    results,
-    related: [],
-  };
+  return { query, answerBox: null, results, related: [] };
 }
 
 // ---------------------------------------------------------------------------

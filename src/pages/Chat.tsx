@@ -875,7 +875,17 @@ export default function Chat() {
   };
 
   const handleStopGeneration = () => { abortControllerRef.current?.abort(); };
-  const handleNewConversation = () => { setActiveConversationId(null); setMessages([]); setSidebarCollapsed(true); };
+  const handleNewConversation = () => {
+    if (isLoading) {
+      handleStopGeneration();
+      setIsLoading(false);
+      setStatusText('');
+      setIsSearching(false);
+    }
+    setActiveConversationId(null);
+    setMessages([]);
+    if (window.innerWidth < 1024) setSidebarCollapsed(true);
+  };
 
   // Regenerate: strip the last user+assistant turn, then resend the user's text.
   // Uses an effect so handleSendMessage runs against the trimmed message state.
@@ -949,7 +959,16 @@ export default function Chat() {
         <ChatSidebar
           conversations={conversations}
           activeConversationId={activeConversationId}
-          onSelectConversation={(id) => { setActiveConversationId(id); setSidebarCollapsed(true); }}
+          onSelectConversation={(id) => {
+            if (isLoading) {
+              handleStopGeneration();
+              setIsLoading(false);
+              setStatusText('');
+              setIsSearching(false);
+            }
+            setActiveConversationId(id);
+            if (window.innerWidth < 1024) setSidebarCollapsed(true);
+          }}
           onNewConversation={handleNewConversation}
           onDeleteConversation={handleDeleteConversation}
           isCollapsed={sidebarCollapsed}
@@ -981,8 +1000,8 @@ export default function Chat() {
           )}
           
           <div className="flex items-center gap-3 min-w-0 flex-1">
-            <motion.div className="flex w-10 h-10 rounded-xl items-center justify-center flex-shrink-0 liquid-icon" whileHover={{ scale: 1.1, rotate: 5 }}>
-              <Sparkles className="w-[18px] h-[18px] text-primary relative z-10" />
+            <motion.div className="flex w-10 h-10 rounded-xl items-center justify-center flex-shrink-0 bg-black/10 overflow-hidden" whileHover={{ scale: 1.1, rotate: 5 }}>
+              <img src="/flyer-logo.jpg" alt="Flyer AI" className="w-full h-full object-cover" />
             </motion.div>
             <div className="min-w-0">
               <h1 className="font-display font-semibold text-base sm:text-lg truncate text-foreground/90">
