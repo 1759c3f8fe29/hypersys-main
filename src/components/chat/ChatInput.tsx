@@ -4,6 +4,17 @@ import { Send, Mic, Square, Loader2, ImagePlus, X, FileText, Atom, Globe, Plus }
 import { toast } from 'sonner';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 
+// Single source of truth for the accent palette — the header swatch row and the
+// composer's "+" menu both render from this, so they can't drift apart.
+export const ACCENT_COLORS = [
+  { name: 'Teal', value: '172 66% 50%', bg: 'bg-[#1ad1b9]' },
+  { name: 'Blue', value: '210 90% 55%', bg: 'bg-[#258eff]' },
+  { name: 'Purple', value: '270 85% 60%', bg: 'bg-[#984cff]' },
+  { name: 'Rose', value: '340 85% 55%', bg: 'bg-[#ff2d74]' },
+  { name: 'Amber', value: '30 95% 55%', bg: 'bg-[#ff8f1f]' },
+  { name: 'Emerald', value: '145 75% 45%', bg: 'bg-[#1cb866]' },
+];
+
 interface ChatInputProps {
   onSend: (message: string, files?: File[]) => void;
   isLoading: boolean;
@@ -15,6 +26,8 @@ interface ChatInputProps {
   onToggleDeepThink?: () => void;
   webSearch?: boolean;
   onToggleWebSearch?: () => void;
+  accentColor?: string;
+  onSelectAccent?: (value: string) => void;
 }
 
 export default function ChatInput({
@@ -28,6 +41,8 @@ export default function ChatInput({
   onToggleDeepThink,
   webSearch = false,
   onToggleWebSearch,
+  accentColor,
+  onSelectAccent,
 }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [isFocused, setIsFocused] = useState(false);
@@ -78,7 +93,9 @@ export default function ChatInput({
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 150)}px`;
+      // Keep in sync with the textarea's max-h-[120px] class — a mismatch lets
+      // the inline height grow past the CSS cap and clips the last line.
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 120)}px`;
     }
   }, [message]);
 
@@ -210,7 +227,7 @@ export default function ChatInput({
             <div className="absolute inset-0 backdrop-blur-2xl" />
 
             {/* Content */}
-            <div className="relative px-2.5 py-2 sm:px-3 sm:py-2.5 space-y-2">
+            <div className="relative px-2 py-1.5 sm:px-2.5 space-y-1">
               {previews.length > 0 && (
                 <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin">
                   {previews.map(({ file, url }) => {
@@ -270,7 +287,7 @@ export default function ChatInput({
                 disabled={disabled || isRecording}
                 rows={1}
                 aria-label="Message input"
-                className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-1.5 px-1.5 max-h-[150px] scrollbar-thin text-sm sm:text-[15px] leading-relaxed font-medium"
+                className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-1 px-1.5 max-h-[120px] scrollbar-thin text-sm sm:text-[15px] leading-snug font-medium"
               />
 
               {/* Row 2: a "+" menu holds attach/DeepThink/Search so the bar stays
@@ -309,16 +326,16 @@ export default function ChatInput({
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: 8, scale: 0.95 }}
                         transition={{ duration: 0.15 }}
-                        className="absolute bottom-full left-0 mb-2 z-50 min-w-[190px] rounded-2xl border border-border/50 bg-popover/95 backdrop-blur-2xl shadow-xl p-1.5 space-y-0.5"
+                        className="absolute bottom-full left-0 mb-2 z-50 w-[152px] rounded-xl border border-border/50 bg-popover/95 backdrop-blur-2xl shadow-xl p-1 space-y-0.5"
                       >
                         <button
                           type="button"
                           role="menuitem"
                           onClick={() => { fileInputRef.current?.click(); setPlusOpen(false); }}
-                          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium text-foreground/90 hover:bg-secondary/70 transition-colors"
+                          className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-foreground/90 hover:bg-secondary/70 transition-colors"
                         >
-                          <ImagePlus className="w-4 h-4 flex-shrink-0" />
-                          <span>Attach file</span>
+                          <ImagePlus className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span>Attach</span>
                         </button>
 
                         <button
@@ -327,11 +344,11 @@ export default function ChatInput({
                           aria-checked={deepThink}
                           onClick={() => { onToggleDeepThink?.(); setPlusOpen(false); }}
                           title="Force step-by-step extended reasoning"
-                          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium transition-colors ${
+                          className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-medium transition-colors ${
                             deepThink ? 'bg-primary/15 text-primary' : 'text-foreground/90 hover:bg-secondary/70'
                           }`}
                         >
-                          <Atom className="w-4 h-4 flex-shrink-0" />
+                          <Atom className="w-3.5 h-3.5 flex-shrink-0" />
                           <span>DeepThink</span>
                           {deepThink && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
                         </button>
@@ -342,11 +359,11 @@ export default function ChatInput({
                           aria-checked={webSearch}
                           onClick={() => { onToggleWebSearch?.(); setPlusOpen(false); }}
                           title="Always ground this answer in live web results"
-                          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium transition-colors ${
+                          className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-medium transition-colors ${
                             webSearch ? 'bg-primary/15 text-primary' : 'text-foreground/90 hover:bg-secondary/70'
                           }`}
                         >
-                          <Globe className="w-4 h-4 flex-shrink-0" />
+                          <Globe className="w-3.5 h-3.5 flex-shrink-0" />
                           <span>Search</span>
                           {webSearch && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
                         </button>
