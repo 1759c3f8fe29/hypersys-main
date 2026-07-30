@@ -22,6 +22,7 @@ export default async function handler(req, res) {
   }
 
   // Attempt SerpApi if API key is present
+  let serpError = null;
   if (key) {
     try {
       const params = new URLSearchParams({
@@ -32,8 +33,18 @@ export default async function handler(req, res) {
       });
 
       const upstream = await fetch(`${SERPAPI_URL}?${params.toString()}`);
-      if (upstream.ok) {
+      if (!upstream.ok) {
+        // Surface the real reason (bad key, quota exhausted, rate limit) instead
+        // of falling through silently and returning an empty result set that
+        // looks to the model like "the web has nothing on this".
+        serpError = `serpapi_http_${upstream.status}`;
+        console.error("SerpApi error:", upstream.status, await upstream.text().catch(() => ""));
+      } else {
         const data = await upstream.json();
+        if (data.error) {
+          serpError = "serpapi_error";
+          console.error("SerpApi returned error:", data.error);
+        } else {
         const organic = (data.organic_results || []).map((r) => ({
           title: r.title || "",
           snippet: r.snippet || "",
@@ -58,7 +69,9 @@ export default async function handler(req, res) {
           date: r.date || null,
         }));
 
-        const combined = [...organic, ...news, ...topStories];
+        // News and top-stories first: for time-sensitive queries these carry the
+        // fresh, dated items, while organic results skew toward evergreen pages.
+        const combined = [...news, ...topStories, ...organic];
         const seenLinks = new Set();
         const results = combined.filter((r) => {
           if (!r.title || (!r.snippet && !r.link)) return false;
@@ -86,10 +99,15 @@ export default async function handler(req, res) {
         res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
         res.status(200).json({ query, answerBox, results, related });
         return;
+        }
       }
     } catch (err) {
+      serpError = "serpapi_fetch_failed";
       console.warn("SerpApi primary search failed, trying DuckDuckGo fallback:", err);
     }
+  } else {
+    serpError = "serpapi_key_missing";
+    console.error("SERPAPI_API_KEY is not configured — web search cannot ground answers.");
   }
 
   // Fallback: DuckDuckGo free search (No API Key Required!)
@@ -104,7 +122,10 @@ export default async function handler(req, res) {
     console.error("DuckDuckGo search error:", err);
   }
 
-  res.status(200).json({ query, answerBox: null, results: [], related: [] });
+  // Nothing worked. Report *why* so the client can tell the model "search is
+  // broken" rather than "the web returned no results" — those need different
+  // answers, and conflating them is what made failures invisible.
+  res.status(200).json({ query, answerBox: null, results: [], related: [], error: serpError || "no_results" });
 }
 
 async function fetchDuckDuckGoSearch(query) {

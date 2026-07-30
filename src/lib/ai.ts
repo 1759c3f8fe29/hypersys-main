@@ -1,9 +1,10 @@
 // All chat models are routed through NVIDIA NIM (requires API key)
 // The /api/nvidia proxy in vite.config.ts handles CORS and streaming.
 
-// Default flagship shown as "Flyer". Points at a verified-working model
-// (openai/gpt-oss-120b — confirmed live, ~30s first token on 2026-07-21)
-export const DEFAULT_CHAT_MODEL = "deepseek-v4-flash";
+// Default flagship shown as "Flyer". Mistral Large is the default because it
+// answers reliably — the NIM reasoning models intermittently return HTTP 529
+// "Service temporarily overloaded" when their capacity pool is saturated.
+export const DEFAULT_CHAT_MODEL = "mistral-large-latest";
 
 // ---------------------------------------------------------------------------
 // Model → NVIDIA NIM / Mistral ID mapping
@@ -138,16 +139,17 @@ export async function generateChatResponse(
   modelId: string,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
+  opts?: { deepThink?: boolean },
 ) {
   // Mistral models go through /api/mistral, NIM models through /api/nvidia.
   // A failure surfaces as an error rather than being answered by a different
   // model — a silent substitution hides outages and misattributes the reply.
   if (isMistralModel(modelId)) {
-    await generateMistralResponse(messages, modelId, onChunk, signal);
+    await generateMistralResponse(messages, modelId, onChunk, signal, opts);
     return;
   }
 
-  await generateNvidiaChatResponse(messages, modelId, onChunk, signal);
+  await generateNvidiaChatResponse(messages, modelId, onChunk, signal, opts);
 }
 
 async function generateNvidiaChatResponse(
@@ -155,6 +157,7 @@ async function generateNvidiaChatResponse(
   modelId: string,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
+  opts?: { deepThink?: boolean },
 ) {
   const nvidiaModel = getNvidiaId(modelId);
 
@@ -169,9 +172,11 @@ async function generateNvidiaChatResponse(
       model: nvidiaModel,
       messages,
       stream: true,
-      temperature: 0.7,
+      // Lower temperature in DeepThink so careful reasoning isn't derailed by
+      // sampling noise, and raise the ceiling so long derivations aren't cut off.
+      temperature: opts?.deepThink ? 0.3 : 0.7,
       top_p: 0.95,
-      max_tokens: 4096,
+      max_tokens: opts?.deepThink ? 8192 : 4096,
     }),
     signal,
   });
@@ -248,12 +253,15 @@ export async function evaluateUserIntent(
   const fastModel = "ministral-8b";
 
   try {
+    const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
     const classifierSystem = [
       "You are an expert AI Intent Classifier and Search Query Synthesizer.",
+      `Today's date is ${today}.`,
       "Analyze the user request and determine:",
       "1. 'needsImage': true if user explicitly or implicitly wants an image, picture, logo, poster, or artwork generated. Otherwise false.",
       "2. 'needsSearch': true if user request requires up-to-date, current, real-time news, facts, weather, stock price, scores, or external web search. Otherwise false.",
       "3. 'searchQuery': clean search keywords if needsSearch is true, otherwise empty string.",
+      "NEVER invent or hardcode a date in 'searchQuery'. Use relative words like 'today' or 'latest' instead — a wrong date returns stale results.",
       "",
       "Respond ONLY with valid JSON:",
       '{"needsImage": false, "needsSearch": false, "searchQuery": ""}',
@@ -346,6 +354,7 @@ async function generateMistralResponse(
   modelId: string,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
+  opts?: { deepThink?: boolean },
 ) {
   const mistralModel = MODEL_REGISTRY[modelId]?.mistralId || "mistral-large-latest";
 
@@ -360,9 +369,10 @@ async function generateMistralResponse(
       model: mistralModel,
       messages,
       stream: true,
-      temperature: 0.7,
+      // See generateNvidiaChatResponse — DeepThink trades creativity for care.
+      temperature: opts?.deepThink ? 0.3 : 0.7,
       top_p: 0.95,
-      max_tokens: 4096,
+      max_tokens: opts?.deepThink ? 8192 : 4096,
     }),
     signal,
   });
@@ -438,6 +448,9 @@ function friendlyHttpError(status: number, providerLabel: string): string {
   if (status === 401 || status === 403) return `Authentication failed with ${providerLabel}. Please check your API key.`;
   if (status === 404) return "That model is currently unavailable on NVIDIA NIM. Try a different one.";
   if (status === 429) return "Rate limit reached. Please wait a moment and try again.";
+  // 529 = NIM's "Service temporarily overloaded". The model exists and works;
+  // its capacity pool is just saturated. Say so instead of implying it's broken.
+  if (status === 529) return `That model is temporarily overloaded on ${providerLabel}. Retry in a few seconds, or switch models.`;
   if (status >= 500) return "The model service is temporarily unavailable. Please retry.";
   return `The model responded with an error (${status}).`;
 }

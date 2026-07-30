@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Sparkles, Mic, Square, Loader2, ImagePlus, X, FileText } from 'lucide-react';
+import { Send, Mic, Square, Loader2, ImagePlus, X, FileText, Atom, Globe, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 
@@ -11,14 +11,31 @@ interface ChatInputProps {
   onStop?: () => void;
   modelName?: string;
   modelKind?: 'Chat' | 'Vision' | 'Image';
+  deepThink?: boolean;
+  onToggleDeepThink?: () => void;
+  webSearch?: boolean;
+  onToggleWebSearch?: () => void;
 }
 
-export default function ChatInput({ onSend, isLoading, disabled, onStop, modelName = "Flyer", modelKind = 'Chat' }: ChatInputProps) {
+export default function ChatInput({
+  onSend,
+  isLoading,
+  disabled,
+  onStop,
+  modelName = "Flyer",
+  modelKind = 'Chat',
+  deepThink = false,
+  onToggleDeepThink,
+  webSearch = false,
+  onToggleWebSearch,
+}: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [isFocused, setIsFocused] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [plusOpen, setPlusOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const plusMenuRef = useRef<HTMLDivElement>(null);
   
   const { start, stop, isListening, isSupported } = useSpeechToText({
     onResult: (text) => {
@@ -64,6 +81,26 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 150)}px`;
     }
   }, [message]);
+
+  // Dismiss the "+" menu on outside click or Escape so it never traps taps on
+  // mobile, where there's no hover affordance to signal it's still open.
+  useEffect(() => {
+    if (!plusOpen) return;
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (!plusMenuRef.current?.contains(e.target as Node)) setPlusOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPlusOpen(false);
+    };
+
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [plusOpen]);
 
   const handleVoiceClick = () => {
     if (!isSupported) {
@@ -118,7 +155,7 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
   const isImageFile = (file: File) => file.type.startsWith('image/');
 
   return (
-    <div className="p-3 sm:p-4 lg:p-6 bg-gradient-to-t from-background via-background/95 to-transparent safe-area-inset-bottom">
+    <div className="px-3 pb-3 pt-2 sm:px-4 sm:pb-4 lg:px-6 bg-gradient-to-t from-background via-background/95 to-transparent safe-area-inset-bottom">
       <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
         {/* Futuristic rotating border container */}
         <div className="relative">
@@ -173,31 +210,31 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
             <div className="absolute inset-0 backdrop-blur-2xl" />
 
             {/* Content */}
-            <div className="relative p-3 sm:p-4 space-y-3">
+            <div className="relative px-2.5 py-2 sm:px-3 sm:py-2.5 space-y-2">
               {previews.length > 0 && (
                 <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin">
                   {previews.map(({ file, url }) => {
                     const fileKey = `${file.name}-${file.size}`;
 
                     return (
-                      <div key={fileKey} className="group/file relative w-20 h-20 sm:w-24 sm:h-24 rounded-2xl overflow-hidden border-2 border-primary/20 bg-background/50 flex-shrink-0 shadow-lg transition-transform hover:scale-[1.03] hover:border-primary/50 hover:shadow-primary/20">
+                      <div key={fileKey} className="group/file relative w-14 h-14 sm:w-16 sm:h-16 rounded-xl overflow-hidden border border-primary/20 bg-background/50 flex-shrink-0 shadow-md transition-transform hover:scale-[1.03] hover:border-primary/50 hover:shadow-primary/20">
                         <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent opacity-0 group-hover/file:opacity-100 transition-opacity z-10 pointer-events-none" />
                         
                         {isImageFile(file) ? (
                           <img src={url} alt={file.name} className="w-full h-full object-cover relative z-0" loading="lazy" />
                         ) : (
-                          <div className="w-full h-full flex flex-col items-center justify-center gap-1.5 px-2 text-center bg-secondary/30 relative z-0">
-                            <FileText className="w-7 h-7 text-primary/80 drop-shadow-md" />
-                            <span className="text-[11px] font-medium leading-tight text-foreground/90 line-clamp-2">{file.name}</span>
+                          <div className="w-full h-full flex flex-col items-center justify-center gap-1 px-1 text-center bg-secondary/30 relative z-0">
+                            <FileText className="w-5 h-5 text-primary/80 drop-shadow-md" />
+                            <span className="text-[9px] font-medium leading-tight text-foreground/90 line-clamp-2">{file.name}</span>
                           </div>
                         )}
                         <button
                           type="button"
                           onClick={() => removeFile(fileKey)}
-                          className="absolute top-1.5 right-1.5 w-7 h-7 rounded-full bg-black/50 hover:bg-destructive/80 text-white backdrop-blur-md border border-white/10 flex items-center justify-center z-20 opacity-0 group-hover/file:opacity-100 transition-all scale-75 group-hover/file:scale-100"
+                          className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/60 hover:bg-destructive/80 text-white backdrop-blur-md border border-white/10 flex items-center justify-center z-20 opacity-0 group-hover/file:opacity-100 transition-all scale-75 group-hover/file:scale-100"
                           aria-label={`Remove ${file.name}`}
                         >
-                          <X className="w-4 h-4" />
+                          <X className="w-3 h-3" />
                         </button>
                       </div>
                     );
@@ -214,79 +251,151 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
                 className="hidden"
               />
 
-              <div className="flex items-end gap-2 sm:gap-3">
-              {/* AI Sparkle indicator */}
-              <motion.div 
-                className="hidden sm:flex items-center justify-center w-10 h-10 rounded-xl flex-shrink-0 mb-0.5 relative overflow-hidden"
-                animate={isLoading ? { scale: [1, 1.08, 1] } : {}}
-                transition={{ duration: 1.5, repeat: isLoading ? Infinity : 0, ease: "easeInOut" }}
-              >
-                <div className="absolute inset-0 bg-gradient-to-br from-primary/25 via-primary/15 to-transparent" />
-                <div className="absolute inset-0 border border-primary/25 rounded-xl" />
-                
-                {isLoading && (
-                  <motion.div 
-                    className="absolute inset-0 rounded-xl"
-                    style={{
-                      background: 'conic-gradient(from var(--angle), transparent, hsl(var(--primary) / 0.4), transparent)',
-                    }}
-                    animate={{ '--angle': ['0deg', '360deg'] } as never}
-                    transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
-                  />
-                )}
-                
-                <Sparkles className={`w-5 h-5 relative z-10 transition-all duration-300 ${isLoading ? 'text-primary animate-pulse' : 'text-primary/60'}`} />
-              </motion.div>
-              
-                {/* Input Area */}
-                <div className="flex-1 relative min-w-0">
-                  <textarea
-                    ref={textareaRef}
-                    value={message}
-                    onChange={(e) => setMessage(e.target.value)}
-                    onFocus={() => setIsFocused(true)}
-                    onBlur={() => setIsFocused(false)}
-                    placeholder={
-                      isRecording
-                        ? "🎤 Listening..."
-                        : modelKind === 'Image'
-                          ? `Describe an image for ${modelName} to create...`
-                          : modelKind === 'Vision'
-                            ? `Upload an image and ask ${modelName} about it...`
-                            : `Ask ${modelName} anything...`
-                    }
-                    disabled={disabled || isRecording}
-                    rows={1}
-                    aria-label="Message input"
-                    className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-2.5 sm:py-3 px-1 max-h-[150px] scrollbar-thin text-sm sm:text-[15px] leading-relaxed font-medium"
-                  />
-                </div>
+              {/* Row 1: the textarea spans the full width, ChatGPT-style. */}
+              <textarea
+                ref={textareaRef}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                onFocus={() => setIsFocused(true)}
+                onBlur={() => setIsFocused(false)}
+                placeholder={
+                  isRecording
+                    ? "🎤 Listening..."
+                    : modelKind === 'Image'
+                      ? `Describe an image for ${modelName} to create...`
+                      : modelKind === 'Vision'
+                        ? `Upload an image and ask ${modelName} about it...`
+                        : `Ask ${modelName} anything...`
+                }
+                disabled={disabled || isRecording}
+                rows={1}
+                aria-label="Message input"
+                className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-1.5 px-1.5 max-h-[150px] scrollbar-thin text-sm sm:text-[15px] leading-relaxed font-medium"
+              />
 
-                {/* Action buttons */}
-                <div className="flex items-center gap-2 flex-shrink-0 mb-0.5">
+              {/* Row 2: a "+" menu holds attach/DeepThink/Search so the bar stays
+                  one line on mobile. Mic sits in the send slot until there's
+                  something to send, exactly like ChatGPT. */}
+              <div className="flex items-center gap-1.5">
+                <div className="relative flex-shrink-0" ref={plusMenuRef}>
                   <motion.button
                     type="button"
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={() => setPlusOpen((v) => !v)}
                     disabled={isLoading || disabled}
-                    className="relative w-10 h-10 rounded-xl flex items-center justify-center liquid-surface text-muted-foreground/70 hover:text-foreground border border-border/30 hover:border-primary/30 transition-all duration-300 overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed"
+                    aria-label="More options"
+                    aria-expanded={plusOpen}
+                    aria-haspopup="menu"
+                    className={`
+                      relative w-9 h-9 rounded-full flex items-center justify-center
+                      border transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed
+                      ${plusOpen || deepThink || webSearch
+                        ? 'bg-primary/20 text-primary border-primary/50'
+                        : 'liquid-surface text-muted-foreground/70 hover:text-foreground border-border/30 hover:border-primary/30'
+                      }
+                    `}
                     whileHover={{ scale: isLoading || disabled ? 1 : 1.05 }}
                     whileTap={{ scale: isLoading || disabled ? 1 : 0.95 }}
-                      aria-label="Upload image or file"
                   >
-                    <ImagePlus className="w-[18px] h-[18px]" />
+                    <motion.span animate={{ rotate: plusOpen ? 45 : 0 }} transition={{ duration: 0.2 }}>
+                      <Plus className="w-[18px] h-[18px]" />
+                    </motion.span>
                   </motion.button>
 
-                {/* Voice button - browser Web Speech API (live transcription) */}
-                {isSupported && (
+                  <AnimatePresence>
+                    {plusOpen && (
+                      <motion.div
+                        role="menu"
+                        initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                        transition={{ duration: 0.15 }}
+                        className="absolute bottom-full left-0 mb-2 z-50 min-w-[190px] rounded-2xl border border-border/50 bg-popover/95 backdrop-blur-2xl shadow-xl p-1.5 space-y-0.5"
+                      >
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => { fileInputRef.current?.click(); setPlusOpen(false); }}
+                          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium text-foreground/90 hover:bg-secondary/70 transition-colors"
+                        >
+                          <ImagePlus className="w-4 h-4 flex-shrink-0" />
+                          <span>Attach file</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          role="menuitemcheckbox"
+                          aria-checked={deepThink}
+                          onClick={() => { onToggleDeepThink?.(); setPlusOpen(false); }}
+                          title="Force step-by-step extended reasoning"
+                          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium transition-colors ${
+                            deepThink ? 'bg-primary/15 text-primary' : 'text-foreground/90 hover:bg-secondary/70'
+                          }`}
+                        >
+                          <Atom className="w-4 h-4 flex-shrink-0" />
+                          <span>DeepThink</span>
+                          {deepThink && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
+                        </button>
+
+                        <button
+                          type="button"
+                          role="menuitemcheckbox"
+                          aria-checked={webSearch}
+                          onClick={() => { onToggleWebSearch?.(); setPlusOpen(false); }}
+                          title="Always ground this answer in live web results"
+                          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium transition-colors ${
+                            webSearch ? 'bg-primary/15 text-primary' : 'text-foreground/90 hover:bg-secondary/70'
+                          }`}
+                        >
+                          <Globe className="w-4 h-4 flex-shrink-0" />
+                          <span>Search</span>
+                          {webSearch && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
+                        </button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                {/* Active-mode chips: keep the enabled state visible once the
+                    menu is closed. Icon-only on mobile so nothing wraps. */}
+                {deepThink && (
+                  <button
+                    type="button"
+                    onClick={onToggleDeepThink}
+                    title="DeepThink enabled — click to turn off"
+                    className="flex items-center gap-1 h-7 px-2 rounded-full text-[11px] font-semibold bg-primary/20 text-primary border border-primary/50 flex-shrink-0"
+                  >
+                    <Atom className="w-[13px] h-[13px]" />
+                    <span className="hidden sm:inline">DeepThink</span>
+                  </button>
+                )}
+                {webSearch && (
+                  <button
+                    type="button"
+                    onClick={onToggleWebSearch}
+                    title="Search enabled — click to turn off"
+                    className="flex items-center gap-1 h-7 px-2 rounded-full text-[11px] font-semibold bg-primary/20 text-primary border border-primary/50 flex-shrink-0"
+                  >
+                    <Globe className="w-[13px] h-[13px]" />
+                    <span className="hidden sm:inline">Search</span>
+                  </button>
+                )}
+
+                <div className="flex-1 min-w-0" />
+
+                {/* Action buttons */}
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  {/* Voice — browser Web Speech API (live transcription). Hidden
+                      once there's content to send, so send takes the slot. */}
+                  {isSupported && !canSend && !isLoading && (
                 <motion.button
                   type="button"
                   onClick={handleVoiceClick}
                   disabled={isProcessing}
                   className={`
-                    relative w-10 h-10 rounded-xl flex items-center justify-center
+                    relative w-9 h-9 rounded-full flex items-center justify-center
                     transition-all duration-300 overflow-hidden
-                    ${isRecording 
-                      ? 'bg-destructive/20 text-destructive border border-destructive/30' 
+                    ${isRecording
+                      ? 'bg-destructive/20 text-destructive border border-destructive/30'
                       : isProcessing
                         ? 'bg-primary/20 text-primary border border-primary/30'
                         : 'liquid-surface text-muted-foreground/70 hover:text-foreground border border-border/30 hover:border-primary/30'
@@ -297,7 +406,7 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
                   aria-label={isRecording ? "Stop recording" : "Start voice input"}
                 >
                   {isProcessing ? (
-                    <Loader2 className="w-[18px] h-[18px] animate-spin" />
+                    <Loader2 className="w-[17px] h-[17px] animate-spin" />
                   ) : isRecording ? (
                     <>
                       <motion.div
@@ -305,13 +414,13 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
                         animate={{ opacity: [0.3, 0.6, 0.3] }}
                         transition={{ duration: 1, repeat: Infinity }}
                       />
-                      <Square className="w-4 h-4 relative z-10 fill-current" />
+                      <Square className="w-3.5 h-3.5 relative z-10 fill-current" />
                     </>
                   ) : (
-                    <Mic className="w-[18px] h-[18px]" />
+                    <Mic className="w-[17px] h-[17px]" />
                   )}
                 </motion.button>
-                )}
+                  )}
 
                   {/* Send/Stop button */}
                   <AnimatePresence mode="wait">
@@ -323,12 +432,12 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
                         initial={{ scale: 0.8, opacity: 0 }}
                         animate={{ scale: 1, opacity: 1 }}
                         exit={{ scale: 0.8, opacity: 0 }}
-                        className="relative w-11 h-11 rounded-xl flex items-center justify-center bg-destructive/20 text-destructive border border-destructive/30 hover:bg-destructive/30 transition-all duration-200"
+                        className="relative w-9 h-9 rounded-full flex items-center justify-center bg-destructive/20 text-destructive border border-destructive/30 hover:bg-destructive/30 transition-all duration-200"
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
                         aria-label="Stop generating"
                       >
-                        <Square className="w-4 h-4 fill-current" />
+                        <Square className="w-3.5 h-3.5 fill-current" />
                       </motion.button>
                     ) : (
                       <motion.button
@@ -340,24 +449,24 @@ export default function ChatInput({ onSend, isLoading, disabled, onStop, modelNa
                         exit={{ scale: 0.8, opacity: 0 }}
                         aria-label="Send message"
                         className={`
-                          relative w-11 h-11 rounded-xl flex items-center justify-center
+                          relative w-9 h-9 rounded-full flex items-center justify-center
                           transition-all duration-300 overflow-hidden
-                          ${canSend 
-                            ? 'bg-gradient-to-br from-primary via-primary to-accent text-primary-foreground shadow-[0_0_20px_hsla(var(--primary)/0.6)] border border-primary/50' 
+                          ${canSend
+                            ? 'bg-gradient-to-br from-primary via-primary to-accent text-primary-foreground shadow-[0_0_16px_hsla(var(--primary)/0.6)] border border-primary/50'
                             : 'bg-muted/50 text-muted-foreground/30 cursor-not-allowed'
                           }
                         `}
-                        whileHover={canSend ? { scale: 1.1, y: -2, boxShadow: '0 0 30px hsla(var(--primary)/0.8)' } : {}}
+                        whileHover={canSend ? { scale: 1.08, y: -1, boxShadow: '0 0 24px hsla(var(--primary)/0.8)' } : {}}
                         whileTap={canSend ? { scale: 0.9, rotate: -10 } : {}}
                       >
                         {canSend && (
-                          <motion.div 
+                          <motion.div
                             className="absolute inset-0 bg-white/20"
                             animate={{ opacity: [0, 0.4, 0] }}
                             transition={{ duration: 1.5, repeat: Infinity }}
                           />
                         )}
-                        <Send className="w-[18px] h-[18px] relative z-10" />
+                        <Send className="w-[17px] h-[17px] relative z-10" />
                       </motion.button>
                     )}
                   </AnimatePresence>

@@ -24,8 +24,8 @@ export interface AIModel {
 // hang — were removed so the picker never offers a model that fails to fetch.
 export const AI_MODELS: AIModel[] = [
   // ── Featured Chat / Reasoning Models ──────────
-  { id: 'deepseek-v4-flash', name: 'Flyer AI', label: 'Flyer AI', description: 'Fast DeepSeek V4 reasoning (Default )', emoji: '⚡', kind: 'Chat', featured: true },
-  { id: 'mistral-large-latest', name: 'Mistral Large', label: 'Mistral Large', description: 'Fast flagship chat & vision (Mistral API)', emoji: '🧬', kind: 'Chat', featured: true },
+  { id: 'deepseek-v4-flash', name: 'Deepseek', label: 'Deepseek', description: 'Fast DeepSeek V4 reasoning (Default )', emoji: '⚡', kind: 'Chat', featured: true },
+  { id: 'mistral-large-latest', name: 'Flyer', label: 'Flyer', description: 'Fast flagship chat & vision (Mistral API)', emoji: '🧬', kind: 'Chat', featured: true },
   { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', label: 'DeepSeek V4', description: 'DeepSeek flagship reasoning)', emoji: '🧠', kind: 'Chat', featured: true },
   { id: 'llama-4-maverick', name: 'Llama 4 Maverick', label: 'Llama 4', description: 'Meta Llama 4 128-expert MoE)', emoji: '🦅', kind: 'Chat', featured: true },
   { id: 'kimi-k2.6', name: 'Kimi K2.6', label: 'Kimi K2.6', description: 'Moonshot AI Kimi K2.6 reasoning)', emoji: '🌙', kind: 'Chat', featured: true },
@@ -159,7 +159,7 @@ export default function ChatSidebar({
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden bg-black/10">
-                  <img src="/flyer-logo.png" alt="Flyer AI" className="w-full h-full object-cover" />
+                  <img src="/flyer-logo.png" alt="Deepseek" className="w-full h-full object-cover" />
                 </div>
                 <span className="font-display font-bold text-lg gradient-text">
                   Flyer

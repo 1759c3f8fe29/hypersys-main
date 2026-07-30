@@ -17,6 +17,9 @@ export interface SearchResponse {
   answerBox: { title: string | null; answer: string | null } | null;
   results: SearchResult[];
   related: string[];
+  // Set by /api/search when every provider failed (missing key, quota, blocked
+  // fallback). Lets the caller distinguish "search broke" from "web had nothing".
+  error?: string;
 }
 
 const SEARCH_PROXY_URL = "/api/search";
@@ -58,10 +61,13 @@ export async function evaluateSmartWebSearch(
   const fastModel = "ministral-8b";
 
   try {
+    const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
     const systemPrompt = [
       "You are an expert AI Web Search Evaluator & Query Synthesizer (like ChatGPT).",
+      `Today's date is ${today}.`,
       "Analyze the user's message to determine if accurate, up-to-date, recent, or real-time web search information is needed.",
       "If web search IS needed, synthesize a clean, standalone search query (keywords only, without filler like 'search for').",
+      "NEVER invent or hardcode a date in the query. Use relative words like 'today' or 'latest' instead — a wrong date returns stale results.",
       "",
       "Respond ONLY with valid JSON:",
       '{"shouldSearch": true, "searchQuery": "clean search terms"}',
