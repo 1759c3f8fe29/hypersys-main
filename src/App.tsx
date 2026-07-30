@@ -9,6 +9,7 @@ import Auth from "./pages/Auth";
 import Chat from "./pages/Chat";
 import NotFound from "./pages/NotFound";
 import { Sparkles } from "lucide-react";
+import { Analytics } from "@vercel/analytics/next"
 
 const queryClient = new QueryClient();
 
