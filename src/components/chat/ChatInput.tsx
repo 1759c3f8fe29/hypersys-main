@@ -212,19 +212,25 @@ export default function ChatInput({
             }}
           />
 
-          {/* Inner container */}
-          <div className="relative liquid-composer rounded-2xl sm:rounded-3xl overflow-hidden">
-            {/* Glass background */}
-            <div className={`
-              absolute inset-0 transition-all duration-500
-              ${isRecording 
-                ? 'bg-gradient-to-br from-destructive/20 via-destructive/10 to-secondary/60'
-                : isFocused 
-                  ? 'bg-gradient-to-br from-secondary/70 via-secondary/50 to-primary/10' 
-                  : 'bg-secondary/30'
-              }
-            `} />
-            <div className="absolute inset-0 backdrop-blur-2xl" />
+          {/* Inner container. NOTE: overflow-hidden must NOT live here — the "+"
+              menu renders above the bar (bottom-full) and a clip on this element
+              cuts off every item except the bottom-most one. The background
+              layers get their own clipped wrapper instead so the rounded corners
+              still mask the gradient and blur. */}
+          <div className="relative liquid-composer rounded-2xl sm:rounded-3xl">
+            <div className="absolute inset-0 rounded-2xl sm:rounded-3xl overflow-hidden">
+              {/* Glass background */}
+              <div className={`
+                absolute inset-0 transition-all duration-500
+                ${isRecording
+                  ? 'bg-gradient-to-br from-destructive/20 via-destructive/10 to-secondary/60'
+                  : isFocused
+                    ? 'bg-gradient-to-br from-secondary/70 via-secondary/50 to-primary/10'
+                    : 'bg-secondary/30'
+                }
+              `} />
+              <div className="absolute inset-0 backdrop-blur-2xl" />
+            </div>
 
             {/* Content */}
             <div className="relative px-2 py-1.5 sm:px-2.5 space-y-1">
