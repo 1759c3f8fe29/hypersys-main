@@ -373,6 +373,28 @@ export default function ChatInput({
                           <span>Search</span>
                           {webSearch && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
                         </button>
+
+                        {/* Accent picker. The header's swatch row is hidden below
+                            the sm breakpoint, so without this there is no way to
+                            change the accent on a phone at all. */}
+                        {onSelectAccent && (
+                          <div className="sm:hidden pt-1 mt-0.5 border-t border-border/40">
+                            <div className="flex items-center justify-between px-1.5 pb-1">
+                              {ACCENT_COLORS.map((c) => (
+                                <button
+                                  key={c.value}
+                                  type="button"
+                                  onClick={() => { onSelectAccent(c.value); setPlusOpen(false); }}
+                                  aria-label={`Accent ${c.name}`}
+                                  title={c.name}
+                                  className={`w-4 h-4 rounded-full transition-transform ${c.bg} ${
+                                    accentColor === c.value ? 'ring-2 ring-white scale-110' : 'opacity-60'
+                                  }`}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </motion.div>
                     )}
                   </AnimatePresence>

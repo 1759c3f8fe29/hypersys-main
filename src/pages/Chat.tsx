@@ -3,7 +3,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { firestoreDb } from '@/lib/firestore-db';
 import ChatSidebar, { AI_MODELS } from '@/components/chat/ChatSidebar';
 import ChatMessage from '@/components/chat/ChatMessage';
-import ChatInput from '@/components/chat/ChatInput';
+import ChatInput, { ACCENT_COLORS } from '@/components/chat/ChatInput';
 import ModelSelector from '@/components/chat/ModelSelector';
 import WelcomeScreen from '@/components/chat/WelcomeScreen';
 import { generateChatResponse, generateVisionResponse, generateImageResponse, craftImagePrompt, craftVisionPrompt, evaluateUserIntent, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
@@ -1168,14 +1168,7 @@ export default function Chat() {
 
             {/* Accent Color Switcher */}
             <div className="hidden sm:flex items-center gap-1.5 bg-secondary/40 border border-border/30 rounded-xl p-1.5 backdrop-blur-md">
-              {[
-                { name: 'Teal', value: '172 66% 50%', bg: 'bg-[#1ad1b9]' },
-                { name: 'Blue', value: '210 90% 55%', bg: 'bg-[#258eff]' },
-                { name: 'Purple', value: '270 85% 60%', bg: 'bg-[#984cff]' },
-                { name: 'Rose', value: '340 85% 55%', bg: 'bg-[#ff2d74]' },
-                { name: 'Amber', value: '30 95% 55%', bg: 'bg-[#ff8f1f]' },
-                { name: 'Emerald', value: '145 75% 45%', bg: 'bg-[#1cb866]' },
-              ].map((c) => (
+              {ACCENT_COLORS.map((c) => (
                 <button
                   key={c.value}
                   onClick={() => setAccentColor(c.value)}
@@ -1282,6 +1275,8 @@ export default function Chat() {
             onToggleDeepThink={() => setDeepThink((v) => !v)}
             webSearch={forceWebSearch}
             onToggleWebSearch={() => setForceWebSearch((v) => !v)}
+            accentColor={accentColor}
+            onSelectAccent={setAccentColor}
           />
         </div>
       </main>
