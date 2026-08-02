@@ -1,9 +1,5 @@
 import { motion } from 'framer-motion';
-<<<<<<< HEAD
 import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink } from 'lucide-react';
-=======
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw } from 'lucide-react';
->>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -11,11 +7,7 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useState } from 'react';
 import { useTextToSpeech } from '@/hooks/useTextToSpeech';
 import { extractFirstMarkdownImage, sanitizeAssistantText, stripMarkdownImages } from '@/lib/chat-format';
-<<<<<<< HEAD
 import type { ChatAttachment, MessageSource } from './types';
-=======
-import type { ChatAttachment } from './types';
->>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
 
 interface ArenaResponse {
   modelId: string;
@@ -31,17 +23,13 @@ interface ChatMessageProps {
   imageUrl?: string;
   modelName?: string;
   statusText?: string;
-<<<<<<< HEAD
   sources?: MessageSource[];
-=======
->>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
   onRegenerate?: () => void;
   canRegenerate?: boolean;
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
 }
 
-<<<<<<< HEAD
 function hostOf(link: string): string {
   try {
     return new URL(link).hostname.replace(/^www\./, '');
@@ -94,8 +82,6 @@ function SourceChips({ sources }: { sources: MessageSource[] }) {
   );
 }
 
-=======
->>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
 function CodeBlock({ language, children }: { language: string; children: string }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
@@ -214,11 +200,7 @@ const MARKDOWN_COMPONENTS: any = {
   },
 };
 
-<<<<<<< HEAD
 export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, onRegenerate, canRegenerate, isArenaMode, arenaResponses }: ChatMessageProps) {
-=======
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, onRegenerate, canRegenerate, isArenaMode, arenaResponses }: ChatMessageProps) {
->>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedArenaIdx, setCopiedArenaIdx] = useState<number | null>(null);
@@ -386,11 +368,8 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                 />
               )}
             </div>
-<<<<<<< HEAD
 
             {!isUser && sources && sources.length > 0 && <SourceChips sources={sources} />}
-=======
->>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
           </div>
 
           {/* Secondary Models (Arena Mode) — separated by clear line borders */}

@@ -77,7 +77,6 @@
     overscroll-behavior-x: none !important;
     -webkit-overflow-scrolling: auto !important;
     -webkit-tap-highlight-color: transparent;
-<<<<<<< HEAD
     /* iOS inflates text when a phone is rotated to landscape unless this is
        pinned, which makes the whole layout jump. */
     -webkit-text-size-adjust: 100%;
@@ -115,8 +114,6 @@
     select {
       font-size: 16px;
     }
-=======
->>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
   }
 
   body {
@@ -139,11 +136,7 @@
     position: fixed;
     inset: 0;
     width: 100vw;
-<<<<<<< HEAD
     height: 100dvh;
-=======
-    height: 100vh;
->>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
     opacity: 0.025;
     pointer-events: none;
     z-index: 9999;
@@ -153,14 +146,6 @@
   h1, h2, h3, h4, h5, h6 {
     font-family: 'Space Grotesk', system-ui, sans-serif;
   }
-<<<<<<< HEAD
-=======
-
-  /* Safe area for mobile */
-  .safe-area-inset-bottom {
-    padding-bottom: env(safe-area-inset-bottom, 0);
-  }
->>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
 }
 
 @layer components {
