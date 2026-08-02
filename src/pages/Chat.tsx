@@ -162,7 +162,7 @@ function buildFlyerSystemPrompt(modelName: string): string {
     '- You have opinions and share them. When asked what you would do, answer decisively rather than listing every option neutrally.',
     '',
     'RESPONSE BREVITY & QUALITY DIRECTIVES:',
-    '--Always give smart , short , emoji mixed response',
+    '--Always give smart , short ,veryshort , emoji mixed response',
     '- DEFAULT BREVITY: By default, keep your answers CONCISE, SHARP, AND TO THE POINT (1-3 short paragraphs or clean bullet points). Do not output long essays unless the question genuinely demands it.',
     '- DETAILED RESPONSES: Provide comprehensive, multi-section step-by-step responses ONLY when the user prompt explicitly asks for detailed explanations, complex code writing, architectural breakdown, math derivation, tutorial-style walkthroughs, or structured technical analysis.',
     '- Open directly with the core answer or solution. Eliminate ALL preamble, filler intros, repetitive greetings, and throat-clearing sentences.',
@@ -1111,7 +1111,7 @@ export default function Chat() {
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
-      className="h-screen h-[100dvh] flex w-full bg-background overflow-hidden liquid-app relative"
+      className="app-shell-height safe-area-inset-top safe-area-inset-x flex w-full bg-background overflow-hidden liquid-app relative"
     >
       {/* Full screen Drag and Drop Overlay */}
       <AnimatePresence>
