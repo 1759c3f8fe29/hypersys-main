@@ -23,7 +23,12 @@
       "Bash(head -409 src/components/chat/ChatInput.tsx)",
       "Bash(mv /tmp/ci.tsx src/components/chat/ChatInput.tsx)",
       "Bash(git stash *)",
-      "Bash(echo \"TSC=$?\")"
+      "Bash(echo \"TSC=$?\")",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\('type:', p.type\\); console.log\\('engines:', JSON.stringify\\(p.engines\\)\\); console.log\\('scripts.build:', p.scripts.build\\);\")",
+      "Bash(curl -s -X POST https://myflyer.vercel.app/api/search -H \"Content-Type: application/json\" -d '{\"query\":\"latest AI news today\",\"num\":6}' --max-time 45)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" -X POST https://myflyer.vercel.app/api/search -H \"Content-Type: application/json\" -d '{\"query\":\"test\",\"num\":3}' --max-time 45)",
+      "Bash(curl -s -X POST \"https://lite.duckduckgo.com/lite/\" -H \"Content-Type: application/x-www-form-urlencoded\" -H \"User-Agent: Mozilla/5.0 \\(Macintosh; Intel Mac OS X 10_15_7\\) AppleWebKit/605.1.15 \\(KHTML, like Gecko\\) Version/17.0 Safari/605.1.15\" --data-urlencode \"q=latest AI news\" --max-time 30 -o /tmp/ddg.html -w \"http=%{http_code} bytes=%{size_download}\\\\n\")",
+      "Read(//tmp/**)"
     ]
   }
 }
