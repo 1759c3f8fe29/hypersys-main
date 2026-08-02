@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm ls *)",
+      "Bash(timeout 150 npx vite build)",
+      "Bash(npm run *)",
+      "Bash(npx tsc *)",
+      "Bash(python3 *)",
+      "Bash(curl -s --max-time 25 \"https://image.pollinations.ai/models\")",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(npx vite *)",
+      "Bash(curl -s -X POST http://localhost:5199/api/mistral -H \"Content-Type: application/json\" -d '{\"model\":\"mistral-small-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"say hi\"}],\"stream\":true,\"max_tokens\":20}' -w \"\\\\n[HTTP %{http_code}]\\\\n\")",
+      "Bash(curl -s -o /tmp/img_out.bin -w \"HTTP %{http_code} type=%{content_type} bytes=%{size_download}\\\\n\" \"http://localhost:5199/\")",
+      "Bash(curl -s -o /tmp/img_out.bin -w \"HTTP %{http_code} type=%{content_type} bytes=%{size_download}\\\\n\" \"https://image.pollinations.ai/prompt/a%20red%20cube?nologo=true&enhance=true&model=flux\")",
+      "Bash(curl -s -X POST http://localhost:5199/api/nvidia -H \"Content-Type: application/json\" -d '{\"model\":\"meta/llama-3.2-11b-vision-instruct\",\"messages\":[{\"role\":\"user\",\"content\":\"reply with the word OK\"}],\"stream\":true,\"max_tokens\":5}' -w \"\\\\n[HTTP %{http_code}]\\\\n\")",
+      "Bash(npx eslint *)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(cd /home/santosh/.claude/projects/-home-santosh-hypersys-main/e8a19758-83d9-4580-a4f9-41233e255239/subagents/workflows/wf_a850b382-14f)",
+      "Bash(wc -l journal.jsonl)",
+      "Bash(mkdir -p /tmp/logo-backup)",
+      "Bash(cp -v public/flyer-logo.png public/apple-touch-icon.png public/favicon.ico public/icons/icon-512.png /tmp/logo-backup/)",
+      "Bash(awk '{print $5\"  \"$9}')",
+      "Bash(head -409 src/components/chat/ChatInput.tsx)",
+      "Bash(mv /tmp/ci.tsx src/components/chat/ChatInput.tsx)",
+      "Bash(git stash *)"
+    ]
+  }
+}
