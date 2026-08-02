@@ -77,6 +77,43 @@
     overscroll-behavior-x: none !important;
     -webkit-overflow-scrolling: auto !important;
     -webkit-tap-highlight-color: transparent;
+    /* iOS inflates text when a phone is rotated to landscape unless this is
+       pinned, which makes the whole layout jump. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  /* Kill the ~300ms tap delay browsers reserve for double-tap-to-zoom on
+     anything interactive. Taps feel instant, pinch-zoom on the page still
+     works because we scope this to controls rather than the document. */
+  button,
+  a,
+  [role="button"],
+  [role="menuitem"],
+  label,
+  summary {
+    touch-action: manipulation;
+  }
+
+  /* Native apps don't let you text-select chrome by long-pressing it. Message
+     content is deliberately excluded so users can still copy replies. */
+  button,
+  a,
+  [role="button"],
+  [role="menuitem"] {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* iOS Safari zooms the viewport whenever a focused field's text is under
+     16px. Bumping the mobile font size is the only reliable fix; the sm:
+     breakpoint in each component restores the smaller desktop sizing. */
+  @media (max-width: 640px) {
+    input:not([type="checkbox"]):not([type="radio"]),
+    textarea,
+    select {
+      font-size: 16px;
+    }
   }
 
   body {
@@ -99,7 +136,7 @@
     position: fixed;
     inset: 0;
     width: 100vw;
-    height: 100vh;
+    height: 100dvh;
     opacity: 0.025;
     pointer-events: none;
     z-index: 9999;
@@ -108,11 +145,6 @@
 
   h1, h2, h3, h4, h5, h6 {
     font-family: 'Space Grotesk', system-ui, sans-serif;
-  }
-
-  /* Safe area for mobile */
-  .safe-area-inset-bottom {
-    padding-bottom: env(safe-area-inset-bottom, 0);
   }
 }
 

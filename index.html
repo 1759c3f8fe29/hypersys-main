@@ -2,7 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
+    <!-- viewport-fit=cover lets the app paint into the notch/home-indicator area
+         (we pay it back with env(safe-area-inset-*) padding in index.css).
+         interactive-widget=resizes-content makes the on-screen keyboard shrink the
+         layout viewport instead of covering it, so 100dvh keeps the composer
+         visible while typing. maximum-scale is left at 5 so pinch-zoom still works. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover, interactive-widget=resizes-content" />
     
     <!-- Primary Meta Tags -->
     <title>Flyer AI: Chat, Work, Create, Search &amp; Code with AI</title>

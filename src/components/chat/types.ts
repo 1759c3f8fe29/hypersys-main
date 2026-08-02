@@ -6,3 +6,10 @@ export interface ChatAttachment {
   mimeType?: string;
   size?: number;
 }
+
+// Web-search results shown under an assistant reply that was grounded.
+export interface MessageSource {
+  title: string;
+  link: string;
+  source?: string | null;
+}

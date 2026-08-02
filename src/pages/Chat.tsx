@@ -8,7 +8,7 @@ import ModelSelector from '@/components/chat/ModelSelector';
 import WelcomeScreen from '@/components/chat/WelcomeScreen';
 import { generateChatResponse, generateVisionResponse, generateImageResponse, craftImagePrompt, craftVisionPrompt, evaluateUserIntent, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
 import { evaluateSmartWebSearch, webSearch, buildSearchContext } from '@/lib/search';
-import type { ChatAttachment } from '@/components/chat/types';
+import type { ChatAttachment, MessageSource } from '@/components/chat/types';
 import { Menu, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -27,6 +27,8 @@ interface Message {
   imageUrl?: string;
   attachments?: ChatAttachment[];
   modelName?: string;
+  // Web pages this reply was grounded on, shown as source chips.
+  sources?: MessageSource[];
   // Arena Mode
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
@@ -47,6 +49,19 @@ interface Conversation {
 const REQUEST_TIMEOUT_MS = 130_000;
 const SLOW_REQUEST_TIMEOUT_MS = 130_000;
 const DEFAULT_VISION_MODEL = VISION_ENGINE_MODEL;
+
+// Open-ended requests benefit from the crafted master analysis prompt; targeted
+// questions do not (see the call site in handleSendMessage).
+const OPEN_ENDED_VISION_REQUEST = /\b(describe|analy[sz]e|explain|breakdown|break down|what(?:'s| is) (?:in|this|going on)|tell me about|review|critique|summari[sz]e|extract everything|full details?)\b/i;
+
+function wantsFullVisionAnalysis(request: string): boolean {
+  const text = (request || '').trim();
+  // The default text used when a file is attached with no message.
+  if (!text || text === 'Describe this image in detail.') return true;
+  // A short prompt is almost always a pointed question ("what colour?", "read this").
+  if (text.length < 24 && !OPEN_ENDED_VISION_REQUEST.test(text)) return false;
+  return OPEN_ENDED_VISION_REQUEST.test(text);
+}
 // Default renderer for a text-to-image request that fires from a Chat model,
 // and the chat model used to author an image prompt when the user is on an
 // Image model (so the prompt is always written by a chat model).
@@ -775,7 +790,11 @@ export default function Chat() {
 
         // When images/files are uploaded, use the Chat model first to craft a 1000-word
         // master vision analysis prompt to supply internally to the vision engine.
-        if (hasImages) {
+        // Only worth the extra round-trip for open-ended "describe / analyse this"
+        // turns: for a specific question ("what does line 3 say?") the generic
+        // master prompt buries the actual question and the engine answers the
+        // wrong thing, so the user's own words are sent instead.
+        if (hasImages && wantsFullVisionAnalysis(requestContent)) {
           try {
             setStatusText('Analyzing image...');
             const masterVisionPrompt = await craftVisionPrompt(
@@ -790,7 +809,16 @@ export default function Chat() {
               messagesForModel[lastIdx] = {
                 role: 'user',
                 content: [
-                  { type: 'text', text: masterVisionPrompt },
+                  // The user's literal request stays first and last so the engine
+                  // answers *it*, using the master prompt only as guidance.
+                  { type: 'text', text: [
+                    `USER'S REQUEST: ${requestContent}`,
+                    '',
+                    'Analysis guidance:',
+                    masterVisionPrompt,
+                    '',
+                    `Answer the user's request above ("${requestContent}") directly and first.`,
+                  ].join('\n') },
                   ...contentArray.filter((part) => part.type === 'image_url'),
                 ],
               };
@@ -802,6 +830,7 @@ export default function Chat() {
 
         // Web search execution. The Search toggle forces grounding regardless of
         // what the classifier decided; otherwise the classifier's call stands.
+        let turnSources: MessageSource[] = [];
         const shouldSearch = !hasImages && (forceWebSearch || intentEval.needsSearch);
         const searchQuery = (intentEval.searchQuery || requestContent).trim();
         if (shouldSearch && searchQuery) {
@@ -810,6 +839,12 @@ export default function Chat() {
             setStatusText('Searching the web...');
             const search = await webSearch(searchQuery, abortControllerRef.current?.signal);
             const context = buildSearchContext(search);
+            if (search?.results?.length) {
+              turnSources = search.results
+                .filter((r) => r.link)
+                .slice(0, 8)
+                .map((r) => ({ title: r.title || r.link, link: r.link, source: r.source }));
+            }
             if (context) {
               messagesForModel.splice(messagesForModel.length - 1, 0, {
                 role: 'system',
@@ -849,12 +884,13 @@ export default function Chat() {
             m.id === assistantMessage.id
               ? {
                   ...m,
+                  sources: turnSources.length ? turnSources : undefined,
                   isArenaMode: activeArenaMode,
-                  arenaResponses: activeArenaMode 
-                    ? compareModels.map(modelId => ({ 
-                        modelId, 
-                        modelName: AI_MODELS.find(x => x.id === modelId)?.name || 'AI', 
-                        content: '' 
+                  arenaResponses: activeArenaMode
+                    ? compareModels.map(modelId => ({
+                        modelId,
+                        modelName: AI_MODELS.find(x => x.id === modelId)?.name || 'AI',
+                        content: ''
                       }))
                     : undefined,
                 }
@@ -874,7 +910,20 @@ export default function Chat() {
             );
           };
 
-          if (hasImages) {
+          if (hasImages && isVisionCapableModel(selectedModel)) {
+            // The selected model can read the image itself, so answer in one hop.
+            // The old two-hop path (vision engine → text-only synthesis) dropped
+            // the image before the second call, so the model that actually wrote
+            // the reply had never seen it and could only paraphrase.
+            setStatusText(deepThink ? 'Thinking deeply...' : 'Analyzing image...');
+            await generateChatResponse(
+              messagesForModel,
+              selectedModel,
+              handleDelta,
+              abortControllerRef.current!.signal,
+              { deepThink },
+            );
+          } else if (hasImages) {
             // Step 1: Run Vision Engine (Mistral Pixtral 12B by default) to extract raw visual breakdown
             let rawVisionOutput = '';
             setStatusText('Running vision analysis...');
@@ -1254,6 +1303,7 @@ export default function Chat() {
                     isStreaming={isLoading && msg.role === 'assistant' && index === messages.length - 1}
                     modelName={msg.modelName || 'AI'}
                     statusText={isLoading && msg.role === 'assistant' && index === messages.length - 1 ? statusText : undefined}
+                    sources={msg.sources}
                     onRegenerate={handleRegenerate}
                     canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}
                     isArenaMode={msg.isArenaMode}
