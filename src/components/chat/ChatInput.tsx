@@ -171,8 +171,11 @@ export default function ChatInput({
   const canSend = (!!message.trim() || selectedFiles.length > 0) && !isLoading && !disabled;
   const isImageFile = (file: File) => file.type.startsWith('image/');
 
+  // No pb-* on the wrapper below: .safe-area-inset-bottom supplies it via
+  // calc(0.75rem + env(safe-area-inset-bottom)) so the composer clears the
+  // home indicator instead of sitting under it.
   return (
-    <div className="px-3 pb-3 pt-2 sm:px-4 sm:pb-4 lg:px-6 bg-gradient-to-t from-background via-background/95 to-transparent safe-area-inset-bottom">
+    <div className="px-3 pt-2 sm:px-4 lg:px-6 bg-gradient-to-t from-background via-background/95 to-transparent safe-area-inset-bottom">
       <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
         {/* Futuristic rotating border container */}
         <div className="relative">
@@ -293,7 +296,11 @@ export default function ChatInput({
                 disabled={disabled || isRecording}
                 rows={1}
                 aria-label="Message input"
-                className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-1 px-1.5 max-h-[120px] scrollbar-thin text-sm sm:text-[15px] leading-snug font-medium"
+                /* text-base (16px) on mobile is deliberate, not a style choice:
+                   iOS Safari zooms the whole viewport when a focused field's
+                   text is under 16px, and never zooms back out. sm: restores
+                   the intended 15px on larger screens. */
+                className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-1 px-1.5 max-h-[120px] scrollbar-thin text-base sm:text-[15px] leading-snug font-medium"
               />
 
               {/* Row 2: a "+" menu holds attach/DeepThink/Search so the bar stays

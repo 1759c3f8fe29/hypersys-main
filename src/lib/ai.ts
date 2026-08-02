@@ -270,7 +270,32 @@ export async function evaluateUserIntent(
     /\b(generate|create|draw|design|render|illustrate|paint|sketch)\b.*\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|avatar|painting|drawing)\b/i.test(text) ||
     /\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|avatar|painting|drawing)\b.*\b(generate|create|make|draw|design|render|illustrate|paint|sketch)\b/i.test(text);
 
+  // Split into two tiers. The broad tier is advisory — it only fills in when the
+  // classifier gives us nothing usable, because terms like "what is" or "find"
+  // match plenty of questions that need no web at all ("what is a closure").
   const searchKeywordMatch = /\b(today|tonight|current(?:ly)?|now|latest|recent(?:ly)?|this (?:week|month|year)|news|weather|score|stock|price of|release date|who is|what is|search|google|find)\b/i.test(text);
+
+  // The decisive tier: phrasing that cannot be answered correctly from training
+  // data no matter how capable the model is. A false negative here is the exact
+  // failure users report as "web search is broken" — the model answers from a
+  // stale snapshot and volunteers that it has no live access. So these OVERRIDE
+  // the classifier rather than deferring to it.
+  const HARD_LIVE_SIGNAL = new RegExp(
+    [
+      // Explicit recency/liveness
+      "\\b(today|tonight|right now|as of (?:today|now)|currently|breaking|just (?:announced|released|happened))\\b",
+      // "latest / newest / most recent X"
+      "\\b(latest|newest|most recent|up[- ]to[- ]date)\\b",
+      // Continuously changing quantities
+      "\\b(weather|forecast|temperature|stock price|share price|exchange rate|who won|final score|standings|box office)\\b",
+      // Explicit user command to search
+      "\\b(search (?:for|the web|online)|look (?:this )?up|google (?:it|this)|cite (?:a )?sources?)\\b",
+      // A year at or beyond the present one — training data cannot cover it
+      "\\b(20(?:2[6-9]|[3-9]\\d))\\b",
+    ].join("|"),
+    "i",
+  );
+  const hardLiveSignal = HARD_LIVE_SIGNAL.test(text);
 
   // Classification always runs on Ministral 8B via the Mistral API. It returns
   // plain JSON in `content`, unlike the NIM reasoning models which spend their
@@ -301,23 +326,39 @@ export async function evaluateUserIntent(
       signal,
     );
 
-    const jsonMatch = result.match(/\{[\s\S]*\}/);
+    // ministral-8b reliably wraps its JSON in ```json fences despite being told
+    // not to, and a greedy {...} match spanning fences can swallow trailing
+    // prose. Strip fences first, then take the first balanced object.
+    const unfenced = result.replace(/```(?:json)?/gi, "");
+    const jsonMatch = unfenced.match(/\{[\s\S]*?\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
+      const modelSaysSearch = typeof parsed.needsSearch === "boolean" ? parsed.needsSearch : searchKeywordMatch;
+      // OR, never override: the classifier may add a search the regex missed,
+      // but it may not veto one the hard signal proved necessary.
+      const needsSearch = modelSaysSearch || hardLiveSignal;
+      // A query is only needed when searching. Fall back to the raw text if the
+      // model set needsSearch=false (and thus searchQuery="") but the hard
+      // signal turned it back on — otherwise we'd search for an empty string.
+      const craftedQuery = typeof parsed.searchQuery === "string" ? parsed.searchQuery.trim() : "";
       return {
         needsImage: explicitImageModel || (typeof parsed.needsImage === "boolean" ? parsed.needsImage : imageKeywordMatch),
-        needsSearch: typeof parsed.needsSearch === "boolean" ? parsed.needsSearch : searchKeywordMatch,
-        searchQuery: (parsed.searchQuery || text).trim(),
+        needsSearch,
+        searchQuery: needsSearch ? (craftedQuery || text) : "",
         fastModelUsed: fastModel,
       };
     }
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") throw err;
+    console.warn("[intent] classifier failed, falling back to heuristics:", err);
   }
 
+  // Classifier unavailable (network, quota, unparseable). Fall back to the
+  // heuristics rather than defaulting search off, so grounding degrades
+  // gracefully instead of disappearing.
   return {
     needsImage: imageKeywordMatch,
-    needsSearch: searchKeywordMatch,
+    needsSearch: searchKeywordMatch || hardLiveSignal,
     searchQuery: text,
     fastModelUsed: fastModel,
   };
