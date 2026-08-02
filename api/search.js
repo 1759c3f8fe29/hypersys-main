@@ -96,9 +96,15 @@ export default async function handler(req, res) {
           ...(data.related_searches || []).map((r) => r.query),
         ].filter(Boolean).slice(0, 4);
 
-        res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
-        res.status(200).json({ query, answerBox, results, related });
-        return;
+        // Mirrors vite.config.ts: a 200 carrying nothing usable must fall
+        // through to DuckDuckGo instead of reporting success with no results.
+        if (results.length > 0 || answerBox?.answer) {
+          res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
+          res.status(200).json({ query, answerBox, results, related });
+          return;
+        }
+        serpError = "serpapi_zero_results";
+        console.warn("[search] SerpApi returned 0 usable results — trying DuckDuckGo.");
         }
       }
     } catch (err) {

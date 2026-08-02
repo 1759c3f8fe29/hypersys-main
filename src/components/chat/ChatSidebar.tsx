@@ -152,7 +152,7 @@ export default function ChatSidebar({
         initial={false}
         animate={{ width: isCollapsed ? 0 : 280, x: isCollapsed ? -280 : 0 }}
         transition={{ duration: 0.3, ease: 'easeInOut' }}
-        className="fixed lg:relative h-screen liquid-sidebar border-r border-sidebar-border z-50 flex flex-col overflow-hidden"
+        className="fixed lg:relative app-shell-height liquid-sidebar border-r border-sidebar-border z-50 flex flex-col overflow-hidden"
       >
         <div className="flex flex-col h-full w-[280px]">
           <div className="p-4 border-b border-sidebar-border">

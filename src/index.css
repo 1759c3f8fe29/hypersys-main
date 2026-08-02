@@ -105,6 +105,31 @@
     user-select: none;
   }
 
+  /* We turned off -webkit-tap-highlight-color above, which on a phone leaves
+     taps with no feedback at all: :hover never fires on touch, so a control
+     looks inert until its action completes. This restores the missing beat with
+     the press cue native UI uses — a quick scale-down — and is scoped to
+     coarse-pointer devices so mouse users keep their existing hover states.
+     :active on the element itself means no JS and no per-component changes. */
+  @media (hover: none) and (pointer: coarse) {
+    button:active,
+    a:active,
+    [role="button"]:active,
+    [role="menuitem"]:active {
+      transform: scale(0.97);
+      opacity: 0.85;
+      /* Fast in, so the cue lands within the tap rather than after it. */
+      transition: transform 80ms ease-out, opacity 80ms ease-out;
+    }
+
+    /* Disabled controls must not pretend to respond. */
+    button:disabled:active,
+    [role="button"][aria-disabled="true"]:active {
+      transform: none;
+      opacity: inherit;
+    }
+  }
+
   /* iOS Safari zooms the viewport whenever a focused field's text is under
      16px. Bumping the mobile font size is the only reliable fix; the sm:
      breakpoint in each component restores the smaller desktop sizing. */

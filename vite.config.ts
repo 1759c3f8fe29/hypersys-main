@@ -330,9 +330,17 @@ async function proxySearch(
           ...(data.related_searches || []).map((r: any) => r.query),
         ].filter(Boolean).slice(0, 4);
 
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ query, answerBox, results, related }));
-        return;
+        // Only treat this as a win if something usable came back. A 200 with an
+        // empty organic array (over-specific query, SerpApi quota soft-fail)
+        // used to short-circuit the DuckDuckGo fallback and hand the model an
+        // empty result set, which reads to the user as "search is broken".
+        if (results.length > 0 || answerBox?.answer) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ query, answerBox, results, related }));
+          return;
+        }
+        serpError = "serpapi_zero_results";
+        console.warn("[search] SerpApi returned 0 usable results — trying DuckDuckGo.");
       }
     } catch (err) {
       serpError = "serpapi_fetch_failed";

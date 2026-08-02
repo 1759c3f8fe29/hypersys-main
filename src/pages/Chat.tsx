@@ -837,7 +837,14 @@ export default function Chat() {
           try {
             setIsSearching(true);
             setStatusText('Searching the web...');
-            const search = await webSearch(searchQuery, abortControllerRef.current?.signal);
+            let search = await webSearch(searchQuery, abortControllerRef.current?.signal);
+            // The classifier sometimes over-narrows the query into something with
+            // no coverage. If a crafted query came back empty, retry once with the
+            // user's own words before giving up — cheap, and it rescues the turn.
+            const craftedQueryFailed = !search?.results?.length && searchQuery !== requestContent.trim();
+            if (craftedQueryFailed && requestContent.trim()) {
+              search = await webSearch(requestContent.trim(), abortControllerRef.current?.signal);
+            }
             const context = buildSearchContext(search);
             if (search?.results?.length) {
               turnSources = search.results
@@ -1273,7 +1280,11 @@ export default function Chat() {
         </header>
 
         {/* Messages */}
-        <div ref={scrollContainerRef} className="relative z-10 flex-1 overflow-y-auto scrollbar-thin min-h-0 overflow-anchor-none" style={{ overscrollBehavior: 'none' }}>
+        {/* touch-scroll-y replaces the old inline overscrollBehavior:'none': it
+            keeps scroll from chaining to the document while re-enabling iOS
+            momentum, which the document-level -webkit-overflow-scrolling reset
+            had killed for this region too. */}
+        <div ref={scrollContainerRef} className="relative z-10 flex-1 overflow-y-auto scrollbar-thin min-h-0 overflow-anchor-none touch-scroll-y">
           <AnimatePresence mode="wait">
             {isMessagesLoading ? (
               <div key="loading-messages" className="flex flex-col items-center justify-center h-full min-h-[50dvh]">
