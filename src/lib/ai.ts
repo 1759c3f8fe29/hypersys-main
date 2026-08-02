@@ -45,9 +45,12 @@ export const MODEL_REGISTRY: Record<
   "step-3.7-flash":    { nvidiaId: "stepfun-ai/step-3.7-flash",               kind: "Chat" },
 
   // ── Vision (image understanding engines) ──────
-  "vision-engine":     { nvidiaId: "pixtral-12b",                              kind: "Vision" },
-  "vision-engine-2":   { nvidiaId: "meta/llama-3.2-90b-vision-instruct",      kind: "Vision" },
-  "vision-engine-3":   { nvidiaId: "meta/llama-3.2-11b-vision-instruct",      kind: "Vision" },
+  // NOTE: these are NVIDIA NIM catalog ids and must exist in the NIM catalog.
+  // "vision-engine" previously pointed at the bare string "pixtral-12b", which
+  // is a Mistral id, not a NIM one — NIM answered every such call with a 404.
+  "vision-engine":     { nvidiaId: "meta/llama-3.2-90b-vision-instruct",      kind: "Vision" },
+  "vision-engine-2":   { nvidiaId: "meta/llama-3.2-11b-vision-instruct",      kind: "Vision" },
+  "vision-engine-3":   { nvidiaId: "microsoft/phi-3-vision-128k-instruct",    kind: "Vision" },
 
   // ── Image Generation Models (NVIDIA NIM & Pollinations) ──
   "sana":              { nvidiaId: "nvidia/sana",                              kind: "Image" },
@@ -65,7 +68,30 @@ export function getNvidiaId(modelId: string): string {
 // Defaults to Mistral Vision (pixtral-12b) as requested.
 export const VISION_ENGINE_MODEL = "pixtral-12b";
 
-export const VISION_ENGINE_FALLBACKS = ["pixtral-12b", "mistral-large-latest", "vision-engine", "vision-engine-2", "vision-engine-3"];
+// Tried in order by generateVisionResponse. Two Mistral engines first (they
+// accept OpenAI-style `image_url` data URLs directly), then the NIM vision
+// models so an outage or a missing MISTRAL_API_KEY still resolves to an answer.
+export const VISION_ENGINE_FALLBACKS = [
+  "pixtral-12b",
+  "mistral-medium",
+  "mistral-large-latest",
+  "vision-engine",
+  "vision-engine-2",
+];
+
+// Models that actually accept image input. Verified live against the provider
+// catalogs: every current Mistral *chat* model is multimodal, but the code
+// models (codestral / devstral) and the audio models (voxtral) are not, so a
+// blanket "is it Mistral?" test would route images into a model that rejects them.
+const VISION_CAPABLE_IDS = new Set([
+  "Flyer AI",
+  "mistral-large-latest",
+  "mistral-large",
+  "mistral-medium",
+  "mistral-small",
+  "pixtral-12b",
+  "ministral-8b",
+]);
 
 export function isMistralModel(modelId: string): boolean {
   if (!modelId) return true;

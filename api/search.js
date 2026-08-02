@@ -128,44 +128,22 @@ export default async function handler(req, res) {
   res.status(200).json({ query, answerBox: null, results: [], related: [], error: serpError || "no_results" });
 }
 
+// DuckDuckGo's lite endpoint answers a GET with an anti-bot challenge page
+// ("anomaly modal") and no results. A form POST still returns real results, so
+// the query goes in the body rather than the query string.
 async function fetchDuckDuckGoSearch(query) {
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const res = await fetch(url, {
+  const res = await fetch("https://lite.duckduckgo.com/lite/", {
+    method: "POST",
     headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
       "Accept-Language": "en-US,en;q=0.9",
+      "Content-Type": "application/x-www-form-urlencoded",
     },
+    body: new URLSearchParams({ q: query }).toString(),
   });
   if (!res.ok) return null;
   const html = await res.text();
-  const results = [];
-  const blocks = html.split(/class="[^"]*result__body[^"]*"/);
-
-  for (let i = 1; i < blocks.length && results.length < 6; i++) {
-    const block = blocks[i];
-    const titleMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/);
-    const snippetMatch = block.match(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/) ||
-                         block.match(/<td[^>]*class="[^"]*result-snippet[^"]*"[^>]*>([\s\S]*?)<\/td>/);
-    const linkMatch = block.match(/href="([^"]*uddg=[^"]*)"/) || block.match(/class="result__url"[^>]*href="([^"]+)"/);
-
-    if (titleMatch) {
-      const title = titleMatch[1].replace(/<[^>]+>/g, "").trim();
-      const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
-      let link = "";
-      if (linkMatch) {
-        const rawLink = linkMatch[1];
-        if (rawLink.includes("uddg=")) {
-          const match = rawLink.match(/uddg=([^&]+)/);
-          if (match) link = decodeURIComponent(match[1]);
-        } else {
-          link = rawLink;
-        }
-      }
-      if (title && (snippet || link)) {
-        results.push({ title, snippet, link, source: "DuckDuckGo Web", date: null });
-      }
-    }
-  }
+  const results = parseDuckDuckGoLite(html);
 
   return {
     query,
@@ -173,6 +151,53 @@ async function fetchDuckDuckGoSearch(query) {
     results,
     related: [],
   };
+}
+
+// The lite layout is a flat <table> of rows: a result-link anchor, then a
+// result-snippet cell. Pair them up positionally rather than by container.
+export function parseDuckDuckGoLite(html, limit = 6) {
+  const linkRe = /<a[^>]*href="([^"]+)"[^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>/g;
+  const snippetRe = /<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/g;
+
+  const snippets = [];
+  for (let m = snippetRe.exec(html); m; m = snippetRe.exec(html)) {
+    snippets.push(decodeEntities(stripTags(m[1])));
+  }
+
+  const results = [];
+  let i = 0;
+  for (let m = linkRe.exec(html); m && results.length < limit; m = linkRe.exec(html), i++) {
+    const link = resolveDuckDuckGoLink(m[1]);
+    const title = decodeEntities(stripTags(m[2]));
+    if (!title || !link) continue;
+    results.push({ title, snippet: snippets[i] || "", link, source: "DuckDuckGo Web", date: null });
+  }
+  return results;
+}
+
+// Lite sometimes links straight out and sometimes via /l/?uddg=<encoded>.
+function resolveDuckDuckGoLink(raw) {
+  const href = decodeEntities(raw);
+  const redirect = href.match(/[?&]uddg=([^&]+)/);
+  if (redirect) {
+    try { return decodeURIComponent(redirect[1]); } catch { return ""; }
+  }
+  if (href.startsWith("//")) return `https:${href}`;
+  return href.startsWith("http") ? href : "";
+}
+
+function stripTags(s) {
+  return s.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+
+function decodeEntities(s) {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
 }
 
 function safeParse(s) {

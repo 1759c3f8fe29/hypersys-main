@@ -264,10 +264,18 @@ async function proxySearch(
 
   const num = Math.min(Number(body.num) || 6, 10);
 
+  // Mirrors api/search.js: track *why* search failed so the client can tell the
+  // model "search is broken" rather than "the web returned nothing".
+  let serpError: string | null = null;
+
   if (serpKey) {
     try {
       const params = new URLSearchParams({ q: query, api_key: serpKey, engine: "google", num: String(num) });
       const upstream = await fetch(`https://serpapi.com/search.json?${params}`);
+      if (!upstream.ok) {
+        serpError = `serpapi_http_${upstream.status}`;
+        console.error("[search] SerpApi error:", upstream.status);
+      }
       if (upstream.ok) {
         const data = await upstream.json();
         const organic = (data.organic_results || []).map((r: any) => ({
@@ -294,7 +302,10 @@ async function proxySearch(
           date: r.date || null,
         }));
 
-        const combined = [...organic, ...news, ...topStories];
+        // News and top-stories first (mirrors api/search.js): for time-sensitive
+        // queries these carry the fresh, dated items, while organic results skew
+        // toward evergreen pages.
+        const combined = [...news, ...topStories, ...organic];
         const seenLinks = new Set<string>();
         const results = combined.filter((r) => {
           if (!r.title || (!r.snippet && !r.link)) return false;
@@ -324,8 +335,12 @@ async function proxySearch(
         return;
       }
     } catch (err) {
+      serpError = "serpapi_fetch_failed";
       console.warn("[search] SerpApi fetch failed, falling back to DuckDuckGo:", err);
     }
+  } else {
+    serpError = "serpapi_key_missing";
+    console.error("[search] No SerpApi key configured — falling back to DuckDuckGo.");
   }
 
   // DuckDuckGo free search fallback
@@ -341,7 +356,7 @@ async function proxySearch(
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ query, answerBox: null, results: [], related: [] }));
+  res.end(JSON.stringify({ query, answerBox: null, results: [], related: [], error: serpError || "no_results" }));
 }
 
 async function searchDuckDuckGoDev(query: string, num: number) {
@@ -350,49 +365,51 @@ async function searchDuckDuckGoDev(query: string, num: number) {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
       "Accept-Language": "en-US,en;q=0.9",
     },
-    body: `q=${encodeURIComponent(query)}`
+    body: new URLSearchParams({ q: query }).toString(),
   });
   if (!res.ok) return null;
   const html = await res.text();
-  const results: Array<{ title: string; snippet: string; link: string; source: string | null; date: null }> = [];
-  const rows = html.split('<tr');
-  
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    if (row.includes('class="result-snippet"')) {
-      const prevRow = rows[i-1];
-      if (!prevRow) continue;
-      
-      const titleMatch = prevRow.match(/<a[^>]*class="result-title"[^>]*>([\s\S]*?)<\/a>/);
-      const linkMatch = prevRow.match(/href="([^"]+)"/);
-      const snippetMatch = row.match(/class="result-snippet"[^>]*>([\s\S]*?)<\/td>/);
-      
-      if (titleMatch && snippetMatch) {
-        let link = linkMatch ? linkMatch[1] : "";
-        if (link.includes("uddg=")) {
-          const m = link.match(/uddg=([^&]+)/);
-          if (m) link = decodeURIComponent(m[1]);
-        } else if (link.startsWith('//')) {
-          link = "https:" + link;
-        }
-        
-        results.push({
-          title: titleMatch[1].replace(/<[^>]+>/g, "").trim(),
-          link,
-          snippet: snippetMatch[1].replace(/<[^>]+>/g, "").trim(),
-          source: null,
-          date: null
-        });
-        
-        if (results.length >= num) break;
-      }
-    }
+
+  // Mirrors parseDuckDuckGoLite in api/search.js — the lite layout is a flat
+  // table of rows (a result-link anchor, then a result-snippet cell), so the
+  // two are paired positionally. Note the class attributes are single-quoted.
+  const stripTags = (s: string) => s.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  const decodeEntities = (s: string) =>
+    s.replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&lt;/g, "<")
+     .replace(/&gt;/g, ">").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
+
+  const snippets: string[] = [];
+  const snippetRe = /<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/g;
+  for (let m = snippetRe.exec(html); m; m = snippetRe.exec(html)) {
+    snippets.push(decodeEntities(stripTags(m[1])));
   }
 
-  return { query, answerBox: null, results, related: [] };
+  const results: Array<{ title: string; snippet: string; link: string; source: string | null; date: null }> = [];
+  const linkRe = /<a[^>]*href="([^"]+)"[^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>/g;
+  let i = 0;
+  for (let m = linkRe.exec(html); m && results.length < num; m = linkRe.exec(html), i++) {
+    const href = decodeEntities(m[1]);
+    const redirect = href.match(/[?&]uddg=([^&]+)/);
+    let link = "";
+    if (redirect) {
+      try { link = decodeURIComponent(redirect[1]); } catch { link = ""; }
+    } else if (href.startsWith("//")) {
+      link = `https:${href}`;
+    } else if (href.startsWith("http")) {
+      link = href;
+    }
+    const title = decodeEntities(stripTags(m[2]));
+    if (!title || !link) continue;
+    results.push({ title, snippet: snippets[i] || "", link, source: "DuckDuckGo Web", date: null });
+  }
+
+  const answerBox = results.length > 0 && results[0].snippet
+    ? { title: "Web Summary", answer: results[0].snippet }
+    : null;
+  return { query, answerBox, results, related: [] as string[] };
 }
 
 // ---------------------------------------------------------------------------
