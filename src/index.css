@@ -427,6 +427,52 @@
 }
 
 @layer utilities {
+  /* Safe-area helpers.
+     These live in @layer utilities, not @layer base: Tailwind emits utilities
+     last, so a base-layer `.safe-area-inset-bottom` was being silently beaten
+     by the `pb-3` on the same element and the home-indicator inset never
+     applied. Declaring them here puts them on equal footing, and the `calc`
+     keeps the element's own visual padding instead of replacing it. */
+  .safe-area-inset-bottom {
+    padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  @media (min-width: 640px) {
+    .safe-area-inset-bottom {
+      padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+    }
+  }
+
+  /* Header sits under the notch once viewport-fit=cover is on. */
+  .safe-area-inset-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  /* Landscape on a notched phone insets one side; pad both so nothing hides
+     under the rounded corner or the camera housing. */
+  .safe-area-inset-x {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+
+  /* Full-height app shell. Declared as one rule so the cascade — not Tailwind's
+     class ordering — picks the winner: browsers without dvh support keep the
+     vh fallback, everything else uses dvh, which tracks the collapsing URL bar
+     and (with interactive-widget=resizes-content) the on-screen keyboard. */
+  .app-shell-height {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* Momentum scrolling for the message list. The document sets
+     -webkit-overflow-scrolling: auto !important to kill rubber-banding on the
+     page itself; this opts the one genuinely scrollable region back in so it
+     flicks like a native list. */
+  .touch-scroll-y {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+  }
+
   .scrollbar-thin {
     scrollbar-width: thin;
     scrollbar-color: hsl(var(--border) / 0.5) transparent;
