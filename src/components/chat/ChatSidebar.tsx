@@ -83,7 +83,6 @@ export default function ChatSidebar({
   selectedModel, onSelectModel,
 }: ChatSidebarProps) {
   const { user, signOut } = useAuth();
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [showAllModels, setShowAllModels] = useState(false);
   const [modelPanelOpen, setModelPanelOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -300,7 +299,6 @@ export default function ChatSidebar({
                         <motion.div key={conv.id}
                           layout
                           initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}
-                          onMouseEnter={() => setHoveredId(conv.id)} onMouseLeave={() => setHoveredId(null)}
                           onClick={() => onSelectConversation(conv.id)}
                           className={`group relative flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-all duration-200 border
                             ${activeConversationId === conv.id
@@ -315,14 +313,18 @@ export default function ChatSidebar({
                             <p className="text-sm truncate font-medium">{conv.title}</p>
                             <p className="text-[11px] text-sidebar-foreground/40">{format(new Date(conv.updated_at), 'MMM d, h:mm a')}</p>
                           </div>
-                          {hoveredId === conv.id && (
-                            <motion.button initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }}
-                              onClick={(e) => { e.stopPropagation(); onDeleteConversation(conv.id); }}
-                              className="absolute right-2 p-1.5 rounded-lg bg-background/40 hover:bg-destructive/20 text-sidebar-foreground/50 hover:text-destructive transition-colors"
-                              aria-label="Delete conversation">
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </motion.button>
-                          )}
+                          {/* Rendered unconditionally rather than gated on the JS
+                              `hoveredId` state: mouseenter never fires on touch,
+                              so that version left no way at all to delete a
+                              conversation from a phone. Desktop still gets the
+                              reveal-on-hover behaviour, now via CSS. */}
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); onDeleteConversation(conv.id); }}
+                            className="absolute right-2 p-2 rounded-lg bg-background/40 hover:bg-destructive/20 text-sidebar-foreground/50 hover:text-destructive transition-all opacity-0 scale-90 group-hover:opacity-100 group-hover:scale-100 focus-visible:opacity-100 focus-visible:scale-100 max-hover:opacity-100 max-hover:scale-100"
+                            aria-label={`Delete conversation: ${conv.title}`}>
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </motion.div>
                       ))}
                     </AnimatePresence>

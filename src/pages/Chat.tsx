@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { firestoreDb } from '@/lib/firestore-db';
 import ChatSidebar, { AI_MODELS } from '@/components/chat/ChatSidebar';
@@ -9,7 +9,7 @@ import WelcomeScreen from '@/components/chat/WelcomeScreen';
 import { generateChatResponse, generateVisionResponse, generateImageResponse, craftImagePrompt, craftVisionPrompt, evaluateUserIntent, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
 import { evaluateSmartWebSearch, webSearch, buildSearchContext } from '@/lib/search';
 import type { ChatAttachment, MessageSource } from '@/components/chat/types';
-import { Menu, Sparkles } from 'lucide-react';
+import { Menu, ArrowDown, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
 import { extractFirstMarkdownImage, isImageGenerationRequest, sanitizeAssistantText } from '@/lib/chat-format';
@@ -430,6 +430,51 @@ export default function Chat() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const isNewConversationRef = useRef(false);
 
+  // ── Streaming autoscroll ──────────────────────────────────────────────
+  // Follow the stream only while the user is actually parked at the bottom.
+  // The moment they scroll up to re-read something, stop yanking the view
+  // back down — that fight is the single most un-native thing a chat UI can
+  // do. Scrolling back to the bottom re-arms it.
+  const isPinnedToBottomRef = useRef(true);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+
+  // 64px of slack: browsers report fractional scroll positions at some zoom
+  // levels and during momentum scrolling, so an exact comparison never holds.
+  const PIN_THRESHOLD_PX = 64;
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const pinned = distanceFromBottom <= PIN_THRESHOLD_PX;
+    isPinnedToBottomRef.current = pinned;
+    // Only offer the jump button once there's a meaningful amount to jump past.
+    setShowScrollToBottom(!pinned && distanceFromBottom > 240);
+  }, []);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    // scrollTop rather than scrollIntoView: scrollIntoView on a child can also
+    // scroll ancestor containers and shift the whole page on mobile.
+    el.scrollTo({ top: el.scrollHeight, behavior });
+    isPinnedToBottomRef.current = true;
+    setShowScrollToBottom(false);
+  }, []);
+
+  // Runs after every message mutation, including each streamed delta. Layout
+  // effect so the adjustment happens in the same frame the new text paints —
+  // in a passive effect the old scroll position shows for one frame and the
+  // text visibly judders as it streams.
+  useLayoutEffect(() => {
+    if (!isPinnedToBottomRef.current) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    // 'auto' during streaming: a smooth animation per token queues dozens of
+    // overlapping scroll animations and lags behind the text.
+    el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -648,7 +693,9 @@ export default function Chat() {
 
     // ── INSTANT UI UPDATE — show user message + thinking placeholder NOW ──
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
-    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+    // Sending always re-pins: you sent it, you want to see the answer arrive.
+    isPinnedToBottomRef.current = true;
+    scrollToBottom('smooth');
     setStatusText('Understanding your request...');
 
     // ── Run intent evaluation AFTER the UI has been updated ──
@@ -1286,7 +1333,7 @@ export default function Chat() {
             keeps scroll from chaining to the document while re-enabling iOS
             momentum, which the document-level -webkit-overflow-scrolling reset
             had killed for this region too. */}
-        <div ref={scrollContainerRef} className="relative z-10 flex-1 overflow-y-auto scrollbar-thin min-h-0 overflow-anchor-none touch-scroll-y">
+        <div ref={scrollContainerRef} onScroll={handleScroll} className="relative z-10 flex-1 overflow-y-auto scrollbar-thin min-h-0 overflow-anchor-none touch-scroll-y">
           <AnimatePresence mode="wait">
             {isMessagesLoading ? (
               <div key="loading-messages" className="flex flex-col items-center justify-center h-full min-h-[50dvh]">
@@ -1331,6 +1378,25 @@ export default function Chat() {
 
         {/* Input */}
         <div className="relative z-20 flex-shrink-0">
+          {/* Jump-to-latest. Anchored to the composer so it sits clear of the
+              home indicator on mobile, and only mounts once there is a real
+              distance to travel — see the 240px gate in handleScroll. */}
+          <AnimatePresence>
+            {showScrollToBottom && (
+              <motion.button
+                type="button"
+                onClick={() => scrollToBottom('smooth')}
+                initial={{ opacity: 0, y: 8, scale: 0.9 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8, scale: 0.9 }}
+                transition={{ duration: 0.15, ease: 'easeOut' }}
+                aria-label="Scroll to latest message"
+                className="absolute -top-12 left-1/2 -translate-x-1/2 z-30 w-10 h-10 rounded-full bg-secondary/90 backdrop-blur-md border border-border shadow-lg flex items-center justify-center text-foreground/80 hover:text-foreground hover:bg-secondary transition-colors"
+              >
+                <ArrowDown className="w-4 h-4" />
+              </motion.button>
+            )}
+          </AnimatePresence>
           <ChatInput
             onSend={handleSendMessage}
             isLoading={isLoading}

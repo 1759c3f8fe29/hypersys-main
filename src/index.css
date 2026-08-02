@@ -141,6 +141,32 @@
     }
   }
 
+  /* Honour the OS "reduce motion" setting the way a native app does. This app
+     runs several always-on ambient animations (background hue drift, gradient
+     sheens, composer border spin) plus framer-motion transitions on every
+     message; for users who set this because motion causes nausea or vertigo,
+     that is actively unpleasant. Near-zero rather than `none` because some
+     framer-motion callbacks fire onAnimationComplete, and 0s can skip it. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+
+    /* Ambient decoration has no informational value — drop it entirely so it
+       doesn't flash once and settle in an arbitrary keyframe. */
+    .liquid-canvas,
+    .liquid-sheen::after,
+    .liquid-composer::before {
+      animation: none !important;
+      filter: none !important;
+    }
+  }
+
   body {
     @apply bg-background text-foreground antialiased;
     font-family: 'Inter', system-ui, sans-serif;

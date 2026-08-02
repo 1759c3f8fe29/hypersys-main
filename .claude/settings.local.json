@@ -22,7 +22,8 @@
       "Bash(awk '{print $5\"  \"$9}')",
       "Bash(head -409 src/components/chat/ChatInput.tsx)",
       "Bash(mv /tmp/ci.tsx src/components/chat/ChatInput.tsx)",
-      "Bash(git stash *)"
+      "Bash(git stash *)",
+      "Bash(echo \"TSC=$?\")"
     ]
   }
 }

@@ -540,15 +540,15 @@ export function buildImagePrompt(userPrompt: string): string {
   if (has("logo", "icon", "emblem", "brand")) {
     style = "clean professional vector logo, minimal, flat design, centered, crisp edges, high resolution, plain background";
   } else if (has("photo", "photograph", "realistic", "photorealistic", "portrait", "headshot")) {
-    style = "photorealistic, ultra detailed, 8k, sharp focus, natural lighting, professional photography, high dynamic range";
+    style = "photorealistic, natural lighting, shallow depth of field, professional photography";
   } else if (has("anime", "manga", "cartoon", "comic")) {
-    style = "vibrant anime illustration, clean line art, cel shading, expressive, highly detailed, studio quality";
+    style = "vibrant anime illustration, clean line art, cel shading, expressive, studio quality";
   } else if (has("3d", "render", "blender", "octane")) {
-    style = "high-quality 3D render, physically based rendering, soft global illumination, detailed textures, cinematic";
+    style = "high-quality 3D render, physically based rendering, soft global illumination, cinematic";
   } else if (has("ui", "app", "website", "dashboard", "mockup", "interface")) {
     style = "clean modern UI design mockup, crisp, well-aligned, professional, high resolution";
   } else if (has("poster", "banner", "wallpaper", "cover")) {
-    style = "striking poster art, bold composition, dramatic lighting, high detail, 4k";
+    style = "striking poster art, bold composition, dramatic lighting, 4k";
   } else if (has("sketch", "drawing", "pencil", "line art")) {
     style = "detailed hand-drawn sketch, expressive linework, fine shading";
   } else {
@@ -646,8 +646,10 @@ const IMAGE_PROMPT_ENGINEER_SYSTEM = [
   "You are a Master Image Prompt Engineer for diffusion models (FLUX, Stable Diffusion, GPT-Image, Sana).",
   "Rewrite the user's request into one dense, high-signal generation prompt.",
   "",
-  "HARD CONSTRAINT: 60-150 words. These models truncate long prompts, so every",
-  "word must earn its place. Detail that does not change the pixels is waste.",
+  "LENGTH — scale to the subject, never pad:",
+  "  - Single subject or object: 50-90 words.",
+  "  - Full scene, multiple elements, or a specific art style: 90-180 words.",
+  "  Text encoders truncate, so past ~180 words the tail is silently discarded.",
   "",
   "ORDER MATTERS — earliest tokens carry the most weight:",
   "1. The subject and its defining action or pose, in plain concrete nouns.",
@@ -660,10 +662,33 @@ const IMAGE_PROMPT_ENGINEER_SYSTEM = [
   "   - logo / icon / UI → flat vector, clean geometry, negative space, no photographic tags",
   "   - 3D / render → engine, material shading, ambient occlusion",
   "",
+  "WHAT ACTUALLY RAISES QUALITY — apply these deliberately:",
+  "- ANCHOR THE STYLE ONCE. One named reference — a photographer, director, art",
+  "  movement, studio, or era — steers the whole image far harder than a pile of",
+  "  adjectives. 'lit like a Roger Deakins frame' beats 'cinematic, dramatic, moody'.",
+  "  Pick the single best-fitting anchor and commit to it.",
+  "- DROP GENERIC BOOSTER TAGS. 'masterpiece', '8k', 'ultra detailed', 'award-winning',",
+  "  'trending on artstation', 'sharp focus', 'high quality' are dead weight on modern",
+  "  models: they consume tokens and change nothing. Replace each with a concrete fact",
+  "  about the image.",
+  "- NAME MATERIALS, NOT 'DETAIL'. 'brushed aluminium', 'wet asphalt', 'raw linen',",
+  "  'chipped enamel' produce real texture; 'highly detailed textures' does not.",
+  "- ONE COHERENT LIGHT SOURCE. State direction, quality and colour, then stop.",
+  "  Contradictions ('soft diffused light, harsh shadows') average into flat mush.",
+  "- BUILD DEPTH. Give foreground, midground and background distinct content so the",
+  "  frame reads as composed rather than as a subject pasted on a backdrop.",
+  "- SPECIFY WHAT HANDS AND EYES ARE DOING when a person is present ('hands wrapped",
+  "  around a mug, gaze off-frame left'). Unspecified extremities are where these",
+  "  models fail worst; naming the action constrains them.",
+  "- KEEP COUNTS SIMPLE AND STATE THEM ONCE. 'three' renders; 'a handful of' does not.",
+  "- PREFER CONCRETE OVER EVALUATIVE. 'beautiful', 'stunning', 'perfect' describe a",
+  "  reaction, not pixels. Describe the thing that would cause the reaction.",
+  "",
   "RULES:",
   "- Preserve every explicit detail the user gave: subject, colours, count, text, style, aspect. Never silently drop or 'improve' them.",
-  "- If the user asked for text in the image, quote it exactly once in double quotes.",
+  "- If the user asked for text in the image, quote it exactly once in double quotes and keep it short.",
   "- Add only detail that is consistent with the request. Do not photorealise a request for flat art, and do not stylise a request for a photograph.",
+  "- When the request is sparse, make concrete creative choices rather than hedging — a specific image beats a vague one. Never contradict what was asked for.",
   "- Write as flowing comma-separated descriptive phrases, not numbered sections or headings.",
   "- No negative prompts, no parameter flags (--ar, --v), no meta-commentary.",
   "",
