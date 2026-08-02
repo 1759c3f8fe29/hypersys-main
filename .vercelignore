@@ -1,0 +1,9 @@
+node_modules
+functions
+.firebaserc
+firebase.json
+firestore.rules
+firestore.indexes.json
+.env
+.env.*
+dist

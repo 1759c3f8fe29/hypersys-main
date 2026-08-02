@@ -1,0 +1,46 @@
+rules_version = '2';
+
+// Firestore security rules for Flyer.
+// Each user may read/write ONLY their own conversations and messages.
+// Ownership is determined by the `userId` field stored on every document,
+// which must equal the authenticated user's uid.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function ownsExisting() {
+      return isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    function ownsIncoming() {
+      return isSignedIn() && request.resource.data.userId == request.auth.uid;
+    }
+
+    function ownsConversation(conversationId) {
+      return isSignedIn() && 
+        get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+    }
+
+    match /conversations/{conversationId} {
+      allow read, delete: if ownsExisting();
+      allow create: if ownsIncoming();
+      // Prevent reassigning a conversation to another user on update.
+      allow update: if ownsExisting() && ownsIncoming();
+    }
+
+    match /messages/{messageId} {
+      allow read, delete: if isSignedIn() && ownsConversation(resource.data.conversationId);
+      allow create: if ownsIncoming() && ownsConversation(request.resource.data.conversationId);
+      allow update: if ownsExisting() && ownsIncoming() && ownsConversation(resource.data.conversationId);
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
