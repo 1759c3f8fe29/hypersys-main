@@ -4,9 +4,10 @@
   "description": "Intelligent AI assistant for coding, learning, and real-time web search",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0a0f1a",
-  "theme_color": "#14b8a6",
-  "orientation": "portrait-primary",
+  "background_color": "#0a0d14",
+  "theme_color": "#0a0d14",
+  "orientation": "any",
+  "display_override": ["window-controls-overlay", "standalone"],
   "icons": [
     {
       "src": "/icons/icon-192.png",

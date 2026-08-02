@@ -756,7 +756,9 @@ export default function Chat() {
         // Image model, otherwise our default renderer (FLUX).
         const renderModelId = isImageModel(selectedModel) ? selectedModel : DEFAULT_IMAGE_MODEL;
 
-        // The 1000-word master prompt is crafted BY the chat model (ChatGPT-style).
+        // The generation prompt is crafted BY the chat model (ChatGPT-style),
+        // then handed to the renderer. Deliberately dense rather than long:
+        // diffusion text encoders truncate, so length costs us the tail.
         const promptAuthorModel = isImageModel(selectedModel) ? DEFAULT_CHAT_MODEL_ID : selectedModel;
         setStatusText('Crafting image prompt...');
         const imagePrompt = await craftImagePrompt(
