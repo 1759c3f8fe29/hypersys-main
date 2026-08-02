@@ -438,6 +438,13 @@ export default function Chat() {
   const isPinnedToBottomRef = useRef(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
+  // Separate from isPinnedToBottomRef, which only tracks "is the user parked at
+  // the bottom right now". This one gates autoscroll off entirely until the user
+  // sends in this conversation, so opening a chat lands at the natural top of
+  // the loaded history instead of snapping to the newest message. Re-armed on
+  // send, disarmed again on conversation switch.
+  const hasSentThisSessionRef = useRef(false);
+
   // 64px of slack: browsers report fractional scroll positions at some zoom
   // levels and during momentum scrolling, so an exact comparison never holds.
   const PIN_THRESHOLD_PX = 64;
@@ -467,6 +474,10 @@ export default function Chat() {
   // in a passive effect the old scroll position shows for one frame and the
   // text visibly judders as it streams.
   useLayoutEffect(() => {
+    // Don't touch scroll before the user has sent anything this session: this
+    // effect also runs when a conversation's history finishes loading, and
+    // scrolling there is what made the screen open already-scrolled-down.
+    if (!hasSentThisSessionRef.current) return;
     if (!isPinnedToBottomRef.current) return;
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -582,6 +593,12 @@ export default function Chat() {
   useEffect(() => { loadConversations(); }, [loadConversations]);
 
   const loadMessages = useCallback(async () => {
+    // Opening or switching a conversation disarms autoscroll so the freshly
+    // loaded history renders from its natural position instead of snapping to
+    // the bottom. Re-armed the moment the user sends in this conversation.
+    hasSentThisSessionRef.current = false;
+    isPinnedToBottomRef.current = true;
+    setShowScrollToBottom(false);
     if (!activeConversationId) { setMessages([]); return; }
     if (isNewConversationRef.current) {
       isNewConversationRef.current = false;
@@ -693,7 +710,9 @@ export default function Chat() {
 
     // ── INSTANT UI UPDATE — show user message + thinking placeholder NOW ──
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
-    // Sending always re-pins: you sent it, you want to see the answer arrive.
+    // Sending arms autoscroll and re-pins: you sent it, you want to watch the
+    // answer arrive.
+    hasSentThisSessionRef.current = true;
     isPinnedToBottomRef.current = true;
     scrollToBottom('smooth');
     setStatusText('Understanding your request...');
