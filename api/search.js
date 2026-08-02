@@ -128,6 +128,7 @@ export default async function handler(req, res) {
   res.status(200).json({ query, answerBox: null, results: [], related: [], error: serpError || "no_results" });
 }
 
+<<<<<<< HEAD
 // DuckDuckGo's lite endpoint answers a GET with an anti-bot challenge page
 // ("anomaly modal") and no results. A form POST still returns real results, so
 // the query goes in the body rather than the query string.
@@ -144,6 +145,46 @@ async function fetchDuckDuckGoSearch(query) {
   if (!res.ok) return null;
   const html = await res.text();
   const results = parseDuckDuckGoLite(html);
+=======
+async function fetchDuckDuckGoSearch(query) {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+  });
+  if (!res.ok) return null;
+  const html = await res.text();
+  const results = [];
+  const blocks = html.split(/class="[^"]*result__body[^"]*"/);
+
+  for (let i = 1; i < blocks.length && results.length < 6; i++) {
+    const block = blocks[i];
+    const titleMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/);
+    const snippetMatch = block.match(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/) ||
+                         block.match(/<td[^>]*class="[^"]*result-snippet[^"]*"[^>]*>([\s\S]*?)<\/td>/);
+    const linkMatch = block.match(/href="([^"]*uddg=[^"]*)"/) || block.match(/class="result__url"[^>]*href="([^"]+)"/);
+
+    if (titleMatch) {
+      const title = titleMatch[1].replace(/<[^>]+>/g, "").trim();
+      const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
+      let link = "";
+      if (linkMatch) {
+        const rawLink = linkMatch[1];
+        if (rawLink.includes("uddg=")) {
+          const match = rawLink.match(/uddg=([^&]+)/);
+          if (match) link = decodeURIComponent(match[1]);
+        } else {
+          link = rawLink;
+        }
+      }
+      if (title && (snippet || link)) {
+        results.push({ title, snippet, link, source: "DuckDuckGo Web", date: null });
+      }
+    }
+  }
+>>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
 
   return {
     query,
@@ -153,6 +194,7 @@ async function fetchDuckDuckGoSearch(query) {
   };
 }
 
+<<<<<<< HEAD
 // The lite layout is a flat <table> of rows: a result-link anchor, then a
 // result-snippet cell. Pair them up positionally rather than by container.
 export function parseDuckDuckGoLite(html, limit = 6) {
@@ -200,6 +242,8 @@ function decodeEntities(s) {
     .replace(/&amp;/g, "&");
 }
 
+=======
+>>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
 function safeParse(s) {
   try { return JSON.parse(s); } catch { return {}; }
 }

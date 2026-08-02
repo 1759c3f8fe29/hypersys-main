@@ -264,18 +264,24 @@ async function proxySearch(
 
   const num = Math.min(Number(body.num) || 6, 10);
 
+<<<<<<< HEAD
   // Mirrors api/search.js: track *why* search failed so the client can tell the
   // model "search is broken" rather than "the web returned nothing".
   let serpError: string | null = null;
 
+=======
+>>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
   if (serpKey) {
     try {
       const params = new URLSearchParams({ q: query, api_key: serpKey, engine: "google", num: String(num) });
       const upstream = await fetch(`https://serpapi.com/search.json?${params}`);
+<<<<<<< HEAD
       if (!upstream.ok) {
         serpError = `serpapi_http_${upstream.status}`;
         console.error("[search] SerpApi error:", upstream.status);
       }
+=======
+>>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
       if (upstream.ok) {
         const data = await upstream.json();
         const organic = (data.organic_results || []).map((r: any) => ({
@@ -302,10 +308,14 @@ async function proxySearch(
           date: r.date || null,
         }));
 
+<<<<<<< HEAD
         // News and top-stories first (mirrors api/search.js): for time-sensitive
         // queries these carry the fresh, dated items, while organic results skew
         // toward evergreen pages.
         const combined = [...news, ...topStories, ...organic];
+=======
+        const combined = [...organic, ...news, ...topStories];
+>>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
         const seenLinks = new Set<string>();
         const results = combined.filter((r) => {
           if (!r.title || (!r.snippet && !r.link)) return false;
@@ -335,12 +345,17 @@ async function proxySearch(
         return;
       }
     } catch (err) {
+<<<<<<< HEAD
       serpError = "serpapi_fetch_failed";
       console.warn("[search] SerpApi fetch failed, falling back to DuckDuckGo:", err);
     }
   } else {
     serpError = "serpapi_key_missing";
     console.error("[search] No SerpApi key configured — falling back to DuckDuckGo.");
+=======
+      console.warn("[search] SerpApi fetch failed, falling back to DuckDuckGo:", err);
+    }
+>>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
   }
 
   // DuckDuckGo free search fallback
@@ -356,7 +371,11 @@ async function proxySearch(
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });
+<<<<<<< HEAD
   res.end(JSON.stringify({ query, answerBox: null, results: [], related: [], error: serpError || "no_results" }));
+=======
+  res.end(JSON.stringify({ query, answerBox: null, results: [], related: [] }));
+>>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
 }
 
 async function searchDuckDuckGoDev(query: string, num: number) {
@@ -365,6 +384,7 @@ async function searchDuckDuckGoDev(query: string, num: number) {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
+<<<<<<< HEAD
       "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
       "Accept-Language": "en-US,en;q=0.9",
     },
@@ -410,6 +430,51 @@ async function searchDuckDuckGoDev(query: string, num: number) {
     ? { title: "Web Summary", answer: results[0].snippet }
     : null;
   return { query, answerBox, results, related: [] as string[] };
+=======
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+    body: `q=${encodeURIComponent(query)}`
+  });
+  if (!res.ok) return null;
+  const html = await res.text();
+  const results: Array<{ title: string; snippet: string; link: string; source: string | null; date: null }> = [];
+  const rows = html.split('<tr');
+  
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (row.includes('class="result-snippet"')) {
+      const prevRow = rows[i-1];
+      if (!prevRow) continue;
+      
+      const titleMatch = prevRow.match(/<a[^>]*class="result-title"[^>]*>([\s\S]*?)<\/a>/);
+      const linkMatch = prevRow.match(/href="([^"]+)"/);
+      const snippetMatch = row.match(/class="result-snippet"[^>]*>([\s\S]*?)<\/td>/);
+      
+      if (titleMatch && snippetMatch) {
+        let link = linkMatch ? linkMatch[1] : "";
+        if (link.includes("uddg=")) {
+          const m = link.match(/uddg=([^&]+)/);
+          if (m) link = decodeURIComponent(m[1]);
+        } else if (link.startsWith('//')) {
+          link = "https:" + link;
+        }
+        
+        results.push({
+          title: titleMatch[1].replace(/<[^>]+>/g, "").trim(),
+          link,
+          snippet: snippetMatch[1].replace(/<[^>]+>/g, "").trim(),
+          source: null,
+          date: null
+        });
+        
+        if (results.length >= num) break;
+      }
+    }
+  }
+
+  return { query, answerBox: null, results, related: [] };
+>>>>>>> 18477165c7a8d251af435cbe336ad95a20f49bcf
 }
 
 // ---------------------------------------------------------------------------
