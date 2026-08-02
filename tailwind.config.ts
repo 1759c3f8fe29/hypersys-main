@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import plugin from "tailwindcss/plugin";
 
 export default {
   darkMode: ["class"],
@@ -98,5 +99,14 @@ export default {
       },
     },
   },
-  plugins: [require("tailwindcss-animate")],
+  plugins: [
+    require("tailwindcss-animate"),
+    // `max-hover:` — applies only on devices that cannot hover (touch).
+    // Tailwind ships `hover:` but no built-in inverse, and several controls in
+    // this app are revealed by `group-hover`, which never fires on a phone:
+    // without this they are permanently invisible and their action unreachable.
+    plugin(({ addVariant }) => {
+      addVariant("max-hover", "@media (hover: none) and (pointer: coarse)");
+    }),
+  ],
 } satisfies Config;

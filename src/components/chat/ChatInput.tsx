@@ -131,10 +131,26 @@ export default function ChatInput({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  // Enter sends, Shift+Enter inserts a newline — the convention every chat app
+  // uses, and its absence is the most jarring thing about typing here.
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // isComposing guards IME input: while composing Japanese/Chinese/Korean
+    // text, Enter commits the candidate word and must NOT send the message.
+    // keyCode 229 is the legacy signal for the same thing in older WebKit.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submitMessage();
+    }
+  };
+
+  const submitMessage = () => {
     if ((message.trim() || selectedFiles.length > 0) && !isLoading && !disabled) {
-      textareaRef.current?.blur();
+      // Deliberately NOT blurring: with interactive-widget=resizes-content the
+      // keyboard closing resizes the viewport and reflows the whole thread,
+      // which loses your place on every single send. Native chat apps keep the
+      // keyboard up so you can fire off consecutive messages.
       onSend(message.trim(), selectedFiles);
       setMessage('');
       setSelectedFiles([]);
@@ -145,6 +161,11 @@ export default function ChatInput({
         textareaRef.current.style.height = 'auto';
       }
     }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    submitMessage();
   };
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -257,7 +278,10 @@ export default function ChatInput({
                         <button
                           type="button"
                           onClick={() => removeFile(fileKey)}
-                          className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/60 hover:bg-destructive/80 text-white backdrop-blur-md border border-white/10 flex items-center justify-center z-20 opacity-0 group-hover/file:opacity-100 transition-all scale-75 group-hover/file:scale-100"
+                          /* max-hover: keeps this visible on touch devices, where
+                             group-hover never fires and the only way to remove an
+                             attachment would otherwise be to send it. */
+                          className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/60 hover:bg-destructive/80 text-white backdrop-blur-md border border-white/10 flex items-center justify-center z-20 opacity-0 group-hover/file:opacity-100 max-hover:opacity-100 transition-all scale-75 group-hover/file:scale-100 max-hover:scale-100"
                           aria-label={`Remove ${file.name}`}
                         >
                           <X className="w-3 h-3" />
@@ -301,6 +325,8 @@ export default function ChatInput({
                    text is under 16px, and never zooms back out. sm: restores
                    the intended 15px on larger screens. */
                 className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-1 px-1.5 max-h-[120px] scrollbar-thin text-base sm:text-[15px] leading-snug font-medium"
+                onKeyDown={handleKeyDown}
+                enterKeyHint="send"
               />
 
               {/* Row 2: a "+" menu holds attach/DeepThink/Search so the bar stays

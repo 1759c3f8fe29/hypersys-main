@@ -328,8 +328,11 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   <button
                     type="button"
                     onClick={handleDownloadImage}
-                    className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-2 rounded-xl bg-background/70 backdrop-blur-md border border-border/40 text-xs font-medium text-foreground/90 hover:text-primary hover:border-primary/40 opacity-0 group-hover/image:opacity-100 transition-all duration-200"
+                    /* max-hover: on touch there is no hover, so without this the
+                       only way to save a generated image is a long-press. */
+                    className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-2 rounded-xl bg-background/70 backdrop-blur-md border border-border/40 text-xs font-medium text-foreground/90 hover:text-primary hover:border-primary/40 opacity-0 group-hover/image:opacity-100 max-hover:opacity-100 transition-all duration-200"
                     title="Download image"
+                    aria-label="Download image"
                   >
                     {downloaded ? <><Check className="w-4 h-4 text-primary" />Saved</> : <><Download className="w-4 h-4" />Download</>}
                   </button>
