@@ -110,8 +110,7 @@ export function isMistralModel(modelId: string): boolean {
 }
 
 export function isVisionCapableModel(modelId: string): boolean {
-  // Mistral Large Latest & Pixtral models support vision natively on Mistral API
-  if (modelId === "mistral-large-latest" || modelId === "mistral-large" || modelId === "pixtral-12b") return true;
+  if (VISION_CAPABLE_IDS.has(modelId)) return true;
   return isVisionModel(modelId);
 }
 
