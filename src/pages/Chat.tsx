@@ -8,6 +8,7 @@ import ModelSelector from '@/components/chat/ModelSelector';
 import WelcomeScreen from '@/components/chat/WelcomeScreen';
 import { generateChatResponse, generateVisionResponse, generateImageResponse, craftImagePrompt, craftVisionPrompt, evaluateUserIntent, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
 import { evaluateSmartWebSearch, webSearch, buildSearchContext } from '@/lib/search';
+import { extractDocument, canExtract, buildDocumentContext } from '@/lib/documents';
 import type { ChatAttachment, MessageSource } from '@/components/chat/types';
 import { Menu, ArrowDown, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
@@ -29,6 +30,10 @@ interface Message {
   modelName?: string;
   // Web pages this reply was grounded on, shown as source chips.
   sources?: MessageSource[];
+  // Related questions surfaced by web search, shown as clickable follow-up
+  // chips. The data already comes back from the search provider; this just
+  // carries it to the message so it can be rendered.
+  followUps?: string[];
   // Arena Mode
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
@@ -699,6 +704,19 @@ export default function Chat() {
       })),
     );
 
+    // Non-image uploads have to be parsed into text before the model can use
+    // them. Previously they were only base64-encoded, so a PDF reached the model
+    // as an opaque blob and it answered by guessing.
+    const documentFiles = files.filter((f) => !f.type.startsWith('image/') && canExtract(f));
+    const extractedDocs = documentFiles.length > 0
+      ? await Promise.all(documentFiles.map(extractDocument))
+      : [];
+
+    for (const doc of extractedDocs) {
+      if (doc.error) toast.error(`${doc.name}: ${doc.error}`);
+      else if (doc.truncated) toast.warning(`${doc.name} was truncated to fit the context window.`);
+    }
+
     const requestContent = trimmedContent || (pendingAttachments.length > 0 ? 'Describe this image in detail.' : '');
 
     const selectedModelMeta = AI_MODELS.find((model) => model.id === selectedModel) || AI_MODELS[0];
@@ -753,6 +771,8 @@ export default function Chat() {
           // DeepThink overrides the default brevity directives — the user asked
           // for depth, so the "keep it short" rules must not win here.
           deepThink ? buildDeepThinkDirective() : '',
+          // Extracted document text, when the user attached files.
+          buildDocumentContext(extractedDocs) || '',
         ].filter(Boolean).join('\n\n'),
       },
       ...historyMessages,
@@ -899,6 +919,7 @@ export default function Chat() {
         // Web search execution. The Search toggle forces grounding regardless of
         // what the classifier decided; otherwise the classifier's call stands.
         let turnSources: MessageSource[] = [];
+        let turnFollowUps: string[] = [];
         const shouldSearch = !hasImages && (forceWebSearch || intentEval.needsSearch);
         const searchQuery = (intentEval.searchQuery || requestContent).trim();
         if (shouldSearch && searchQuery) {
@@ -919,6 +940,11 @@ export default function Chat() {
                 .filter((r) => r.link)
                 .slice(0, 8)
                 .map((r) => ({ title: r.title || r.link, link: r.link, source: r.source }));
+            }
+            // Related questions the search provider surfaced — offered to the
+            // user as one-tap follow-ups, the way Gemini and Perplexity do.
+            if (search?.related?.length) {
+              turnFollowUps = search.related.filter(Boolean).slice(0, 3);
             }
             if (context) {
               messagesForModel.splice(messagesForModel.length - 1, 0, {
@@ -960,6 +986,7 @@ export default function Chat() {
               ? {
                   ...m,
                   sources: turnSources.length ? turnSources : undefined,
+                  followUps: turnFollowUps.length ? turnFollowUps : undefined,
                   isArenaMode: activeArenaMode,
                   arenaResponses: activeArenaMode
                     ? compareModels.map(modelId => ({
@@ -1383,6 +1410,8 @@ export default function Chat() {
                     modelName={msg.modelName || 'AI'}
                     statusText={isLoading && msg.role === 'assistant' && index === messages.length - 1 ? statusText : undefined}
                     sources={msg.sources}
+                    followUps={msg.followUps}
+                    onFollowUp={(q) => handleSendMessage(q)}
                     onRegenerate={handleRegenerate}
                     canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}
                     isArenaMode={msg.isArenaMode}

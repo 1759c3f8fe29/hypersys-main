@@ -63,6 +63,8 @@ function localApiProxy(): Plugin {
         try {
           if (route === "nvidia") {
             await proxyNvidia(req, res, body);
+          } else if (route === "llm") {
+            await proxyLlm(req, res, body);
           } else if (route === "nvidia-image") {
             await proxyNvidiaImage(req, res, body);
           } else if (route === "mistral") {
@@ -71,10 +73,6 @@ function localApiProxy(): Plugin {
             await proxyPollinations(req, res, body);
           } else if (route === "search") {
             await proxySearch(req, res, body);
-          } else if (route === "nvidia-stt") {
-            await proxyNvidiaSTT(req, res);
-          } else if (route === "nvidia-tts") {
-            await proxyNvidiaTTS(req, res, body);
           } else {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Unknown endpoint" }));
@@ -94,6 +92,101 @@ function localApiProxy(): Plugin {
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
+
+// Provider endpoints for the dev router — mirrors api/llm.js. Dev deliberately
+// skips the auth/quota checks the production router enforces: local dev has a
+// single trusted user and adding token verification would just add friction.
+const DEV_PROVIDER_ENDPOINTS: Record<string, { url: string; envKeys: string[]; byokHeader?: string; keyless?: boolean }> = {
+  nvidia: { url: "https://integrate.api.nvidia.com/v1/chat/completions", envKeys: ["NVIDIA_API_KEY", "VITE_NVIDIA_API_KEY"], byokHeader: "x-nvidia-api-key" },
+  mistral: { url: "https://api.mistral.ai/v1/chat/completions", envKeys: ["MISTRAL_API_KEY", "VITE_MISTRAL_API_KEY"], byokHeader: "x-mistral-api-key" },
+  pollinations: { url: "https://text.pollinations.ai/openai", envKeys: [], keyless: true },
+};
+
+const DEV_FAILOVER_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
+
+async function proxyLlm(
+  req: { headers: Record<string, string | string[] | undefined> },
+  res: { writeHead: Function; setHeader: Function; write: Function; end: Function; headersSent: boolean },
+  body: Record<string, unknown>,
+) {
+  const { messages, routes, temperature, top_p, max_tokens } = body as any;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "`messages` array is required" }));
+    return;
+  }
+  if (!Array.isArray(routes) || routes.length === 0) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "`routes` array is required" }));
+    return;
+  }
+
+  const attempts: Array<{ provider: string; status: number; detail?: string }> = [];
+
+  for (const route of routes) {
+    const cfg = DEV_PROVIDER_ENDPOINTS[route.provider];
+    if (!cfg) {
+      attempts.push({ provider: route.provider, status: 0, detail: "unknown provider" });
+      continue;
+    }
+
+    const key = cfg.keyless
+      ? null
+      : (cfg.byokHeader ? h(req.headers, cfg.byokHeader) : undefined) ||
+        cfg.envKeys.map((k) => env(k)).find(Boolean);
+
+    if (!cfg.keyless && (!key || String(key).startsWith("your-"))) {
+      attempts.push({ provider: route.provider, status: 0, detail: "no key configured" });
+      continue;
+    }
+
+    let upstream: Response | null = null;
+    try {
+      upstream = await fetch(cfg.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+          ...(cfg.keyless ? {} : { Authorization: `Bearer ${key}` }),
+        },
+        body: JSON.stringify({
+          model: route.modelId,
+          messages,
+          stream: true,
+          temperature: temperature ?? 0.7,
+          top_p: top_p ?? 0.95,
+          max_tokens: Math.min(Number(max_tokens) || 4096, 8192),
+        }),
+      });
+    } catch (err) {
+      attempts.push({ provider: route.provider, status: 502, detail: String(err) });
+      continue;
+    }
+
+    if (upstream.ok && upstream.body) {
+      res.setHeader("X-Served-By", route.provider);
+      res.setHeader("X-Served-Model", route.modelId);
+      await streamResponse(upstream, res);
+      return;
+    }
+
+    const detail = await upstream.text().catch(() => "");
+    attempts.push({ provider: route.provider, status: upstream.status, detail: detail.slice(0, 300) });
+    if (!DEV_FAILOVER_STATUSES.has(upstream.status)) break;
+    console.warn(`[llm] ${route.provider}/${route.modelId} → ${upstream.status}, trying next`);
+  }
+
+  const noneConfigured = attempts.every((a) => a.status === 0);
+  console.error("[llm] all providers failed:", JSON.stringify(attempts));
+  res.writeHead(noneConfigured ? 400 : 502, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({
+    error: noneConfigured ? "no_provider_configured" : "all_providers_failed",
+    detail: noneConfigured
+      ? "No provider key configured. Add NVIDIA_API_KEY and/or MISTRAL_API_KEY to your .env (Pollinations needs no key and answers as the fallback)."
+      : attempts[attempts.length - 1]?.detail || "All providers failed.",
+    attempts: attempts.map(({ provider, status }) => ({ provider, status })),
+  }));
+}
 
 async function proxyNvidia(
   req: { headers: Record<string, string | string[] | undefined> },
@@ -449,35 +542,6 @@ async function streamResponse(
   } finally {
     res.end();
   }
-}
-
-async function proxyNvidiaSTT(
-  _req: unknown,
-  res: { writeHead: Function; end: Function },
-) {
-  const key = env("VITE_NVIDIA_API_KEY") || env("NVIDIA_API_KEY");
-  if (!key) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "NVIDIA API Key missing" }));
-    return;
-  }
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ text: "NVIDIA Parakeet STT Speech-to-Text active" }));
-}
-
-async function proxyNvidiaTTS(
-  _req: unknown,
-  res: { writeHead: Function; end: Function },
-  body: Record<string, unknown>,
-) {
-  const key = env("VITE_NVIDIA_API_KEY") || env("NVIDIA_API_KEY");
-  if (!key) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "NVIDIA API Key missing" }));
-    return;
-  }
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ status: "NVIDIA Riva FastPitch TTS active", text: body.text }));
 }
 
 async function proxyNvidiaImage(

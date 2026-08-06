@@ -1,5 +1,7 @@
-// All chat models are routed through NVIDIA NIM (requires API key)
-// The /api/nvidia proxy in vite.config.ts handles CORS and streaming.
+
+
+import { auth } from "./firebase";
+import { getModel, PROVIDERS, UTILITY_MODEL_ID, type ProviderId } from "./providers";
 
 // Default flagship shown as "Flyer". Mistral Large is the default because it
 // answers reliably — the NIM reasoning models intermittently return HTTP 529
@@ -142,6 +144,37 @@ const getUserMistralApiKey = () => {
   return localKey ? localKey.trim() : undefined;
 };
 
+// Per-provider BYOK lookup for the multi-provider router. A user who supplies
+// their own key is spending their own quota, so the server skips its rate limit
+// for that request entirely — this is the escape hatch for anyone who needs
+// more than the shared free pool allows.
+export function getUserProviderKey(provider: ProviderId): string | undefined {
+  const stored = localStorage.getItem(`BYOK_${provider.toUpperCase()}`);
+  return stored ? stored.trim() : undefined;
+}
+
+export function setUserProviderKey(provider: ProviderId, key: string | null) {
+  const storageKey = `BYOK_${provider.toUpperCase()}`;
+  if (key && key.trim()) localStorage.setItem(storageKey, key.trim());
+  else localStorage.removeItem(storageKey);
+}
+
+/**
+ * Firebase ID token for the current user, or undefined when signed out.
+ *
+ * Returned rather than thrown on failure: the router answers 401 with a
+ * message the UI can show, which is clearer than a client-side exception that
+ * would be indistinguishable from a network fault.
+ */
+async function getIdToken(): Promise<string | undefined> {
+  try {
+    return await auth.currentUser?.getIdToken();
+  } catch (err) {
+    console.warn("[auth] could not get ID token:", err);
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Message types
 // ---------------------------------------------------------------------------
@@ -166,7 +199,16 @@ export async function generateChatResponse(
   signal?: AbortSignal,
   opts?: { deepThink?: boolean },
 ) {
-  // Mistral models go through /api/mistral, NIM models through /api/nvidia.
+  // Models in the multi-provider catalogue go through the unified /api/llm
+  // router, which walks that model's provider chain and streams from the first
+  // one that answers. Every route in a chain serves the SAME model, so failing
+  // over changes who served the reply, never what model produced it.
+  if (getModel(modelId)) {
+    await generateRoutedResponse(messages, modelId, onChunk, signal, opts);
+    return;
+  }
+
+  // Legacy ids not yet migrated to the catalogue keep their direct proxies.
   // A failure surfaces as an error rather than being answered by a different
   // model — a silent substitution hides outages and misattributes the reply.
   if (isMistralModel(modelId)) {
@@ -175,6 +217,92 @@ export async function generateChatResponse(
   }
 
   await generateNvidiaChatResponse(messages, modelId, onChunk, signal, opts);
+}
+
+/**
+ * Stream a catalogue model through the multi-provider router.
+ *
+ * The router walks the model's provider chain and streams from the first one
+ * that answers, so a rate-limited or saturated provider falls through to the
+ * next without changing which model produced the reply.
+ */
+async function generateRoutedResponse(
+  messages: ChatMessage[],
+  modelId: string,
+  onChunk: (text: string) => void,
+  signal?: AbortSignal,
+  opts?: { deepThink?: boolean },
+) {
+  const spec = getModel(modelId)!;
+
+  const maxTokens = Math.min(
+    opts?.deepThink ? spec.maxOutputTokens : Math.floor(spec.maxOutputTokens / 2),
+    spec.maxOutputTokens,
+  );
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+
+  // The router requires an authenticated caller so requests can be attributed
+  // and metered; without a token the server answers 401 rather than spending
+  // the shared free-tier pool on an anonymous request.
+  const idToken = await getIdToken();
+  if (idToken) headers["Authorization"] = `Bearer ${idToken}`;
+
+  // A user's own key bypasses our shared quota entirely.
+  for (const route of spec.routes) {
+    const byokHeader = PROVIDERS[route.provider]?.byokHeader;
+    const userKey = byokHeader ? getUserProviderKey(route.provider) : undefined;
+    if (byokHeader && userKey) headers[byokHeader] = userKey;
+  }
+
+  const response = await fetch("/api/llm", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      routes: spec.routes,
+      messages,
+      // See the NVIDIA path below — DeepThink trades creativity for care.
+      temperature: opts?.deepThink ? 0.3 : 0.7,
+      top_p: 0.95,
+      max_tokens: maxTokens,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    console.error("LLM router error:", response.status, errText);
+    throw new Error(routerError(response.status, errText));
+  }
+
+  await pumpOpenAiStream(response, onChunk);
+}
+
+/**
+ * Turn a router failure into something a user can act on. The router reports
+ * *why* the whole chain failed, which is a different situation from one
+ * provider being down and needs a different message.
+ */
+function routerError(status: number, errText: string): string {
+  try {
+    const parsed = JSON.parse(errText);
+    if (parsed.error === "sign_in_required") {
+      return "Please sign in to continue.";
+    }
+    if (parsed.error === "quota_exceeded") {
+      return parsed.detail || "You've reached today's message limit.";
+    }
+    if (parsed.error === "all_providers_rate_limited") {
+      return "All providers are busy right now. Try again in a moment, or add your own API key in Settings for unlimited use.";
+    }
+    if (parsed.error === "no_provider_configured") {
+      return "No AI provider is configured on the server.";
+    }
+    if (typeof parsed.detail === "string" && parsed.detail) return parsed.detail;
+  } catch {
+    // Not JSON — fall through to the generic message.
+  }
+  return friendlyHttpError(status, "the model service");
 }
 
 async function generateNvidiaChatResponse(
@@ -249,8 +377,18 @@ export interface UserIntentEvaluation {
 }
 
 /**
- * Fast unified AI Intent Evaluator (uses small & fast model like ministral-8b).
- * Evaluates whether an image generation or web search is needed, and generates clean search query.
+ * Decide, in one pass, whether a turn needs an image generated or the web
+ * searched, and synthesize the search query.
+ *
+ * Two things this deliberately avoids:
+ *
+ * 1. Calling a model when the regexes already settle it. Every classifier call
+ *    spends the same free-tier quota as a real answer and adds latency before
+ *    the first token, so the model is consulted only for genuinely ambiguous
+ *    input. Clear-cut cases short-circuit for free.
+ * 2. Being duplicated. search.ts used to run a near-identical classifier of its
+ *    own, so a single user turn could cost 2-3 utility calls that all asked the
+ *    same question. evaluateSmartWebSearch now delegates here.
  */
 export async function evaluateUserIntent(
   userPrompt: string,
@@ -297,10 +435,28 @@ export async function evaluateUserIntent(
   );
   const hardLiveSignal = HARD_LIVE_SIGNAL.test(text);
 
-  // Classification always runs on Ministral 8B via the Mistral API. It returns
-  // plain JSON in `content`, unlike the NIM reasoning models which spend their
-  // output on `reasoning_content` and leave the classifier with nothing to parse.
-  const fastModel = "ministral-8b";
+  // Creative/self-referential work never needs grounding, and asking a model to
+  // confirm that is pure waste.
+  const clearlyNonFactual = /\b(write|compose|rewrite|refactor|debug|translate|summari[sz]e this|explain this code)\b/i.test(text);
+
+  // Short-circuit paths — no API call at all.
+  if (hardLiveSignal) {
+    return {
+      needsImage: imageKeywordMatch,
+      needsSearch: true,
+      searchQuery: text,
+      fastModelUsed: "heuristic",
+    };
+  }
+  if (clearlyNonFactual && !imageKeywordMatch) {
+    return { needsImage: false, needsSearch: false, searchQuery: "", fastModelUsed: "heuristic" };
+  }
+  if (explicitImageModel) {
+    return { needsImage: true, needsSearch: false, searchQuery: "", fastModelUsed: "heuristic" };
+  }
+
+  // Ambiguous — now it is worth paying for a classification.
+  const fastModel = UTILITY_MODEL_ID;
 
   try {
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
@@ -857,73 +1013,3 @@ export async function generateSmartChatTitle(
   return text.slice(0, 30);
 }
 
-// ---------------------------------------------------------------------------
-// NVIDIA Speech-to-Text (STT) & Text-to-Speech (TTS)
-// ---------------------------------------------------------------------------
-
-/**
- * NVIDIA Speech-to-Text (STT) using Parakeet / Canary NIM.
- */
-export async function transcribeAudioNvidia(
-  audioBlob: Blob,
-  signal?: AbortSignal,
-): Promise<string> {
-  try {
-    const formData = new FormData();
-    formData.append("file", audioBlob, "audio.wav");
-    formData.append("model", "nvidia/parakeet-ctc-1.1b");
-
-    const userKey = getUserNvidiaApiKey();
-    const headers: Record<string, string> = {};
-    if (userKey) headers["X-Nvidia-Api-Key"] = userKey;
-
-    const res = await fetch("/api/nvidia-stt", {
-      method: "POST",
-      headers,
-      body: formData,
-      signal,
-    });
-
-    if (!res.ok) throw new Error(`STT failed: ${res.status}`);
-    const data = await res.json();
-    return data.text || data.transcript || "";
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw err;
-    console.error("NVIDIA STT error:", err);
-    return "";
-  }
-}
-
-/**
- * NVIDIA Text-to-Speech (TTS) using Riva FastPitch NIM.
- */
-export async function generateSpeechNvidia(
-  text: string,
-  voice: string = "English-US.Female-1",
-  signal?: AbortSignal,
-): Promise<string | null> {
-  try {
-    const userKey = getUserNvidiaApiKey();
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (userKey) headers["X-Nvidia-Api-Key"] = userKey;
-
-    const res = await fetch("/api/nvidia-tts", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model: "nvidia/fastpitch",
-        text,
-        voice,
-      }),
-      signal,
-    });
-
-    if (!res.ok) throw new Error(`TTS failed: ${res.status}`);
-    const blob = await res.blob();
-    return URL.createObjectURL(blob);
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw err;
-    console.error("NVIDIA TTS error:", err);
-    return null;
-  }
-}
