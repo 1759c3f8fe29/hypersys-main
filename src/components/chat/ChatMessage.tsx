@@ -1,7 +1,10 @@
 import { motion } from 'framer-motion';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink, ArrowUpRight } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useState } from 'react';
@@ -24,6 +27,8 @@ interface ChatMessageProps {
   modelName?: string;
   statusText?: string;
   sources?: MessageSource[];
+  followUps?: string[];
+  onFollowUp?: (question: string) => void;
   onRegenerate?: () => void;
   canRegenerate?: boolean;
   isArenaMode?: boolean;
@@ -36,6 +41,33 @@ function hostOf(link: string): string {
   } catch {
     return link;
   }
+}
+
+// One-tap follow-up questions shown under a grounded reply. The questions come
+// from the search provider's "related" list, so they cost nothing extra to
+// surface and keep the conversation moving the way Gemini/Perplexity do.
+function FollowUpChips({ followUps, onFollowUp }: { followUps: string[]; onFollowUp: (q: string) => void }) {
+  return (
+    <div className="mt-4 pt-3 border-t border-border/30">
+      <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-muted-foreground">
+        <Sparkles className="w-3.5 h-3.5" />
+        <span>Related</span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {followUps.map((q, i) => (
+          <button
+            key={`${q}-${i}`}
+            type="button"
+            onClick={() => onFollowUp(q)}
+            className="group flex items-center justify-between gap-2 text-left px-3 py-2 rounded-xl bg-secondary/40 hover:bg-secondary border border-border/30 hover:border-primary/30 transition-colors active:scale-[0.99]"
+          >
+            <span className="text-sm text-foreground/85 group-hover:text-foreground">{q}</span>
+            <ArrowUpRight className="w-4 h-4 shrink-0 text-muted-foreground/50 group-hover:text-primary" />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function SourceChips({ sources }: { sources: MessageSource[] }) {
@@ -200,7 +232,7 @@ const MARKDOWN_COMPONENTS: any = {
   },
 };
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, onRegenerate, canRegenerate, isArenaMode, arenaResponses }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, onFollowUp, onRegenerate, canRegenerate, isArenaMode, arenaResponses }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedArenaIdx, setCopiedArenaIdx] = useState<number | null>(null);
@@ -286,7 +318,17 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
           </div>
         </div>
       ) : (
-        <div className={isArenaMode ? 'w-full grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 relative before:hidden md:before:block md:before:absolute md:before:left-1/2 md:before:top-0 md:before:bottom-0 md:before:w-[1px] md:before:bg-gradient-to-b md:before:from-primary/50 md:before:via-accent/40 md:before:to-transparent md:before:-translate-x-1/2' : 'w-full flex flex-col md:flex-row gap-6'}>
+        <div
+          className={isArenaMode ? 'w-full grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 relative before:hidden md:before:block md:before:absolute md:before:left-1/2 md:before:top-0 md:before:bottom-0 md:before:w-[1px] md:before:bg-gradient-to-b md:before:from-primary/50 md:before:via-accent/40 md:before:to-transparent md:before:-translate-x-1/2' : 'w-full flex flex-col md:flex-row gap-6'}
+          /* Announce the reply to assistive tech as it streams in. Without a
+             live region a screen-reader user hears nothing until they manually
+             navigate to the message — they have no cue the answer has arrived.
+             "polite" so it waits for a pause rather than interrupting. */
+          role="log"
+          aria-live="polite"
+          aria-atomic="false"
+          aria-busy={isStreaming}
+        >
           {/* Primary Model Card (Model A) */}
           <div className={isArenaMode ? 'flex-1 min-w-0 rounded-2xl border border-primary/40 bg-gradient-to-b from-primary/10 via-secondary/20 to-background/60 p-4 sm:p-5 shadow-2xl shadow-primary/10 backdrop-blur-xl relative overflow-hidden transition-all duration-300 hover:border-primary/60 border-t-4 border-t-primary' : 'flex-1 min-w-0'}>
             <div className="flex items-center gap-2 mb-3 justify-between pb-2.5 border-b border-primary/20">
@@ -342,7 +384,8 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
               {textOnlyContent ? (
                 <div className="prose prose-sm sm:prose-base prose-invert max-w-none">
                   <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
+                    remarkPlugins={[remarkGfm, remarkMath]}
+                    rehypePlugins={[rehypeKatex]}
                     components={MARKDOWN_COMPONENTS}
                   >
                     {textOnlyContent}
@@ -373,6 +416,9 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             </div>
 
             {!isUser && sources && sources.length > 0 && <SourceChips sources={sources} />}
+            {!isUser && !isStreaming && followUps && followUps.length > 0 && onFollowUp && (
+              <FollowUpChips followUps={followUps} onFollowUp={onFollowUp} />
+            )}
           </div>
 
           {/* Secondary Models (Arena Mode) — separated by clear line borders */}

@@ -32,7 +32,7 @@ const LOOKUP_INTENT = /\b(who (?:is|are|won)|what (?:is|are) the (?:latest|curre
 // Phrases that clearly do NOT need the web (creative / self-referential / code).
 const NON_FACTUAL = /\b(write|compose|generate|create|draft|imagine|story|poem|joke|rewrite|refactor|debug|translate|summari[sz]e this|explain this code)\b/i;
 
-import { getCompleteChatResponse } from "@/lib/ai";
+import { evaluateUserIntent } from "@/lib/ai";
 
 export interface SmartSearchEvaluation {
   shouldSearch: boolean;
@@ -40,8 +40,14 @@ export interface SmartSearchEvaluation {
 }
 
 /**
- * ChatGPT-style web search evaluation & search query generator.
- * Uses a fast AI model to think whether search is needed, and generates optimal search keywords.
+ * Whether this turn should be grounded, and with what query.
+ *
+ * Delegates to evaluateUserIntent rather than running its own classifier. The
+ * two used to ask a small model nearly the same question independently, so one
+ * user message could spend two or three utility calls on the same decision —
+ * pure waste of the free-tier budget this app runs on, and latency before the
+ * first token. evaluateUserIntent also short-circuits on decisive heuristics,
+ * so most turns now cost no classification call at all.
  */
 export async function evaluateSmartWebSearch(
   input: string,
@@ -53,55 +59,18 @@ export async function evaluateSmartWebSearch(
     return { shouldSearch: false, searchQuery: "" };
   }
 
-  // Fast pattern heuristic check
-  const heuristicMatch = shouldWebSearch(text);
-
-  // Classification always runs on Ministral 8B via the Mistral API — see the
-  // matching note in evaluateUserIntent (src/lib/ai.ts).
-  const fastModel = "ministral-8b";
-
   try {
-    const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-    const systemPrompt = [
-      "You are an expert AI Web Search Evaluator & Query Synthesizer (like ChatGPT).",
-      `Today's date is ${today}.`,
-      "Analyze the user's message to determine if accurate, up-to-date, recent, or real-time web search information is needed.",
-      "If web search IS needed, synthesize a clean, standalone search query (keywords only, without filler like 'search for').",
-      "NEVER invent or hardcode a date in the query. Use relative words like 'today' or 'latest' instead — a wrong date returns stale results.",
-      "",
-      "Respond ONLY with valid JSON:",
-      '{"shouldSearch": true, "searchQuery": "clean search terms"}',
-      "or",
-      '{"shouldSearch": false, "searchQuery": ""}',
-    ].join("\n");
-
-    const response = await getCompleteChatResponse(
-      [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: text },
-      ],
-      fastModel,
-      signal,
-    );
-
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (typeof parsed.shouldSearch === "boolean") {
-        return {
-          shouldSearch: parsed.shouldSearch,
-          searchQuery: (parsed.searchQuery || text).trim(),
-        };
-      }
-    }
+    const intent = await evaluateUserIntent(text, chatModelId, signal);
+    return {
+      shouldSearch: intent.needsSearch,
+      searchQuery: intent.searchQuery || text,
+    };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") throw err;
+    // Fall back to the local heuristic so grounding degrades rather than
+    // disappearing when the classifier is unavailable.
+    return { shouldSearch: shouldWebSearch(text), searchQuery: text };
   }
-
-  return {
-    shouldSearch: heuristicMatch,
-    searchQuery: text,
-  };
 }
 
 /**
