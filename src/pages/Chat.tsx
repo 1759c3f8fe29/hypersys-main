@@ -817,8 +817,9 @@ export default function Chat() {
               {
                 role: 'system',
                 content: [
-                  buildFlyerSystemPrompt(selectedModelMeta.name),
-                  ...(deepThink ? ['', buildDeepThinkDirective()] : []),
+                  deepThink
+                    ? buildFlyerThinkingPrompt({ modelName: selectedModelMeta.name })
+                    : buildFlyerSystemPrompt({ modelName: selectedModelMeta.name }),
                   '',
                   '=== INTERNAL VISION ENGINE ANALYSIS ===',
                   'Our internal vision engine analyzed the user\'s uploaded image(s)/file(s) and produced this detailed visual breakdown:',
