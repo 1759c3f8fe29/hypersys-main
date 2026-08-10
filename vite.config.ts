@@ -97,6 +97,7 @@ function localApiProxy(): Plugin {
 // skips the auth/quota checks the production router enforces: local dev has a
 // single trusted user and adding token verification would just add friction.
 const DEV_PROVIDER_ENDPOINTS: Record<string, { url: string; envKeys: string[]; byokHeader?: string; keyless?: boolean }> = {
+  gemini: { url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", envKeys: ["GEMINI_API_KEY", "VITE_GEMINI_API_KEY"], byokHeader: "x-gemini-api-key" },
   nvidia: { url: "https://integrate.api.nvidia.com/v1/chat/completions", envKeys: ["NVIDIA_API_KEY", "VITE_NVIDIA_API_KEY"], byokHeader: "x-nvidia-api-key" },
   mistral: { url: "https://api.mistral.ai/v1/chat/completions", envKeys: ["MISTRAL_API_KEY", "VITE_MISTRAL_API_KEY"], byokHeader: "x-mistral-api-key" },
   pollinations: { url: "https://text.pollinations.ai/openai", envKeys: [], keyless: true },

@@ -3,11 +3,15 @@
 // Set VITE_NVIDIA_API_KEY or NVIDIA_API_KEY in the Vercel project env.
 
 import { applyGuard } from "./_guard.js";
+import { applyMeter } from "./_meter.js";
 
 const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 export default async function handler(req, res) {
   if (applyGuard(req, res)) return;
+  // Spends our NVIDIA key, so the caller is attributed and counted first.
+  // A caller on their own key is exempt — they are spending their allowance.
+  if (await applyMeter(req, res, { byokHeaders: ["x-nvidia-api-key", "x-api-key"] })) return;
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;

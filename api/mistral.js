@@ -3,11 +3,14 @@
 // Set MISTRAL_API_KEY in the Vercel project env (see `vercel env add`).
 
 import { applyGuard } from "./_guard.js";
+import { applyMeter } from "./_meter.js";
 
 const MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions";
 
 export default async function handler(req, res) {
   if (applyGuard(req, res)) return;
+  // Spends our Mistral key, so the caller is attributed and counted first.
+  if (await applyMeter(req, res, { byokHeaders: ["x-mistral-api-key", "x-api-key"] })) return;
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;

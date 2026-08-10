@@ -3,11 +3,16 @@
 // Set SERPAPI_API_KEY in the Vercel project env (see `vercel env add`).
 
 import { applyGuard } from "./_guard.js";
+import { applyMeter } from "./_meter.js";
 
 const SERPAPI_URL = "https://serpapi.com/search.json";
 
 export default async function handler(req, res) {
   if (applyGuard(req, res)) return;
+  // SerpApi searches are metered per call against our plan, and the DuckDuckGo
+  // fallback scrapes an endpoint that rate limits by IP. Both make an unmetered
+  // search route worth abusing, so callers are attributed and counted.
+  if (await applyMeter(req, res)) return;
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;
