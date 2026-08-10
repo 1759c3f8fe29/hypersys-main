@@ -1,20 +1,31 @@
 
 
 import { auth } from "./firebase";
-import { getModel, PROVIDERS, UTILITY_MODEL_ID, type ProviderId } from "./providers";
-
-// Default flagship shown as "Flyer". Mistral Large is the default because it
-// answers reliably — the NIM reasoning models intermittently return HTTP 529
-// "Service temporarily overloaded" when their capacity pool is saturated.
-export const DEFAULT_CHAT_MODEL = "mistral-large-latest";
+import {
+  getModel,
+  PROVIDERS,
+  UTILITY_MODEL_ID,
+  isImageModel as catalogueIsImage,
+  isVisionModel as catalogueIsVision,
+  supportsVision as catalogueSupportsVision,
+  type ProviderId,
+} from "./providers";
 
 // ---------------------------------------------------------------------------
-// Model → NVIDIA NIM / Mistral ID mapping
+// Legacy model → provider ID mapping
 // ---------------------------------------------------------------------------
-
-// Maps our internal model IDs to EXACT live model IDs.
-// Verified live against Mistral API and NVIDIA NIM catalog.
-// Only real, working models are kept. Fake / 404 models have been removed.
+//
+// DEPRECATED. src/lib/providers.ts is the model catalogue; this table only
+// still exists for the direct /api/nvidia and /api/mistral proxies, which the
+// router has not fully replaced yet. Add models to MODELS in providers.ts.
+//
+// Three entries were removed rather than migrated: "llama-4-maverick" and
+// "qwen-3-next-80b" both pointed at meta/llama-3.1-70b-instruct, and
+// "minimax-m2.7" at meta/llama-3.1-8b-instruct. The picker offered them under
+// those names and a different model answered. Renaming weights is lying to the
+// user about what produced their answer, so the names are gone; the legacy id
+// map in providers.ts resolves any persisted ones to the model that genuinely
+// replied.
 export const MODEL_REGISTRY: Record<
   string,
   { nvidiaId: string; kind: 'Chat' | 'Vision' | 'Image'; provider?: 'nvidia' | 'mistral'; mistralId?: string }
@@ -34,12 +45,9 @@ export const MODEL_REGISTRY: Record<
   "deepseek-v4-pro":   { nvidiaId: "deepseek-ai/deepseek-v4-pro",             kind: "Chat" },
   "deepseek-v4-flash": { nvidiaId: "deepseek-ai/deepseek-v4-flash",           kind: "Chat" },
   "kimi-k2.6":          { nvidiaId: "moonshotai/kimi-k2.6",                    kind: "Chat" },
-  "llama-4-maverick":  { nvidiaId: "meta/llama-3.1-70b-instruct",             kind: "Chat" },
   "minimax-m3":        { nvidiaId: "minimaxai/minimax-m3",                     kind: "Chat" },
-  "minimax-m2.7":      { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
-  "qwen-3-next-80b":   { nvidiaId: "meta/llama-3.1-70b-instruct",             kind: "Chat" },
   "llama-3.3-70b":     { nvidiaId: "meta/llama-3.3-70b-instruct",             kind: "Chat" },
-  "llama-70b":         { nvidiaId: "meta/llama-3.1-70b-instruct",             kind: "Chat" },
+  "llama-70b":         { nvidiaId: "meta/llama-3.3-70b-instruct",             kind: "Chat" },
   "llama-8b":          { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
   "nemotron-3-ultra-550b": { nvidiaId: "nvidia/nemotron-3-ultra-550b-a55b", kind: "Chat" },
   "nemotron-super-49b":{ nvidiaId: "nvidia/llama-3.3-nemotron-super-49b-v1",  kind: "Chat" },
@@ -56,15 +64,24 @@ export const MODEL_REGISTRY: Record<
 
   // ── Image Generation Models (NVIDIA NIM & Pollinations) ──
   "sana":              { nvidiaId: "nvidia/sana",                              kind: "Image" },
+  "sdxl-turbo":        { nvidiaId: "stabilityai/sdxl-turbo",                   kind: "Image" },
   "flux":              { nvidiaId: "pollinations",                             kind: "Image" },
-  "gptimage":          { nvidiaId: "pollinations",                             kind: "Image" },
   "turbo":             { nvidiaId: "pollinations",                             kind: "Image" },
   "stable-diffusion":  { nvidiaId: "pollinations",                             kind: "Image" },
 };
 
-export function getNvidiaId(modelId: string): string {
-  return MODEL_REGISTRY[modelId]?.nvidiaId || "meta/llama-3.1-8b-instruct";
+/**
+ * The provider-side NVIDIA id for a model, or undefined if we do not know it.
+ *
+ * Returns undefined rather than defaulting. This used to fall back to
+ * meta/llama-3.1-8b-instruct for *any* unrecognised id, so a typo or a stale
+ * persisted id produced a confident answer from an 8B model labelled as
+ * whatever the user had picked. Callers must surface the failure instead.
+ */
+export function getNvidiaId(modelId: string): string | undefined {
+  return MODEL_REGISTRY[modelId]?.nvidiaId || undefined;
 }
+
 
 // The internal vision-capable model any non-vision chat model routes through when an image is attached.
 // Defaults to Mistral Vision (pixtral-12b) as requested.
@@ -95,8 +112,16 @@ const VISION_CAPABLE_IDS = new Set([
   "ministral-8b",
 ]);
 
+/**
+ * Whether a legacy id belongs to Mistral.
+ *
+ * An empty id returns false. It used to return true, so a missing or unset
+ * model id routed silently to Mistral and answered as mistral-large — a caller
+ * bug turning into a wrong-model reply. An empty id is now nobody's model and
+ * the caller has to deal with it.
+ */
 export function isMistralModel(modelId: string): boolean {
-  if (!modelId) return true;
+  if (!modelId) return false;
   const lower = modelId.toLowerCase();
   if (
     lower.includes("mistral") ||
@@ -112,16 +137,19 @@ export function isMistralModel(modelId: string): boolean {
 }
 
 export function isVisionCapableModel(modelId: string): boolean {
+  if (catalogueSupportsVision(modelId)) return true;
   if (VISION_CAPABLE_IDS.has(modelId)) return true;
   return isVisionModel(modelId);
 }
 
+// The catalogue in providers.ts is authoritative; the legacy registry is only
+// consulted for ids that predate it.
 export function isVisionModel(modelId: string): boolean {
-  return MODEL_REGISTRY[modelId]?.kind === "Vision";
+  return catalogueIsVision(modelId) || MODEL_REGISTRY[modelId]?.kind === "Vision";
 }
 
 export function isImageModel(modelId: string): boolean {
-  return MODEL_REGISTRY[modelId]?.kind === "Image";
+  return catalogueIsImage(modelId) || MODEL_REGISTRY[modelId]?.kind === "Image";
 }
 
 // ---------------------------------------------------------------------------
@@ -183,9 +211,50 @@ type TextPart = { type: "text"; text: string };
 type ImagePart = { type: "image_url"; image_url: { url: string } };
 export type ContentPart = TextPart | ImagePart;
 
+/** A tool call the model asked for, with `arguments` still unparsed JSON. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  argumentsJson: string;
+}
+
+/**
+ * The OpenAI wire shape for a tool call on an assistant message. The assistant
+ * turn that requested the calls must be replayed to the model verbatim
+ * alongside the tool results, or the provider rejects the follow-up with
+ * "tool_call_id not found".
+ */
+export interface WireToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
 export interface ChatMessage {
   role: string;
-  content: string | ContentPart[];
+  content: string | ContentPart[] | null;
+  /** Present on an assistant turn that requested tools. */
+  tool_calls?: WireToolCall[];
+  /** Present on a `role: "tool"` result, matching the call it answers. */
+  tool_call_id?: string;
+  name?: string;
+}
+
+/** What a single streamed completion produced besides text. */
+export interface StreamResult {
+  toolCalls: ToolCall[];
+  finishReason?: string;
+  sawContent: boolean;
+}
+
+/** An OpenAI-style function schema advertised to the model. */
+export interface ToolSchema {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +382,15 @@ async function generateNvidiaChatResponse(
   opts?: { deepThink?: boolean },
 ) {
   const nvidiaModel = getNvidiaId(modelId);
+
+  // Fail rather than guess. This path used to default an unknown id to
+  // llama-3.1-8b, so a stale or misspelled id produced a confident answer from
+  // a small model wearing the requested model's name.
+  if (!nvidiaModel) {
+    throw new Error(
+      `"${modelId}" isn't a model we recognise any more. Pick another model from the list.`,
+    );
+  }
 
   const userKey = getUserNvidiaApiKey();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -619,13 +697,20 @@ async function generateMistralResponse(
 async function pumpOpenAiStream(
   response: Response,
   onChunk: (text: string) => void,
-) {
+): Promise<StreamResult> {
   if (!response.body) throw new Error("No response body");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let reasoning = "";
   let sawContent = false;
+  let finishReason: string | undefined;
+
+  // Tool calls arrive fragmented: the id and name land in the first delta for an
+  // index, then `arguments` streams in as a run of partial JSON strings that
+  // must be concatenated in arrival order before they parse. Keyed by index
+  // because a model may open several calls in one turn and interleave them.
+  const pending = new Map<number, { id: string; name: string; args: string }>();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -644,7 +729,28 @@ async function pumpOpenAiStream(
 
       try {
         const parsed = JSON.parse(payload);
-        const delta = parsed.choices?.[0]?.delta;
+        const choice = parsed.choices?.[0];
+        const delta = choice?.delta;
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+
+        // Reassemble tool calls before content: a turn that calls a tool often
+        // streams no content at all, and dropping these is what made the model
+        // look like it silently ignored the request.
+        if (Array.isArray(delta?.tool_calls)) {
+          for (const call of delta.tool_calls) {
+            const index = typeof call.index === "number" ? call.index : 0;
+            const slot = pending.get(index) ?? { id: "", name: "", args: "" };
+            if (call.id) slot.id = call.id;
+            if (call.function?.name) slot.name = call.function.name;
+            // Concatenated, never replaced — each chunk is a slice of one JSON
+            // document, so overwriting would leave only the final fragment.
+            if (typeof call.function?.arguments === "string") {
+              slot.args += call.function.arguments;
+            }
+            pending.set(index, slot);
+          }
+        }
+
         // Reasoning models (deepseek-v4-*) stream their chain of thought in
         // `reasoning_content` and the answer in `content`. Emit content when it
         // exists; only fall back to reasoning when a turn produced nothing else,
@@ -661,9 +767,26 @@ async function pumpOpenAiStream(
     }
   }
 
+  // A tool-calling turn legitimately produces no content, so the reasoning
+  // fallback must not fire there — it would print the model's private
+  // deliberation about which tool to call as if it were the answer.
+  const toolCalls = [...pending.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, slot]) => slot)
+    .filter((slot) => slot.name)
+    .map((slot) => ({
+      id: slot.id || `call_${slot.name}`,
+      name: slot.name,
+      // Left as a raw string: the executor parses it and needs to report a
+      // malformed payload back to the model rather than throw here.
+      argumentsJson: slot.args || "{}",
+    }));
+
   // Some reasoning models spend their whole budget in `reasoning_content` and
   // never emit `content`. Surface the thinking rather than an empty answer.
-  if (!sawContent && reasoning) onChunk(reasoning);
+  if (!sawContent && !toolCalls.length && reasoning) onChunk(reasoning);
+
+  return { toolCalls, finishReason, sawContent };
 }
 
 function friendlyHttpError(status: number, providerLabel: string): string {

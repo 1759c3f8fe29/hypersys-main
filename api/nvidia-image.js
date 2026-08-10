@@ -2,9 +2,13 @@
 // Calls NVIDIA NIM Image Generation models (nvidia/sana, stabilityai/sdxl-turbo).
 
 import { applyGuard } from "./_guard.js";
+import { applyMeter } from "./_meter.js";
 
 export default async function handler(req, res) {
   if (applyGuard(req, res)) return;
+  // Image generation is the most expensive thing we serve per call, so it is
+  // metered against the same daily allowance as chat.
+  if (await applyMeter(req, res, { byokHeaders: ["x-nvidia-api-key"] })) return;
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;

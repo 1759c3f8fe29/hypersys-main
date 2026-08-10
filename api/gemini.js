@@ -12,8 +12,16 @@ export default async function handler(req, res) {
     return;
   }
 
-  const key = req.headers["x-gemini-api-key"] || req.headers["x-api-key"] || req.headers["authorization"]?.split(" ")[1] || process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-  if (!key || key === "your-gemini-key" || key.startsWith("your-")) {
+  // Only the provider-specific BYOK header, then the server env. Deliberately
+  // NOT `authorization` — that header now carries the caller's Firebase ID
+  // token, so accepting it here would forward a user's auth token to Google as
+  // if it were an API key. Nor `x-api-key`, which is provider-agnostic and would
+  // let a key meant for one provider be sent to another.
+  const key =
+    req.headers["x-gemini-api-key"] ||
+    process.env.GEMINI_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY;
+  if (!key || key.startsWith("your-")) {
     res.status(400).json({ error: "Gemini API key is not configured." });
     return;
   }
@@ -33,7 +41,7 @@ export default async function handler(req, res) {
       Accept: "text/event-stream",
     },
     body: JSON.stringify({
-      model: model || "gemini-2.0-flash",
+      model: model || "gemini-flash-latest",
       messages,
       stream: true,
       temperature: temperature ?? 0.7,

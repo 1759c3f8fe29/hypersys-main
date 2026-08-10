@@ -1,5 +1,12 @@
 // Vercel serverless function: POST /api/pollinations
 // Streams a Pollinations AI chat completion (SSE). No API key needed!
+//
+// Deliberately NOT metered by _meter.js, unlike the other provider routes.
+// Pollinations is keyless, so this route spends no quota we pay for, and it is
+// the documented final fallback that keeps the app answering when the keyed
+// providers are exhausted (see "flyer-free" in src/lib/providers.ts). Counting
+// it against the same daily allowance would take the safety net away at exactly
+// the moment it is needed. It stays behind applyGuard's Origin allowlist.
 
 import { applyGuard } from "./_guard.js";
 
