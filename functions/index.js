@@ -6,13 +6,11 @@ import { defineSecret } from "firebase-functions/params";
 //   firebase functions:secrets:set SERPAPI_API_KEY
 //   firebase functions:secrets:set NVIDIA_API_KEY
 //   firebase functions:secrets:set OPENAI_API_KEY
-//   firebase functions:secrets:set GEMINI_API_KEY
 //   firebase functions:secrets:set XAI_API_KEY
 const MISTRAL_API_KEY = defineSecret("MISTRAL_API_KEY");
 const SERPAPI_API_KEY = defineSecret("SERPAPI_API_KEY");
 const NVIDIA_API_KEY = defineSecret("NVIDIA_API_KEY");
 const OPENAI_API_KEY = defineSecret("OPENAI_API_KEY");
-const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
 const XAI_API_KEY = defineSecret("XAI_API_KEY");
 
 const MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions";
@@ -64,7 +62,7 @@ function setCors(res, req) {
     res.set("Vary", "Origin");
   }
   res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key, X-OpenAI-Api-Key, X-Gemini-Api-Key, X-xAI-Api-Key");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key, X-OpenAI-Api-Key, X-xAI-Api-Key");
   res.set("Access-Control-Max-Age", "3600");
 }
 
@@ -112,10 +110,6 @@ export const api = onRequest(
         await handleOpenAI(req, res);
         return;
       }
-      if (path.endsWith("/gemini")) {
-        await handleGemini(req, res);
-        return;
-      }
       if (path.endsWith("/xai")) {
         await handleXAI(req, res);
         return;
@@ -142,9 +136,8 @@ export const api = onRequest(
 
 function getApiKey(secretObject, envVarName1, envVarName2, req) {
   if (req) {
-    const headerKey = req.headers["x-openai-api-key"] || 
-                      req.headers["x-gemini-api-key"] || 
-                      req.headers["x-xai-api-key"] || 
+    const headerKey = req.headers["x-openai-api-key"] ||
+                      req.headers["x-xai-api-key"] ||
                       req.headers["x-nvidia-api-key"] || 
                       req.headers["x-mistral-api-key"] || 
                       req.headers["x-api-key"] || 
@@ -195,59 +188,6 @@ async function handleOpenAI(req, res) {
     const text = await upstream.text().catch(() => "");
     console.error("OpenAI upstream error:", upstream.status, text);
     res.status(upstream.status || 502).json({ error: "openai_upstream_error", status: upstream.status });
-    return;
-  }
-  res.status(200);
-  res.set("Content-Type", "text/event-stream; charset=utf-8");
-  res.set("Cache-Control", "no-cache, no-transform");
-  res.set("Connection", "keep-alive");
-  const reader = upstream.body.getReader();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      res.write(Buffer.from(value));
-    }
-  } finally {
-    res.end();
-  }
-}
-
-async function handleGemini(req, res) {
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
-  const key = getApiKey(GEMINI_API_KEY, "VITE_GEMINI_API_KEY", "GEMINI_API_KEY", req);
-  if (!key || key === "your-gemini-key" || key.startsWith("your-")) {
-    res.status(400).json({ error: "Gemini API key is not configured." });
-    return;
-  }
-  const { messages, model, temperature, top_p, max_tokens } = req.body || {};
-  if (!Array.isArray(messages) || messages.length === 0) {
-    res.status(400).json({ error: "`messages` array is required" });
-    return;
-  }
-  const upstream = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify({
-      model: model || "gemini-2.0-flash",
-      messages,
-      stream: true,
-      temperature: temperature ?? 0.7,
-      top_p: top_p ?? 0.95,
-      max_tokens: max_tokens ?? 2048,
-    }),
-  });
-  if (!upstream.ok || !upstream.body) {
-    const text = await upstream.text().catch(() => "");
-    console.error("Gemini upstream error:", upstream.status, text);
-    res.status(upstream.status || 502).json({ error: "gemini_upstream_error", status: upstream.status });
     return;
   }
   res.status(200);

@@ -21,7 +21,7 @@
 // All providers are OpenAI-compatible on the wire, so one request shape and one
 // SSE parser cover all of them.
 
-export type ProviderId = "nvidia" | "mistral" | "gemini" | "pollinations";
+export type ProviderId = "nvidia" | "mistral" | "pollinations";
 
 export interface ProviderMeta {
   id: ProviderId;
@@ -70,19 +70,6 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
     supportsVision: true,
     freeTier: "Free experimentation tier on La Plateforme.",
   },
-  // Largest free tier of the keyed providers, and natively multimodal — it reads
-  // PDFs and images directly rather than needing a separate vision route. Listed
-  // first in PROVIDER_ORDER so the most generous quota absorbs traffic first.
-  gemini: {
-    id: "gemini",
-    label: "Google Gemini",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    envKey: "GEMINI_API_KEY",
-    byokHeader: "x-gemini-api-key",
-    supportsTools: true,
-    supportsVision: true,
-    freeTier: "Largest free tier. Natively multimodal. RPM is usually the binding limit.",
-  },
   pollinations: {
     id: "pollinations",
     label: "Pollinations",
@@ -95,7 +82,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
   },
 };
 
-export const PROVIDER_ORDER: ProviderId[] = ["gemini", "nvidia", "mistral", "pollinations"];
+export const PROVIDER_ORDER: ProviderId[] = ["nvidia", "mistral", "pollinations"];
 
 
 // ---------------------------------------------------------------------------
@@ -177,97 +164,21 @@ export interface ModelSpec {
 // Re-run `npm run verify:models` after changing anything here. Provider
 // catalogues churn, and an unverified id fails at request time.
 export const MODELS: ModelSpec[] = [
-  // --- Google Gemini -------------------------------------------------------
-  // Upstream ids are Google's ROLLING ALIASES, not pinned versions. A pinned id
-  // is retired without warning — `gemini-2.5-flash` started answering 404 "no
-  // longer available to new users" and took the whole provider down with it,
-  // because 404 is a config fault that (correctly) does not fail over. The
-  // -latest aliases keep resolving as Google rotates the underlying weights.
-  //
-  // Ids are unverified until GEMINI_API_KEY is configured; `verify:models` skips
-  // routes whose provider has no key, and the router skips them too, so these
-  // are inert rather than broken until a key exists. Verify before relying on them.
-  {
-    id: "gemini-flash",
-    label: "Gemini Flash",
-    shortLabel: "Gemini Flash",
-    description: "Fast, multimodal, huge context. Reads PDFs and images directly.",
-    routes: [{ provider: "gemini", modelId: "gemini-flash-latest" }],
-    contextWindow: 1_048_576,
-    maxOutputTokens: 8192,
-    supportsVision: true,
-    supportsTools: true,
-    emoji: "⚡",
-    kind: "Chat",
-    featured: true,
-  },
-  {
-    id: "gemini-pro",
-    label: "Gemini Pro",
-    shortLabel: "Gemini Pro",
-    description: "Strongest Gemini. Best for hard reasoning and long documents.",
-    routes: [{ provider: "gemini", modelId: "gemini-pro-latest" }],
-    contextWindow: 1_048_576,
-    maxOutputTokens: 8192,
-    supportsVision: true,
-    supportsTools: true,
-    isReasoning: true,
-    emoji: "💠",
-    kind: "Chat",
-    featured: true,
-  },
-  {
-    id: "gemini-flash-lite",
-    label: "Gemini Flash Lite",
-    shortLabel: "Gemini Lite",
-    description: "Cheapest and fastest Gemini. Good for titles and quick lookups.",
-    routes: [{ provider: "gemini", modelId: "gemini-flash-lite-latest" }],
-    contextWindow: 1_048_576,
-    maxOutputTokens: 8192,
-    supportsVision: true,
-    supportsTools: true,
-    emoji: "🌱",
-    kind: "Chat",
-  },
-
   // --- Chat / reasoning ----------------------------------------------------
-  {
-    id: "deepseek-v4-flash",
-    label: "Flyer Fast",
-    description: "Frontier quality at speed. Good default for everyday use.",
-    routes: [{ provider: "nvidia", modelId: "deepseek-ai/deepseek-v4-flash" }],
-    contextWindow: 1_000_000,
-    maxOutputTokens: 8192,
-    supportsVision: false,
-    supportsTools: true,
-    emoji: "⚡",
-    kind: "Chat",
-    featured: true,
-  },
-  {
-    id: "deepseek-v4-pro",
-    label: "Flyer Max",
-    description: "Frontier open reasoning model. Best for hard problems.",
-    routes: [{ provider: "nvidia", modelId: "deepseek-ai/deepseek-v4-pro" }],
-    contextWindow: 1_000_000,
-    maxOutputTokens: 8192,
-    supportsVision: false,
-    supportsTools: true,
-    isReasoning: true,
-    emoji: "🧠",
-    kind: "Chat",
-    featured: true,
-  },
+  // The default. Mistral Large is the one flagship in this catalogue that is
+  // both tool-capable and vision-capable on a single route, so it is the model
+  // the product is named after and the one a new conversation starts on.
   {
     id: "mistral-large",
-    label: "Mistral Large",
-    description: "Mistral's flagship. Handles images too.",
+    label: "Flyer",
+    shortLabel: "Flyer",
+    description: "The default Flyer model. Strong all-rounder that reads images and uses tools.",
     routes: [{ provider: "mistral", modelId: "mistral-large-latest" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
     supportsVision: true,
     supportsTools: true,
-    emoji: "🧬",
+    emoji: "🪽",
     kind: "Chat",
     featured: true,
   },
@@ -548,13 +459,21 @@ const LEGACY_MODEL_IDS: Record<string, string> = {
   "llama-8b": "fast-small",
   "step-3.7-flash": "nemotron-super-49b",
 
-  // Gemini ids were pinned to a version Google has since retired for new keys.
-  // The catalogue now tracks the rolling -latest aliases instead.
-  "gemini-2.5-flash": "gemini-flash",
-  "gemini-2.5-pro": "gemini-pro",
-  "gemini-2.5-flash-lite": "gemini-flash-lite",
-  "gemini-1.5-flash": "gemini-flash",
-  "gemini-1.5-pro": "gemini-pro",
+  // Gemini and DeepSeek were removed from the catalogue. Messages already in
+  // Firestore still carry those ids, so they map to the nearest live model —
+  // which means an old message's byline is approximate, not exact, exactly as
+  // for the mislabelled ids above. Nothing re-routes to different weights at
+  // request time: these only resolve a stored id to a label and a retry target.
+  "gemini-flash": "mistral-large",
+  "gemini-pro": "mistral-large",
+  "gemini-flash-lite": "mistral-small",
+  "gemini-2.5-flash": "mistral-large",
+  "gemini-2.5-pro": "mistral-large",
+  "gemini-2.5-flash-lite": "mistral-small",
+  "gemini-1.5-flash": "mistral-large",
+  "gemini-1.5-pro": "mistral-large",
+  "deepseek-v4-flash": "mistral-large",
+  "deepseek-v4-pro": "kimi-k2.6",
 };
 
 
@@ -611,7 +530,7 @@ export function supportsTools(id: string): boolean {
 /** The model used for internal utility work. Always the cheapest one. */
 export const UTILITY_MODEL_ID = "fast-small";
 
-export const DEFAULT_MODEL_ID = "deepseek-v4-flash";
+export const DEFAULT_MODEL_ID = "mistral-large";
 
 /** Walked in order by the image executor when a generation fails. */
 export const IMAGE_FALLBACK_CHAIN = ["sana", "sdxl-turbo", "flux", "turbo", "stable-diffusion"];

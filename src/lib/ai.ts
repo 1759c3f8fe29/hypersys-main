@@ -42,8 +42,6 @@ export const MODEL_REGISTRY: Record<
   "ministral-8b":         { nvidiaId: "", provider: "mistral", mistralId: "ministral-8b-latest",  kind: "Chat" },
 
   // ── Verified NVIDIA NIM Chat / Reasoning Models ──
-  "deepseek-v4-pro":   { nvidiaId: "deepseek-ai/deepseek-v4-pro",             kind: "Chat" },
-  "deepseek-v4-flash": { nvidiaId: "deepseek-ai/deepseek-v4-flash",           kind: "Chat" },
   "kimi-k2.6":          { nvidiaId: "moonshotai/kimi-k2.6",                    kind: "Chat" },
   "minimax-m3":        { nvidiaId: "minimaxai/minimax-m3",                     kind: "Chat" },
   "llama-3.3-70b":     { nvidiaId: "meta/llama-3.3-70b-instruct",             kind: "Chat" },
@@ -751,7 +749,7 @@ async function pumpOpenAiStream(
           }
         }
 
-        // Reasoning models (deepseek-v4-*) stream their chain of thought in
+        // Reasoning models (kimi, nemotron, minimax) stream their thinking in
         // `reasoning_content` and the answer in `content`. Emit content when it
         // exists; only fall back to reasoning when a turn produced nothing else,
         // so a thinking-only response is never silently empty.
