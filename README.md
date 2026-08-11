@@ -5,7 +5,7 @@ persistent history. Built with Vite + React + TypeScript + Tailwind + shadcn/ui.
 
 ## Features
 
-- 💬 **Multi-model chat** — GLM, DeepSeek, Kimi, MiniMax, Qwen, Llama via NVIDIA NIM, plus **Mistral** (Large/Small/Codestral/Nemo)
+- 💬 **Multi-model chat** — **Flyer** (Mistral Large) by default, plus Kimi, MiniMax, Nemotron, Llama via NVIDIA NIM and the rest of the Mistral family (Medium/Small/Codestral)
 - 🌐 **Auto web search** — time-sensitive/factual questions are grounded with live results (SerpApi) and cited
 - 👁️ **Vision** — upload an image and ask about it (auto-routes to a vision model)
 - 🎨 **Image generation** — text-to-image with downloadable results

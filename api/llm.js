@@ -36,15 +36,6 @@ const PROVIDER_ENDPOINTS = {
     byokHeader: "x-mistral-api-key",
     supportsTools: true,
   },
-  // Was missing here while present in DEV_PROVIDER_ENDPOINTS (vite.config.ts),
-  // so every Gemini route worked in dev and reported "unknown provider" in
-  // production. Dev and prod must list the same providers.
-  gemini: {
-    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    envKeys: ["GEMINI_API_KEY", "VITE_GEMINI_API_KEY"],
-    byokHeader: "x-gemini-api-key",
-    supportsTools: true,
-  },
   pollinations: {
     url: "https://text.pollinations.ai/openai",
     envKeys: [],

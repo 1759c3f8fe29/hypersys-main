@@ -58,8 +58,8 @@ function extractJsonFromResponse(response: string): unknown | null {
   }
 }
 
-// Reasoning models on NVIDIA NIM (DeepSeek V4, Qwen 3.x, MiniMax, Nemotron,
-// Step) stream their chain-of-thought wrapped in <think>…</think> (or a few
+// Reasoning models on NVIDIA NIM (Kimi, MiniMax, Nemotron) stream their
+// chain-of-thought wrapped in <think>…</think> (or a few
 // close variants). ChatGPT never shows this — it renders only the final answer.
 // We strip it here so every model reads clean. Handles the streaming case too:
 // an OPEN tag with no close yet means the model is still "thinking", so we hide

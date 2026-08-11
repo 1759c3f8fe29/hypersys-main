@@ -31,12 +31,9 @@ tier hai, toh jitne zyada configure karoge, utni zyada capacity legitimately mil
 Kam se kam ek zaroori hai; jitne de sako achha:
 
 ```
-GEMINI_API_KEY="..."        # aistudio.google.com — sabse bada free tier, PDF/image natively padhta hai
-GROQ_API_KEY="..."          # console.groq.com — sabse fast
-CEREBRAS_API_KEY="..."      # cloud.cerebras.ai
-OPENROUTER_API_KEY="..."    # openrouter.ai — asli DeepSeek समेत ':free' models
 NVIDIA_API_KEY="..."        # build.nvidia.com (aapke paas already hai)
-MISTRAL_API_KEY="..."       # console.mistral.ai (aapke paas already hai)
+MISTRAL_API_KEY="..."       # console.mistral.ai (aapke paas already hai) — default model "Flyer" yahin se aata hai
+# Pollinations keyless hai — koi key nahi chahiye, final fallback ke taur par chalta hai.
 
 # Optional — production rate limiting (bina iske dev me sab chalega):
 # UPSTASH_REDIS_REST_URL="..."
@@ -61,8 +58,8 @@ npm run verify:models  # provider catalogs ke against model IDs check karta hai
 npm run dev          # default model bhejo — /api/llm route ab dev me bhi kaam karta hai
 ```
 
-`npm run verify:models` **zaroor chalao** — `providers.ts` me kuch model IDs
-(deepseek-v4-pro, kimi-k2.6, minimax-m3, gemini-2.0-flash) provider catalogs se
+`npm run verify:models` **zaroor chalao** — `providers.ts` me model IDs
+(mistral-large-latest, kimi-k2.6, minimax-m3) provider catalogs se
 verify hone chahiye. Jo available na ho, wo route hata do warna wo model 404 dega.
 
 ---
@@ -91,8 +88,8 @@ verify hone chahiye. Jo available na ho, wo route hata do warna wo model 404 deg
 | `package.json` | Naye deps |
 
 ### Kya theek hua
-- **Free capacity** — 6 providers, har ek ka apna free bucket, automatic failover
-- **Better models** — asli DeepSeek, Gemini (native multimodal), Llama, Kimi, MiniMax
+- **Free capacity** — NVIDIA + Mistral + keyless Pollinations, har ek ka apna free bucket, automatic failover
+- **Better models** — Flyer (Mistral Large) default, Llama, Kimi, MiniMax, Nemotron
 - **~3x kam quota burn** — duplicate classifier hataya + heuristics decisive hon toh API call skip
 - **Long chats ab nahi tootengi** — token budgeting + summarization
 - **PDF/Word/Excel ab actually padhta hai** — pehle useless base64 jaata tha

@@ -171,7 +171,7 @@ async function main() {
   const nvidia = available.nvidia;
   if (nvidia?.status === "ok") {
     const interesting = nvidia.models.filter((m) =>
-      /deepseek|kimi|qwen|glm|llama-4|nemotron|minimax|step/i.test(m),
+      /kimi|qwen|glm|llama-4|nemotron|minimax|step/i.test(m),
     );
     if (interesting.length) {
       console.log(`\n${DIM}Strong open models NVIDIA currently serves:${RESET}`);

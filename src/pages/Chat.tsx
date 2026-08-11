@@ -58,7 +58,7 @@ interface Conversation {
   modelId?: string;
 }
 
-// The large NIM models (nemotron-ultra, minimax-m3, deepseek-v4-pro, kimi-k2.6)
+// The large NIM models (nemotron-ultra, minimax-m3, kimi-k2.6)
 // and the Mistral large/medium tiers cold-start 60-100s before the first token,
 // then stream fine. The base timeout must clear that window or those models
 // always error. Verified worst-case first-token was ~100s on 2026-07-21.
