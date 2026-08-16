@@ -225,6 +225,31 @@ export const MODELS: ModelSpec[] = [
     featured: true,
   },
   {
+    id: "glm-5.2",
+    label: "GLM 5.2",
+    description: "Zhipu's frontier open reasoning model.",
+    // Hosted by NVIDIA: carries the "Free Endpoint" badge on build.nvidia.com
+    // and is present in the live /v1/models catalogue as z-ai/glm-5.2.
+    //
+    // NOTE (3.8): the id verifies but did not return a completion during live
+    // probing — 6 POST attempts (50-170s each, non-stream and stream, with and
+    // without the nca-allowed-client header) returned no HTTP response, while
+    // minimaxai/minimax-m3 answered in 13s on the same key. That reads as an
+    // unresponsive capacity pool for this model, not a bad id or a bad key.
+    // The router already treats a stalled provider as a failover case; this
+    // model has a single route, so if users report hangs, mark it `hidden`
+    // until NVIDIA's serving path answers again.
+    routes: [{ provider: "nvidia", modelId: "z-ai/glm-5.2" }],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "🔷",
+    kind: "Chat",
+    featured: true,
+  },
+  {
     id: "llama-70b",
     label: "Llama 3.3 70B",
     description: "Reliable open all-rounder.",
@@ -321,18 +346,6 @@ export const MODELS: ModelSpec[] = [
     kind: "Vision",
     featured: true,
   },
-  {
-    id: "pixtral-12b",
-    label: "Pixtral 12B",
-    description: "Multimodal vision and chat.",
-    routes: [{ provider: "mistral", modelId: "pixtral-12b-2409" }],
-    contextWindow: 128_000,
-    maxOutputTokens: 4096,
-    supportsVision: true,
-    supportsTools: false,
-    emoji: "🖼️",
-    kind: "Vision",
-  },
 
   // --- Utility -------------------------------------------------------------
   {
@@ -355,35 +368,15 @@ export const MODELS: ModelSpec[] = [
   },
 
   // --- Image generation ----------------------------------------------------
-  // These are not chat models: their routes point at image endpoints
-  // (NVIDIA `/v1/genai/*`, Pollinations' image host), and the image executor
-  // walks this chain rather than /api/llm. `npm run verify:models` checks these
-  // ids against the genai catalogue separately from the chat ids.
-  {
-    id: "sana",
-    label: "NVIDIA Sana",
-    description: "Fast, crisp diffusion. The default image engine.",
-    routes: [{ provider: "nvidia", modelId: "nvidia/sana" }],
-    contextWindow: 0,
-    maxOutputTokens: 0,
-    supportsVision: false,
-    supportsTools: false,
-    emoji: "✨",
-    kind: "Image",
-    featured: true,
-  },
-  {
-    id: "sdxl-turbo",
-    label: "SDXL Turbo",
-    description: "Stability's fast SDXL. Second in the image chain.",
-    routes: [{ provider: "nvidia", modelId: "stabilityai/sdxl-turbo" }],
-    contextWindow: 0,
-    maxOutputTokens: 0,
-    supportsVision: false,
-    supportsTools: false,
-    emoji: "🌀",
-    kind: "Image",
-  },
+  // These are not chat models: their routes point at Pollinations' image host,
+  // and the image executor walks this chain rather than /api/llm.
+  //
+  // NVIDIA NIM's image models (nvidia/sana, stabilityai/sdxl-turbo) were
+  // removed in 3.6: `npm run verify:models` probes the genai endpoint and they
+  // 404 even with a valid key — the whole `/v1/genai/*` surface is gone, so a
+  // live NVIDIA leg does not exist to walk. Their persisted ids resolve through
+  // LEGACY_MODEL_IDS. Pollinations is keyless and always-on, so this chain is
+  // what actually renders images.
   {
     id: "flux",
     label: "FLUX",
@@ -443,7 +436,14 @@ const LEGACY_MODEL_IDS: Record<string, string> = {
   "vision-engine": "nemotron-vision",
   "vision-engine-2": "nemotron-vision",
   "vision-engine-3": "nemotron-vision",
-  "pixtral-12b-2409": "pixtral-12b",
+  // Mistral retired pixtral-12b-2409 from its catalogue (verified in 3.6), so
+  // both spellings resolve to the live NVIDIA vision engine.
+  "pixtral-12b-2409": "nemotron-vision",
+  "pixtral-12b": "nemotron-vision",
+  // NVIDIA NIM's image gen ids died with the /v1/genai/* surface. Persisted
+  // conversations that selected them resolve to the keyless chain instead.
+  "sana": "flux",
+  "sdxl-turbo": "flux",
   "gptimage": "flux",
 
   // These three used to answer as a *different* model than their name claimed
@@ -532,10 +532,16 @@ export const UTILITY_MODEL_ID = "fast-small";
 
 export const DEFAULT_MODEL_ID = "mistral-large";
 
-/** Walked in order by the image executor when a generation fails. */
-export const IMAGE_FALLBACK_CHAIN = ["sana", "sdxl-turbo", "flux", "turbo", "stable-diffusion"];
+/**
+ * Walked in order by the image executor when a generation fails.
+ *
+ * NVIDIA NIM's image ids (sana, sdxl-turbo) were dropped in 3.6 — the
+ * /v1/genai/* endpoint 404s for every model even with a valid key, so no live
+ * NVIDIA image leg exists to walk. Every model here is keyless Pollinations.
+ */
+export const IMAGE_FALLBACK_CHAIN = ["flux", "turbo", "stable-diffusion"];
 
-export const DEFAULT_IMAGE_MODEL_ID = "sana";
+export const DEFAULT_IMAGE_MODEL_ID = "flux";
 
 /** The vision model a non-vision chat model routes through for an attachment. */
 export const DEFAULT_VISION_MODEL_ID = "nemotron-vision";

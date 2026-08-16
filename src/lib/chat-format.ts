@@ -1,13 +1,8 @@
-export const IMAGE_REQUEST_PATTERNS: RegExp[] = [
-  /\b(generate|create|make|draw|design|render|illustrate|paint|sketch)\b.*\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|thumbnail|avatar|painting|drawing|sketch)\b/i,
-  /\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|thumbnail|avatar|painting|drawing|sketch)\b.*\b(generate|create|make|draw|design|render|illustrate|paint|sketch)\b/i,
-  /\bshow me\b.*\b(image|picture|photo|art|artwork|illustration|logo|painting)\b/i,
-];
-
-export function isImageGenerationRequest(input: string): boolean {
-  if (!input?.trim()) return false;
-  return IMAGE_REQUEST_PATTERNS.some((pattern) => pattern.test(input));
-}
+// `isImageGenerationRequest` and its IMAGE_REQUEST_PATTERNS regexes used to sit
+// here — a third copy of the keyword guess at "is this an image request?". Its
+// only caller was the Chat.tsx dispatch that Phase 6 deleted; image generation
+// is now either an explicitly selected Image model or the agent loop's
+// generate_image tool, neither of which needs a regex.
 
 const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*\]\((data:image\/[^)]+|https?:\/\/[^)\s]+)\)/i;
 

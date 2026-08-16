@@ -1,30 +1,37 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { useAuth } from '@/hooks/useAuth';
-import { firestoreDb } from '@/lib/firestore-db';
+import { firestoreDb, type FirestoreMemory, type UserSettings } from '@/lib/firestore-db';
 import ChatSidebar, { AI_MODELS } from '@/components/chat/ChatSidebar';
 import {
   DEFAULT_MODEL_ID,
-  DEFAULT_IMAGE_MODEL_ID,
   canonicalModelId,
+  supportsTools,
 } from '@/lib/providers';
 import ChatMessage from '@/components/chat/ChatMessage';
 import ChatInput, { ACCENT_COLORS } from '@/components/chat/ChatInput';
 import ModelSelector from '@/components/chat/ModelSelector';
 import WelcomeScreen from '@/components/chat/WelcomeScreen';
-import { generateChatResponse, generateVisionResponse, generateImageResponse, craftImagePrompt, craftVisionPrompt, evaluateUserIntent, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
+import { generateChatResponse, generateVisionResponse, generateImageResponse, buildImagePrompt, craftVisionPrompt, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
 import {
   buildFlyerSystemPrompt,
   buildFlyerThinkingPrompt,
   buildVisionSystemPrompt,
   buildDeepThinkDirective,
 } from '@/lib/prompts';
-import { evaluateSmartWebSearch, webSearch, buildSearchContext } from '@/lib/search';
+import { webSearch, buildSearchContext } from '@/lib/search';
+import { runAgentTurn, AGENT_TOOLS_ENABLED, MAX_STEPS } from '@/lib/agent';
+import type { ToolArtifacts } from '@/lib/tools';
 import { extractDocument, canExtract, buildDocumentContext } from '@/lib/documents';
-import type { ChatAttachment, MessageSource } from '@/components/chat/types';
+import { extractArtifacts } from '@/lib/artifacts';
+import { ingestArtifacts, resetArtifacts, openArtifact, useArtifacts } from '@/components/artifacts/ArtifactProvider';
+import { ArtifactCanvas } from '@/components/artifacts/ArtifactCanvas';
+import type { ChatAttachment, MessageFile, MessageSource } from '@/components/chat/types';
 import { Menu, ArrowDown, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
-import { extractFirstMarkdownImage, isImageGenerationRequest, sanitizeAssistantText } from '@/lib/chat-format';
+import { extractFirstMarkdownImage, sanitizeAssistantText } from '@/lib/chat-format';
+import { buildMessageForest, linearizeForest, switchBranch } from '@/lib/message-tree';
 
 interface ArenaResponse {
   modelId: string;
@@ -45,9 +52,32 @@ interface Message {
   // chips. The data already comes back from the search provider; this just
   // carries it to the message so it can be rendered.
   followUps?: string[];
+  // Files the create_file tool produced, shown as download links. Blob URLs,
+  // so they live only as long as this tab — not persisted with the message.
+  files?: MessageFile[];
   // Arena Mode
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
+  // Threading (Part F). Mirrors FirestoreMessage.parentMessageId: each node
+  // points at its parent, roots are null. Carried on the UI message so the
+  // linearizer and the branch switcher can walk the tree without re-reading DB.
+  parentMessageId?: string | null;
+  siblingIndex?: number;
+  // The children of this node, grouped as alternative branches. Populated by
+  // buildMessageForest from the flat DB list; empty for leaves. Enables the
+  // < 1/3 > branch switcher on a parent that has several replies (an edited
+  // user message, or a regenerated assistant answer).
+  children?: Message[];
+  // Which child branch is currently expanded/visible. Defaults to the last
+  // child (the most recent edit/regenerate), matching ChatGPT's "latest wins"
+  // behaviour. The switcher mutates this index.
+  activeChildIndex?: number;
+  // Branch-switcher metadata, stamped on by linearizeForest: this node's
+  // 1-based position among its siblings and the total sibling count. When
+  // branchCount > 1 the row shows a < 2/3 > switcher. Roots report 1/1, so
+  // the switcher only appears where a real branch exists.
+  __branchIndex?: number;
+  __branchCount?: number;
 }
 
 interface Conversation {
@@ -78,15 +108,6 @@ function wantsFullVisionAnalysis(request: string): boolean {
   if (text.length < 24 && !OPEN_ENDED_VISION_REQUEST.test(text)) return false;
   return OPEN_ENDED_VISION_REQUEST.test(text);
 }
-// Default renderer for a text-to-image request that fires from a Chat model,
-// and the chat model used to author an image prompt when the user is on an
-// Image model (so the prompt is always written by a chat model).
-//
-// These come from the catalogue rather than being spelled out here: a literal
-// id that drifts out of the catalogue resolves to nothing, and the picker then
-// displays one model while a different one answers.
-const DEFAULT_IMAGE_MODEL = DEFAULT_IMAGE_MODEL_ID;
-const DEFAULT_CHAT_MODEL_ID = DEFAULT_MODEL_ID;
 
 // The system prompts live in src/lib/prompts.ts. They used to be three inline
 // builders here; they are structural ports of the reference prompts in
@@ -168,6 +189,9 @@ const fileToDataUrl = (file: File): Promise<string> => {
 
 export default function Chat() {
   const { user, isGuest } = useAuth();
+  // openId drives the desktop right-padding on the messages column so the
+  // overlay canvas never hides message text. The canvas hides itself below md.
+  const { openId: openArtifactId } = useArtifacts();
   const [accentColor, setAccentColor] = useState(() => localStorage.getItem('Flyer_theme_color') || '172 66% 50%');
 
   useEffect(() => {
@@ -181,6 +205,27 @@ export default function Chat() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  // ── Persistent memory + custom instructions (Part F.2/F.3) ──
+  //
+  // Memories are short facts about the user auto-extracted after each turn
+  // and/or added manually. Custom instructions are the user's "about me" and
+  // "how to respond" directives. Both are injected into the system prompt via
+  // the existing # User Memories / # User's Instructions slots in
+  // contextBlocks() — which were wired but never fed.
+  //
+  // Kept in a ref too because the async send handler reads them and a state
+  // value would be stale across awaits; the state copy drives the management
+  // panel UI.
+  const [memories, setMemories] = useState<FirestoreMemory[]>([]);
+  const memoriesRef = useRef<FirestoreMemory[]>([]);
+  const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
+  const userSettingsRef = useRef<UserSettings | null>(null);
+  // The threaded forest backing `messages`. Kept in a ref so the branch
+  // switcher can re-linearize a different active child without re-reading the
+  // DB: switching branches is a pure tree reshape (the data didn't change,
+  // only which sibling is visible). A fresh conversation load rebuilds this;
+  // a live send appends into it. See switchBranch() in message-tree.ts.
+  const messageForestRef = useRef<any[]>([]);
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [statusText, setStatusText] = useState('');
@@ -202,9 +247,27 @@ export default function Chat() {
   const dragCounterRef = useRef(0);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // The virtuoso scroller for the message list. Owns its own viewport, so the
+  // manual scrollTop/scrollHeight math below is replaced by Virtuoso's
+  // followOutput + atBottomStateChange. Kept for the loading/welcome states.
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isNewConversationRef = useRef(false);
+
+  // Every object URL create_file handed out this session. Blob URLs pin their
+  // blob in memory until revoked, and an xlsx can be megabytes — a long session
+  // of "make me a spreadsheet" leaks all of them otherwise. Revoked when the
+  // conversation is left or the page unloads, not when the chip unmounts: the
+  // user may still be mid-download.
+  const objectUrlsRef = useRef<string[]>([]);
+
+  const revokeObjectUrls = useCallback(() => {
+    for (const url of objectUrlsRef.current) URL.revokeObjectURL(url);
+    objectUrlsRef.current = [];
+  }, []);
+
+  // Unmount and hard navigation both end the tab's use of those blobs.
+  useEffect(() => revokeObjectUrls, [revokeObjectUrls]);
 
   // ── Streaming autoscroll ──────────────────────────────────────────────
   // Follow the stream only while the user is actually parked at the bottom.
@@ -221,29 +284,28 @@ export default function Chat() {
   // send, disarmed again on conversation switch.
   const hasSentThisSessionRef = useRef(false);
 
-  // 64px of slack: browsers report fractional scroll positions at some zoom
-  // levels and during momentum scrolling, so an exact comparison never holds.
-  const PIN_THRESHOLD_PX = 64;
-
-  const handleScroll = useCallback(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const pinned = distanceFromBottom <= PIN_THRESHOLD_PX;
-    isPinnedToBottomRef.current = pinned;
-    // Only offer the jump button once there's a meaningful amount to jump past.
-    setShowScrollToBottom(!pinned && distanceFromBottom > 240);
-  }, []);
+  // Pinning + the jump-to-latest button now come from Virtuoso's
+  // atBottomStateChange, so the old onScroll math (PIN_THRESHOLD_PX, the 240px
+  // gate) is gone. isPinnedToBottomRef is still written by atBottomStateChange
+  // so the streaming autoscroll effect can keep its "only while pinned" gate.
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    // scrollTop rather than scrollIntoView: scrollIntoView on a child can also
-    // scroll ancestor containers and shift the whole page on mobile.
-    el.scrollTo({ top: el.scrollHeight, behavior });
+    // Prefer the virtualized scroller when it is mounted (the normal chat path);
+    // fall back to the plain container for the loading/welcome states. Virtuoso's
+    // scrollToIndex only accepts 'auto' | 'smooth', so coerce 'instant' → 'auto'.
+    const vBehavior = behavior === 'smooth' ? 'smooth' : 'auto';
+    if (virtuosoRef.current && messages.length > 0) {
+      virtuosoRef.current.scrollToIndex({ index: 'LAST', behavior: vBehavior });
+    } else {
+      const el = scrollContainerRef.current;
+      if (!el) return;
+      // scrollTop rather than scrollIntoView: scrollIntoView on a child can also
+      // scroll ancestor containers and shift the whole page on mobile.
+      el.scrollTo({ top: el.scrollHeight, behavior });
+    }
     isPinnedToBottomRef.current = true;
     setShowScrollToBottom(false);
-  }, []);
+  }, [messages.length]);
 
   // Runs after every message mutation, including each streamed delta. Layout
   // effect so the adjustment happens in the same frame the new text paints —
@@ -255,10 +317,17 @@ export default function Chat() {
     // scrolling there is what made the screen open already-scrolled-down.
     if (!hasSentThisSessionRef.current) return;
     if (!isPinnedToBottomRef.current) return;
+    // During streaming the last item's height grows as tokens arrive; Virtuoso's
+    // followOutput handles the data-array case but an in-place content bump can
+    // leave the tail a frame behind, so we nudge it to the last index. 'auto'
+    // (not smooth) because a smooth animation per token queues dozens of
+    // overlapping animations and lags behind the text.
+    if (virtuosoRef.current && messages.length > 0) {
+      virtuosoRef.current.scrollToIndex({ index: messages.length - 1, behavior: 'auto', align: 'end' });
+      return;
+    }
     const el = scrollContainerRef.current;
     if (!el) return;
-    // 'auto' during streaming: a smooth animation per token queues dozens of
-    // overlapping scroll animations and lags behind the text.
     el.scrollTop = el.scrollHeight;
   }, [messages]);
 
@@ -368,6 +437,41 @@ export default function Chat() {
 
   useEffect(() => { loadConversations(); }, [loadConversations]);
 
+  // Load the user's persisted memories + custom instructions once they're
+  // authenticated. Guest mode has no Firestore writes (isAuthenticated gate
+  // below), so for guests these stay empty and the prompt slots render nothing —
+  // matching the existing `if (isAuthenticated)` guard on conversations.
+  // Mirrored into refs because handleSendMessage reads them from an async
+  // context where the state value would be stale.
+  useEffect(() => {
+    if (!user || isGuest) { setMemories([]); memoriesRef.current = []; setUserSettings(null); userSettingsRef.current = null; return; }
+    (async () => {
+      const [m, s] = await Promise.all([
+        firestoreDb.getMemories(user.uid),
+        firestoreDb.getUserSettings(user.uid),
+      ]);
+      setMemories(m); memoriesRef.current = m;
+      setUserSettings(s); userSettingsRef.current = s;
+    })();
+  }, [user, isGuest]);
+
+  // The system-prompt injection uses a single concatenated string for each
+  // slot, matching how contextBlocks() consumes them (one `# User Memories`
+  // block carrying all facts at once). Manual + auto memories are combined;
+  // a memory is one line. Kept as a helper so the send path and the panel
+  // both derive the same rendering.
+  const memoriesAsPromptBlock = useCallback((list: FirestoreMemory[]): string => {
+    if (list.length === 0) return '';
+    return list.map((m) => `- ${m.content}`).join('\n');
+  }, []);
+  const instructionsAsPromptBlock = useCallback((s: UserSettings | null): string => {
+    if (!s) return '';
+    const parts: string[] = [];
+    if (s.aboutMe.trim()) parts.push(`About me:\n${s.aboutMe.trim()}`);
+    if (s.howToRespond.trim()) parts.push(`How to respond:\n${s.howToRespond.trim()}`);
+    return parts.join('\n\n');
+  }, []);
+
   const loadMessages = useCallback(async () => {
     // Opening or switching a conversation disarms autoscroll so the freshly
     // loaded history renders from its natural position instead of snapping to
@@ -375,23 +479,35 @@ export default function Chat() {
     hasSentThisSessionRef.current = false;
     isPinnedToBottomRef.current = true;
     setShowScrollToBottom(false);
-    if (!activeConversationId) { setMessages([]); return; }
+    if (!activeConversationId) { setMessages([]); revokeObjectUrls(); return; }
     if (isNewConversationRef.current) {
       isNewConversationRef.current = false;
       return;
     }
     setIsMessagesLoading(true);
     setMessages([]); // Clear stale messages immediately
+    revokeObjectUrls(); // old downloads die with the old conversation
+    resetArtifacts(); // canvas history and open panel die with the old conversation too
     try {
       const data = await firestoreDb.getMessages(activeConversationId);
-      setMessages(data.map((m) => ({
+      // Messages come back as a flat list. buildMessageForest assembles them
+      // into a tree, then linearizeForest walks the active branch of each node
+      // to produce the ordered array we render. Old conversations imported
+      // before parentMessageId existed read back as all-roots — a forest of
+      // single-node trees — which linearizes in createdAt order, preserving
+      // the original flat history exactly.
+      const forest = buildMessageForest(data.map((m) => ({
         id: m.id,
         role: m.role,
         content: m.content,
         imageUrl: m.role === 'assistant' ? extractFirstMarkdownImage(m.content) : undefined,
         attachments: m.attachments,
         modelName: m.modelName,
-      })) || []);
+        parentMessageId: m.parentMessageId ?? null,
+        siblingIndex: m.siblingIndex ?? 0,
+      })));
+      messageForestRef.current = forest;
+      setMessages(linearizeForest(forest) as Message[]);
     } catch (e) {
       console.error("Failed to load messages:", e);
     } finally {
@@ -449,11 +565,12 @@ export default function Chat() {
     role: 'user' | 'assistant',
     content: string,
     modelName?: string,
-    attachments?: ChatAttachment[]
+    attachments?: ChatAttachment[],
+    parentMessageId?: string | null
   ) => {
     if (!user) return;
     try {
-      await firestoreDb.saveMessage(conversationId, user.uid, role, content, modelName, attachments);
+      await firestoreDb.saveMessage(conversationId, user.uid, role, content, modelName, attachments, parentMessageId);
     } catch (e) {
       console.error("Error saving message:", e);
     }
@@ -478,10 +595,20 @@ export default function Chat() {
 
     // Non-image uploads have to be parsed into text before the model can use
     // them. Previously they were only base64-encoded, so a PDF reached the model
-    // as an opaque blob and it answered by guessing.
+    // as an opaque blob and it answered by guessing. The attachment id each File
+    // received above is threaded into extraction, so the text block the model
+    // reads carries an attachment_id it can hand to edit_file.
     const documentFiles = files.filter((f) => !f.type.startsWith('image/') && canExtract(f));
     const extractedDocs = documentFiles.length > 0
-      ? await Promise.all(documentFiles.map(extractDocument))
+      ? await Promise.all(
+          // pendingAttachments maps 1:1 with files by index, so the matching
+          // attachment carries the same id this doc will surface.
+          documentFiles.map((file) => {
+            const idx = files.indexOf(file);
+            const id = pendingAttachments[idx]?.id;
+            return extractDocument(file, id);
+          }),
+        )
       : [];
 
     for (const doc of extractedDocs) {
@@ -495,8 +622,22 @@ export default function Chat() {
     const imageAttachments = pendingAttachments.filter((a) => a.type === 'image');
     const hasImages = imageAttachments.length > 0;
 
-    const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: trimmedContent, attachments: pendingAttachments };
-    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', modelName: selectedModelMeta.name };
+    // Threading (Part F): the new user message replies to the last assistant
+    // message in the visible path (what the user is continuing from). For the
+    // very first turn of a conversation there is no assistant message yet, so
+    // this user message is a root (parentMessageId null). The assistant reply
+    // then replies to this user message. This parent linkage is what lets a
+    // later edit/regenerate append a sibling branch rather than mutate.
+    //
+    // "Last assistant" means the last assistant message that actually has
+    // content — the streaming placeholder we're about to append isn't one
+    // yet, and a mid-flight empty placeholder from a previous (failed) turn
+    // shouldn't become a branch root either.
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant' && m.content.trim() !== '');
+    const userParentId = lastAssistant?.id ?? null;
+
+    const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: trimmedContent, attachments: pendingAttachments, parentMessageId: userParentId };
+    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', modelName: selectedModelMeta.name, parentMessageId: userMessage.id };
 
     // ── INSTANT UI UPDATE — show user message + thinking placeholder NOW ──
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
@@ -507,14 +648,27 @@ export default function Chat() {
     scrollToBottom('smooth');
     setStatusText('Understanding your request...');
 
-    // ── Run intent evaluation AFTER the UI has been updated ──
-    const intentEval = await evaluateUserIntent(
-      requestContent,
-      selectedModel,
-      abortControllerRef.current?.signal,
-    );
+    // ── What this turn needs is now the model's call, not a pre-flight guess ──
+    //
+    // The classifier that used to run here (evaluateUserIntent) is gone. Two
+    // signals decide the shape of the turn, and both are things the user did
+    // rather than things a regex inferred:
+    //
+    //   isImageGen — they picked an Image model in the sidebar.
+    //   forceWebSearch — they pressed the Search toggle.
+    //
+    // Everything else the model decides mid-turn by calling a tool. On the paths
+    // the loop does not cover (no tool support, image understanding, Arena mode)
+    // that means no search unless the toggle is on: those models cannot call the
+    // tool themselves, so the toggle is the only grounding they get.
+    const isImageGen = isImageModel(selectedModel);
 
-    const isImageGen = intentEval.needsImage;
+    const useAgent =
+      AGENT_TOOLS_ENABLED &&
+      !hasImages &&
+      !isArenaMode &&
+      !isImageGen &&
+      supportsTools(selectedModel);
 
     let effectiveModelId = selectedModel;
     if (!isImageGen && hasImages && !isVisionCapableModel(selectedModel)) {
@@ -535,6 +689,17 @@ export default function Chat() {
             ],
           }
         : { role: 'user', content: requestContent };
+    // Prompt-render options shared by all three builders (vision / thinking /
+    // instant). The memories + custom-instructions slots are fed here from the
+    // persisted cache (loaded on auth, see the [user] effect above); for
+    // unauthenticated/guest users they are empty strings and contextBlocks()
+    // renders nothing, preserving the previous behaviour exactly.
+    const promptOpts = {
+      modelName: selectedModelMeta.name,
+      memories: memoriesAsPromptBlock(memoriesRef.current),
+      userInstructions: instructionsAsPromptBlock(userSettingsRef.current),
+    };
+
     const allMessages: AiChatMessage[] = [
       {
         role: 'system',
@@ -543,10 +708,10 @@ export default function Chat() {
           // replaces the instant prompt rather than being appended to it. The
           // vision path keeps its own prompt and takes the override separately.
           hasImages
-            ? buildVisionSystemPrompt({ modelName: selectedModelMeta.name })
+            ? buildVisionSystemPrompt(promptOpts)
             : deepThink
-              ? buildFlyerThinkingPrompt({ modelName: selectedModelMeta.name })
-              : buildFlyerSystemPrompt({ modelName: selectedModelMeta.name }),
+              ? buildFlyerThinkingPrompt(promptOpts)
+              : buildFlyerSystemPrompt(promptOpts),
           hasImages && deepThink ? buildDeepThinkDirective() : '',
           // Extracted document text, when the user attached files.
           buildDocumentContext(extractedDocs) || '',
@@ -589,7 +754,8 @@ export default function Chat() {
         'user',
         trimmedContent || (pendingAttachments.length > 0 ? `[Image uploaded] ${pendingAttachments.map((attachment) => attachment.name).join(', ')}` : requestContent),
         undefined,
-        pendingAttachments
+        pendingAttachments,
+        userMessage.parentMessageId
       );
     }
 
@@ -615,25 +781,17 @@ export default function Chat() {
       if (isImageGen) {
         const rawPrompt = trimmedContent || 'a beautiful, highly detailed artistic image';
 
-        // Which model actually renders the image: the selected model if it's an
-        // Image model, otherwise our default renderer (FLUX).
-        const renderModelId = isImageModel(selectedModel) ? selectedModel : DEFAULT_IMAGE_MODEL;
-
-        // The generation prompt is crafted BY the chat model (ChatGPT-style),
-        // then handed to the renderer. Deliberately dense rather than long:
-        // diffusion text encoders truncate, so length costs us the tail.
-        const promptAuthorModel = isImageModel(selectedModel) ? DEFAULT_CHAT_MODEL_ID : selectedModel;
-        setStatusText('Crafting image prompt...');
-        const imagePrompt = await craftImagePrompt(
-          rawPrompt,
-          promptAuthorModel,
-          abortControllerRef.current.signal,
-        );
-
+        // isImageGen means the user picked this Image model, so it renders.
+        //
+        // The prompt is enriched locally by buildImagePrompt rather than by a
+        // round-trip through a chat model (the old craftImagePrompt): it reads
+        // the request type — logo, photo, anime, UI, 3D — and appends the
+        // descriptors that steer a diffusion model toward it. Same intent, no
+        // second model call in front of the image.
         setStatusText('Generating image...');
         const { imageDataUrl, message } = await generateImageResponse(
-          imagePrompt,
-          renderModelId,
+          buildImagePrompt(rawPrompt),
+          selectedModel,
           imageAttachments.map(a => ({ dataUrl: a.url })),
           abortControllerRef.current.signal
         );
@@ -646,7 +804,7 @@ export default function Chat() {
         receivedAssistantContent = true;
 
         if (convId && isAuthenticated) {
-          await saveMessage(convId, 'assistant', imageContent, selectedModelMeta.name);
+          await saveMessage(convId, 'assistant', imageContent, selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
         }
       } else {
         let fullContent = '';
@@ -693,24 +851,28 @@ export default function Chat() {
           }
         }
 
-        // Web search execution. The Search toggle forces grounding regardless of
-        // what the classifier decided; otherwise the classifier's call stands.
+        // Web search execution — the Search toggle only. There is no classifier
+        // left to infer grounding, and on the agent path the model calls
+        // web_search itself; forcing a pre-flight search there would pre-empt the
+        // query it would have written, so the toggle becomes an instruction to
+        // call the tool instead (below).
+        //
+        // What remains here is the fallback for models that cannot call tools at
+        // all — `flyer-free`, the vision engines, Arena mode. For them the toggle
+        // is the only way to ground a turn, so it still runs a real search and
+        // splices the context in.
         let turnSources: MessageSource[] = [];
         let turnFollowUps: string[] = [];
-        const shouldSearch = !hasImages && (forceWebSearch || intentEval.needsSearch);
-        const searchQuery = (intentEval.searchQuery || requestContent).trim();
+        // Filled in by the agent loop's tools; merged onto the message when the
+        // turn finishes, alongside anything this pre-flight search produced.
+        let agentArtifacts: ToolArtifacts = {};
+        const shouldSearch = !hasImages && !useAgent && !isImageGen && forceWebSearch;
+        const searchQuery = requestContent.trim();
         if (shouldSearch && searchQuery) {
           try {
             setIsSearching(true);
             setStatusText('Searching the web...');
-            let search = await webSearch(searchQuery, abortControllerRef.current?.signal);
-            // The classifier sometimes over-narrows the query into something with
-            // no coverage. If a crafted query came back empty, retry once with the
-            // user's own words before giving up — cheap, and it rescues the turn.
-            const craftedQueryFailed = !search?.results?.length && searchQuery !== requestContent.trim();
-            if (craftedQueryFailed && requestContent.trim()) {
-              search = await webSearch(requestContent.trim(), abortControllerRef.current?.signal);
-            }
+            const search = await webSearch(searchQuery, abortControllerRef.current?.signal);
             const context = buildSearchContext(search);
             if (search?.results?.length) {
               turnSources = search.results
@@ -727,9 +889,7 @@ export default function Chat() {
               messagesForModel.splice(messagesForModel.length - 1, 0, {
                 role: 'system',
                 content: [
-                  forceWebSearch
-                    ? `[USER ENABLED WEB SEARCH — QUERY: "${searchQuery}"]`
-                    : `[FAST INTENT CLASSIFIER (${intentEval.fastModelUsed}) TRIGGERED WEB SEARCH FOR QUERY: "${searchQuery}"]`,
+                  `[USER ENABLED WEB SEARCH — QUERY: "${searchQuery}"]`,
                   context
                 ].join('\n\n')
               });
@@ -751,6 +911,16 @@ export default function Chat() {
           } finally {
             setIsSearching(false);
           }
+        }
+
+        // The Search toggle on the agent path. The model owns the query, so the
+        // toggle becomes a requirement to call the tool rather than a pre-flight
+        // search whose results would arrive before the model had read the turn.
+        if (useAgent && forceWebSearch) {
+          messagesForModel.splice(messagesForModel.length - 1, 0, {
+            role: 'system',
+            content: '[USER ENABLED WEB SEARCH] Call web_search before answering this turn, with a query you write yourself from the user\'s message. Ground the answer in what comes back and cite the sources.',
+          });
         }
 
         const selectedModelMeta = AI_MODELS.find((model) => model.id === selectedModel) || AI_MODELS[0];
@@ -788,6 +958,15 @@ export default function Chat() {
               prev.map((m) => (m.id === assistantMessage.id ? { ...m, content: liveContent } : m)),
             );
           };
+          // Narration that preceded a tool call is not the answer — see
+          // onDiscardPartial in lib/agent.ts. Clearing the buffer puts the
+          // placeholder back so the real answer streams into an empty message.
+          const discardStreamed = () => {
+            fullContent = '';
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantMessage.id ? { ...m, content: '' } : m)),
+            );
+          };
 
           if (hasImages && isVisionCapableModel(selectedModel)) {
             // The selected model can read the image itself, so answer in one hop.
@@ -818,8 +997,8 @@ export default function Chat() {
                 role: 'system',
                 content: [
                   deepThink
-                    ? buildFlyerThinkingPrompt({ modelName: selectedModelMeta.name })
-                    : buildFlyerSystemPrompt({ modelName: selectedModelMeta.name }),
+                    ? buildFlyerThinkingPrompt(promptOpts)
+                    : buildFlyerSystemPrompt(promptOpts),
                   '',
                   '=== INTERNAL VISION ENGINE ANALYSIS ===',
                   'Our internal vision engine analyzed the user\'s uploaded image(s)/file(s) and produced this detailed visual breakdown:',
@@ -843,6 +1022,61 @@ export default function Chat() {
               abortControllerRef.current!.signal,
               { deepThink },
             );
+          } else if (useAgent) {
+            // The agent path. The model decides whether it needs to search,
+            // render an image, or write a file, and this runs whatever it asks
+            // for before it writes the answer.
+            setStatusText(deepThink ? 'Thinking deeply...' : 'Generating response...');
+            const run = await runAgentTurn({
+              messages: messagesForModel,
+              modelId: effectiveModelId,
+              onChunk: handleDelta,
+              signal: abortControllerRef.current!.signal,
+              deepThink,
+              // edit_file resolves its attachment_id against these. Metadata only
+              // — the file's text already reached the model via buildDocumentContext,
+              // and edit_file never re-extracts. Non-image attachments only: image
+              // attaches never carry a text attachment_id.
+              attachments: pendingAttachments
+                .filter((a) => a.type === 'file')
+                .map((a) => ({ id: a.id, name: a.name, mimeType: a.mimeType })),
+              onToolStart: ({ name, args }) => {
+                // A tool call is proof of life just as much as a first token is:
+                // the provider answered, it just answered with a call instead of
+                // prose. Cancel the cold-start guard here rather than on tool end,
+                // because one image generation can outlast the 130s budget by
+                // itself and would otherwise be aborted mid-flight.
+                clearColdStartGuard();
+                // The answer is not being written yet, so the status line has to
+                // say what is actually happening — otherwise it reads
+                // "Generating response" through a five-second search.
+                if (name === 'web_search') {
+                  const q = typeof args.query === 'string' ? args.query : '';
+                  setIsSearching(true);
+                  setStatusText(q ? `Searching for "${q}"...` : 'Searching the web...');
+                } else if (name === 'generate_image') {
+                  setStatusText('Generating image...');
+                } else if (name === 'create_file') {
+                  setStatusText('Creating file...');
+                } else if (name === 'edit_file') {
+                  setStatusText('Editing file...');
+                } else {
+                  setStatusText('Working...');
+                }
+              },
+              onToolEnd: ({ name }) => {
+                if (name === 'web_search') setIsSearching(false);
+                setStatusText(deepThink ? 'Thinking deeply...' : 'Generating response...');
+              },
+              onDiscardPartial: discardStreamed,
+            });
+            agentArtifacts = run.artifacts;
+            if (run.hitStepLimit) {
+              // Not surfaced to the user: the loop still forces a prose answer
+              // from whatever it gathered, so the reply is complete, just
+              // possibly less researched than the model intended.
+              console.warn(`[agent] hit the ${MAX_STEPS}-step ceiling on ${effectiveModelId}`);
+            }
           } else {
             setStatusText(deepThink ? 'Thinking deeply...' : 'Generating response...');
             await generateChatResponse(messagesForModel, effectiveModelId, handleDelta, abortControllerRef.current!.signal, { deepThink });
@@ -878,17 +1112,37 @@ export default function Chat() {
 
         const [cleaned, ...secondaryResults] = await Promise.all([runPrimary(), ...secondaryPromises]);
 
+        // What the tools produced, folded into the shapes the message already
+        // renders. The classifier path fills turnSources/turnFollowUps before
+        // the model runs; the agent path fills artifacts during it. Only one of
+        // the two is ever populated, so this is a merge rather than a choice.
+        const agentSources: MessageSource[] = (agentArtifacts.sources || [])
+          .filter((r) => r.link)
+          .slice(0, 8)
+          .map((r) => ({ title: r.title || r.link, link: r.link, source: r.source }));
+        const mergedSources = turnSources.length ? turnSources : agentSources;
+        const mergedFollowUps = turnFollowUps.length ? turnFollowUps : (agentArtifacts.followUps || []);
+        // First image only: the message carries one imageUrl, and a model that
+        // rendered several has already described them in prose.
+        const agentImageUrl = agentArtifacts.images?.[0];
+        const agentFiles = agentArtifacts.files || [];
+        objectUrlsRef.current.push(...agentFiles.map((f) => f.url));
+
         if (cleaned) {
           const finalText = usedVisionFallback
             ? `${cleaned}\n\n*🔎 Analyzed with ${AI_MODELS.find(m => m.id === DEFAULT_VISION_MODEL)?.name || 'a vision model'} since ${selectedModelMeta.name} can't read images.*`
             : cleaned;
-            
+
           setMessages((prev) =>
             prev.map((m) => {
               if (m.id !== assistantMessage.id) return m;
-              return { 
-                ...m, 
+              return {
+                ...m,
                 content: finalText,
+                imageUrl: agentImageUrl || m.imageUrl,
+                files: agentFiles.length ? agentFiles : m.files,
+                sources: mergedSources.length ? mergedSources : undefined,
+                followUps: mergedFollowUps.length ? mergedFollowUps : undefined,
                 arenaResponses: activeArenaMode && m.arenaResponses
                   ? m.arenaResponses.map((ar, i) => ({ ...ar, content: secondaryResults[i] || ar.content }))
                   : undefined
@@ -896,8 +1150,31 @@ export default function Chat() {
             })
           );
 
+          // Surface substantial code blocks and any emitted files in the canvas.
+          // Ingest is additive and dedupes by id, so a re-render streaming the
+          // same final text just confirms the running set rather than polling it.
+          ingestArtifacts(extractArtifacts(finalText, agentFiles, assistantMessage.id));
+
           if (convId && isAuthenticated) {
-            await saveMessage(convId, 'assistant', finalText, selectedModelMeta.name);
+            // Only the text is persisted. A generated image is a data URL and a
+            // file is a blob URL scoped to this tab — both are far too large or
+            // too short-lived for a Firestore document, so a reloaded
+            // conversation shows the reply without them.
+            await saveMessage(convId, 'assistant', finalText, selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
+          }
+        } else if (agentImageUrl || agentFiles.length) {
+          // Tools delivered something the user can see even though the model
+          // wrote no prose after them. Showing the artifact beats replacing it
+          // with "formatting hiccup".
+          const madeText = agentImageUrl ? 'Here you go.' : `Created ${agentFiles.map((f) => f.filename).join(', ')}.`;
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantMessage.id
+              ? { ...m, content: madeText, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files }
+              : m)),
+          );
+          ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
+          if (convId && isAuthenticated) {
+            await saveMessage(convId, 'assistant', madeText, selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
           }
         } else {
           const fallback = 'I had a formatting hiccup—please send that once more 🙏';
@@ -945,6 +1222,7 @@ export default function Chat() {
     }
     setActiveConversationId(null);
     setMessages([]);
+    revokeObjectUrls();
     if (window.innerWidth < 1024) setSidebarCollapsed(true);
   };
 
@@ -970,6 +1248,39 @@ export default function Chat() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [regenText]);
+
+  // ── Branching (Part F) ──
+  //
+  // Switching branches is a pure reshape of the in-memory forest: the data
+  // hasn't changed, only which sibling of a given parent is the visible one.
+  // We mutate the forest ref (only the activeChildIndex of the parent node)
+  // and re-linearize. No DB round-trip — the whole tree is already loaded.
+  const handleSwitchBranch = useCallback((parentMessageId: string | null | undefined, direction: 'prev' | 'next') => {
+    if (!parentMessageId || messageForestRef.current.length === 0) return;
+    const next = switchBranch(messageForestRef.current, parentMessageId, direction);
+    setMessages(next as Message[]);
+  }, []);
+
+  // Editing a user message creates a NEW branch: we truncate the visible path
+  // back to just before the edited message, then resend the EDITED text. The
+  // resend runs through the same handleSendMessage, whose parent computation
+  // settles on exactly the edited message's original parent (the last assistant
+  // message before it) — so the new user message is a SIBLING of the original
+  // under that parent, not an in-place mutation. The old wording is preserved
+  // in the DB and reachable via the branch switcher after the conversation is
+  // reloaded (see buildMessageForest in message-tree.ts). Reusing the regen
+  // effect's "deferred send" avoids racing the state truncation with the read.
+  const handleEditMessage = useCallback((messageId: string, newContent: string) => {
+    if (isLoading) return;
+    const trimmed = newContent.trim();
+    if (!trimmed) return;
+    const idx = messages.findIndex((m) => m.id === messageId);
+    if (idx === -1) return;
+    setMessages((prev) => prev.slice(0, idx));
+    // setRegenText arms the regen effect (handleRegenerate uses the same flag),
+    // which calls handleSendMessage(trimmed) once the truncated state is committed.
+    setRegenText(trimmed);
+  }, [isLoading, messages]);
 
   const handleDeleteConversation = async (id: string) => {
     try {
@@ -1157,10 +1468,10 @@ export default function Chat() {
             keeps scroll from chaining to the document while re-enabling iOS
             momentum, which the document-level -webkit-overflow-scrolling reset
             had killed for this region too. */}
-        <div ref={scrollContainerRef} onScroll={handleScroll} className="relative z-10 flex-1 overflow-y-auto scrollbar-thin min-h-0 overflow-anchor-none touch-scroll-y">
+        <div ref={scrollContainerRef} className="relative z-10 flex-1 min-h-0 touch-scroll-y">
           <AnimatePresence mode="wait">
             {isMessagesLoading ? (
-              <div key="loading-messages" className="flex flex-col items-center justify-center h-full min-h-[50dvh]">
+              <div key="loading-messages" className="flex flex-col items-center justify-center h-full min-h-[50dvh] overflow-y-auto scrollbar-thin">
                 <div className="flex gap-1.5 justify-center items-center">
                   {[0, 0.2, 0.4].map((d, i) => (
                     <motion.span
@@ -1174,36 +1485,84 @@ export default function Chat() {
                 <span className="text-xs text-primary/80 font-medium mt-3">Loading messages...</span>
               </div>
             ) : (messages.length === 0 && regenText === null) ? (
-              <WelcomeScreen key="welcome" onSuggestionClick={handleSendMessage} modelName={selectedModelMeta?.name || 'AI'} />
+              <div key="welcome" className="h-full overflow-y-auto scrollbar-thin">
+                <WelcomeScreen onSuggestionClick={handleSendMessage} modelName={selectedModelMeta?.name || 'AI'} />
+              </div>
             ) : (
-              <motion.div key="messages" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className={`${isArenaMode ? 'max-w-full px-2' : 'max-w-4xl px-3 sm:px-4 lg:px-6'} mx-auto py-4 sm:py-6 lg:py-8 space-y-3 sm:space-y-4 transition-all duration-300`}>
-                {messages.map((msg, index) => (
-                  <ChatMessage
-                    key={msg.id}
-                    role={msg.role}
-                    content={msg.content}
-                    imageUrl={msg.imageUrl}
-                    attachments={msg.attachments}
-                    isStreaming={isLoading && msg.role === 'assistant' && index === messages.length - 1}
-                    modelName={msg.modelName || 'AI'}
-                    statusText={isLoading && msg.role === 'assistant' && index === messages.length - 1 ? statusText : undefined}
-                    sources={msg.sources}
-                    followUps={msg.followUps}
-                    onFollowUp={(q) => handleSendMessage(q)}
-                    onRegenerate={handleRegenerate}
-                    canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}
-                    isArenaMode={msg.isArenaMode}
-                    arenaResponses={msg.arenaResponses}
-                  />
-                ))}
-                <div ref={messagesEndRef} className="h-4" />
+              <motion.div key="messages" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="h-full transition-all duration-300">
+                {/* react-virtuoso: only the visible message rows are mounted, so a
+                    500-message thread no longer re-renders off-screen markdown every
+                    keystroke of streaming. followOutput keeps the view pinned to the
+                    tail while at the bottom; atBottomStateChange drives the
+                    jump-to-latest button (replacing the old onScroll math). */}
+                <Virtuoso
+                  ref={virtuosoRef}
+                  data={messages}
+                  className="h-full scrollbar-thin"
+                  followOutput={(isAtBottom) => {
+                    // Respect hasSentThisSessionRef: don't snap to bottom on
+                    // initial history load before the user has sent. Once they
+                    // have, keep the tail in view while pinned.
+                    if (!hasSentThisSessionRef.current) return false;
+                    return isAtBottom ? 'auto' : false;
+                  }}
+                  atBottomStateChange={(atBottom) => {
+                    isPinnedToBottomRef.current = atBottom;
+                    // Mirror the old 240px gate: hide the jump button while near
+                    // bottom, show it once there's meaningful distance above.
+                    setShowScrollToBottom(!atBottom);
+                  }}
+                  atTopStateChange={() => {
+                    // No-op: leaving the surface for future "load older" hooks.
+                  }}
+                  increaseViewportBy={{ top: 400, bottom: 400 }}
+                  computeItemKey={(_index, msg) => msg.id}
+                  itemContent={(index, msg) => (
+                    <div className={`${isArenaMode ? 'max-w-full px-2' : 'max-w-4xl px-3 sm:px-4 lg:px-6'} ${openArtifactId ? 'lg:pr-[34rem]' : ''} mx-auto py-4 sm:py-6 lg:py-8`}>
+                      {/* Each row owns its own vertical rhythm instead of the old
+                          gap-y on a flex parent: Virtuoso lays items flush, so the
+                          spacing must live inside each rendered row. */}
+                      <div className="pt-3 sm:pt-4 first:pt-0 last:pb-0">
+                        <ChatMessage
+                          role={msg.role}
+                          content={msg.content}
+                          imageUrl={msg.imageUrl}
+                          attachments={msg.attachments}
+                          isStreaming={isLoading && msg.role === 'assistant' && index === messages.length - 1}
+                          modelName={msg.modelName || 'AI'}
+                          statusText={isLoading && msg.role === 'assistant' && index === messages.length - 1 ? statusText : undefined}
+                          sources={msg.sources}
+                          followUps={msg.followUps}
+                          files={msg.files}
+                          onFollowUp={(q) => handleSendMessage(q)}
+                          onRegenerate={handleRegenerate}
+                          canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}
+                          isArenaMode={msg.isArenaMode}
+                          arenaResponses={msg.arenaResponses}
+                          onOpenArtifact={(id) => openArtifact(id)}
+                          branchIndex={msg.__branchIndex}
+                          branchCount={msg.__branchCount}
+                          onSwitchBranch={(dir) => handleSwitchBranch(msg.parentMessageId, dir)}
+                          canEdit={msg.role === 'user' && !isLoading}
+                          onEdit={(text) => handleEditMessage(msg.id, text)}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  components={{
+                    // A trailing spacer so the last message isn't flush against the
+                    // composer. Replaces the old messagesEndRef h-4 sentinel.
+                    Footer: () => <div className="h-4" />,
+                  }}
+                />
               </motion.div>
             )}
           </AnimatePresence>
         </div>
 
-        {/* Input */}
-        <div className="relative z-20 flex-shrink-0">
+        {/* Input. z-40 lifts the composer above the canvas overlay (z-30) so
+            typing stays possible while an artefact is open on desktop. */}
+        <div className="relative z-40 flex-shrink-0">
           {/* Jump-to-latest. Anchored to the composer so it sits clear of the
               home indicator on mobile, and only mounts once there is a real
               distance to travel — see the 240px gate in handleScroll. */}
@@ -1237,6 +1596,19 @@ export default function Chat() {
             onSelectAccent={setAccentColor}
           />
         </div>
+
+        {/* Artifact canvas — overlays the right edge of <main> when an artifact
+            is open; nothing rendered otherwise, so Arena mode keeps full width. */}
+        <ArtifactCanvas
+          filesForTurn={messages.flatMap((m) => m.files ?? [])}
+          onEdit={(text) => {
+            // Feed the artefact back into the chat as context for the next turn:
+            // we wrap it and ask the model to treat it as the prior version, so
+            // "edit this" becomes a follow-up the model can act on directly.
+            const fenced = "```\n" + text + "\n```";
+            handleSendMessage(`Here's the current version — make the changes I describe:\n${fenced}`);
+          }}
+        />
       </main>
     </div>
   );
