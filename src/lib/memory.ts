@@ -76,8 +76,9 @@ export async function extractMemories(
 // Parse the model's JSON-ish output. The prompt asks for strict JSON, but the
 // model sometimes wraps it in ```json fences or adds a stray sentence, so we
 // locate the first {...} block and JSON.parse that. Anything we can't parse →
-// no facts (never throw).
-function parseFacts(raw: string): string[] {
+// no facts (never throw). Exported so the parsing logic can be unit-tested
+// without mocking the network call.
+export function parseFacts(raw: string): string[] {
   const trimmed = raw.trim();
   if (!trimmed) return [];
   // Try a direct parse first.

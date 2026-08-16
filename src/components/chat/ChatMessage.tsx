@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, Terminal } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -30,6 +30,10 @@ interface ChatMessageProps {
   sources?: MessageSource[];
   followUps?: string[];
   files?: MessageFile[];
+  // Inline Python runs from the run_code tool (Part G). Each entry is one
+  // sandboxed Pyodide run; rendered as a terminal block with stdout/stderr and
+  // any matplotlib figures inline, so computed answers are visibly proven.
+  codeRuns?: Array<{ stdout?: string; stderr?: string; images?: string[] }>;
   onFollowUp?: (question: string) => void;
   onRegenerate?: () => void;
   canRegenerate?: boolean;
@@ -84,6 +88,47 @@ function FollowUpChips({ followUps, onFollowUp }: { followUps: string[]; onFollo
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+// Inline results from the run_code tool (Part G). Each run is one Python
+// execution: stdout/stderr in a terminal-style block and any matplotlib figures
+// the capture shim pulled out, rendered inline so the computed proof sits
+// beside the model's prose. Empty stdout+stderr+images collapses to nothing.
+function CodeRunBlocks({ runs }: { runs: Array<{ stdout?: string; stderr?: string; images?: string[] }> }) {
+  const meaningful = runs.filter(r => (r.stdout && r.stdout.trim()) || (r.stderr && r.stderr.trim()) || (r.images && r.images.length));
+  if (meaningful.length === 0) return null;
+  return (
+    <div className="mt-4 space-y-3">
+      {meaningful.map((run, i) => {
+        const stdout = (run.stdout || '').trim();
+        const stderr = (run.stderr || '').trim();
+        const images = run.images || [];
+        const hasText = stdout || stderr;
+        return (
+          <div key={i} className="rounded-lg border border-border/40 overflow-hidden bg-muted/30">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border/30 bg-muted/50 text-[11px] text-muted-foreground">
+              <Terminal className="w-3 h-3" />
+              <span className="font-medium">Python · run {i + 1}</span>
+            </div>
+            {hasText && (
+              <pre className="overflow-x-auto px-3 py-2.5 text-[12.5px] leading-relaxed font-mono whitespace-pre">
+                {stdout && <span className="text-foreground/90">{stdout}</span>}
+                {stdout && stderr && '\n'}
+                {stderr && <span className="text-red-500/90">{stderr}</span>}
+              </pre>
+            )}
+            {images.length > 0 && (
+              <div className="flex flex-wrap gap-2 p-3 bg-background/40">
+                {images.map((src, j) => (
+                  <img key={j} src={src} alt={`Figure ${j + 1}`} className="max-w-full max-h-64 rounded border border-border/30" />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -308,7 +353,7 @@ function buildMarkdownComponents(onOpenArtifact?: (id: string) => void): any {
  };
 }
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, onFollowUp, onRegenerate, canRegenerate, isArenaMode, arenaResponses, onOpenArtifact, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, onFollowUp, onRegenerate, canRegenerate, isArenaMode, arenaResponses, onOpenArtifact, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedArenaIdx, setCopiedArenaIdx] = useState<number | null>(null);
@@ -664,6 +709,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             </div>
 
             {!isUser && files && files.length > 0 && <FileChips files={files} onOpenFile={(fn) => onOpenArtifact?.(`file:${fn}`)} />}
+            {!isUser && codeRuns && codeRuns.length > 0 && <CodeRunBlocks runs={codeRuns} />}
             {!isUser && sources && sources.length > 0 && <SourceChips sources={sources} />}
             {!isUser && !isStreaming && followUps && followUps.length > 0 && onFollowUp && (
               <FollowUpChips followUps={followUps} onFollowUp={onFollowUp} />

@@ -45,6 +45,14 @@ export interface ToolArtifacts {
   followUps?: string[];
   /** Files the user can download. */
   files?: Array<{ filename: string; url: string; mimeType: string }>;
+  /**
+   * Inline code-execution results (the `run_code` tool, Part G). Each entry is
+   * one Python run: its stdout/stderr (rendered in a terminal-style block) and
+   * any matplotlib figures the run produced (rendered inline). Charts/datasets
+   * that became downloads ALSO go through `files`; this field is for the painted
+   * output the model computed, so the model's answer has visible proof next to it.
+   */
+  codeRuns?: Array<{ stdout?: string; stderr?: string; images?: string[] }>;
 }
 
 /**
