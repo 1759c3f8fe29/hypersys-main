@@ -19,6 +19,13 @@ export interface ExtractedDocument {
   mimeType: string;
   /** Extracted text, already truncated to a sane size. */
   text: string;
+  /**
+   * The attachment id assigned by the caller, threaded back here so it surfaces
+   * in the document context block the model reads. The model copies it into an
+   * edit_file call to name a specific file. Optional because `extractDocument`
+   * predates ids and not every caller has one.
+   */
+  id?: string;
   /** Set when extraction failed, so the caller can tell the user honestly. */
   error?: string;
   /** True when the text was cut short. */
@@ -171,9 +178,18 @@ async function extractPlainText(file: File): Promise<{ text: string }> {
  * caller can tell the user which file could not be read and still send the
  * rest. Throwing would lose the whole turn over one bad attachment.
  */
-export async function extractDocument(file: File): Promise<ExtractedDocument> {
+export async function extractDocument(
+  file: File,
+  /**
+   * The attachment's id, if the caller assigned one. Threaded through to the
+   * returned document so a later `buildDocumentContext` call can surface it for
+   * the model to reference from edit_file. Optional and unused for extraction
+   * itself.
+   */
+  id?: string,
+): Promise<ExtractedDocument> {
   const ext = extensionOf(file.name);
-  const base = { name: file.name, mimeType: file.type || `application/${ext}` };
+  const base = { name: file.name, mimeType: file.type || `application/${ext}`, ...(id ? { id } : {}) };
 
   try {
     let raw: { text: string; units?: number };
@@ -237,6 +253,7 @@ export function buildDocumentContext(docs: ExtractedDocument[]): string | null {
       return `--- FILE: ${doc.name} ---\n[Could not be read: ${doc.error}]`;
     }
     const notes: string[] = [];
+    if (doc.id) notes.push(`attachment_id: ${doc.id}`);
     if (doc.units) notes.push(`${doc.units} ${doc.units === 1 ? "part" : "parts"}`);
     if (doc.truncated) notes.push("truncated to fit the context window");
     const header = notes.length > 0 ? `${doc.name} (${notes.join(", ")})` : doc.name;
@@ -248,6 +265,7 @@ export function buildDocumentContext(docs: ExtractedDocument[]): string | null {
     "The user attached the following file(s). Their full text is below.",
     "Answer using this content. If a file was truncated, say so when the answer might depend on the missing part.",
     "Never invent content that is not present in these files.",
+    "Each file carries an attachment_id. If the user asks you to change, update, edit, fix, or rework one of these files, call edit_file with that attachment_id, the instructions, and the full modified content — do not say you cannot edit it.",
     "",
     blocks.join("\n\n"),
   ].join("\n");

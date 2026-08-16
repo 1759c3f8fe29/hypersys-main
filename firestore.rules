@@ -37,6 +37,22 @@ service cloud.firestore {
       allow update: if ownsExisting() && ownsIncoming() && ownsConversation(resource.data.conversationId);
     }
 
+    // Per-user persisted facts inferred from chat (Part F.2). One doc per
+    // memory, owned by the user via the userId field. No conversation linkage.
+    match /memories/{memoryId} {
+      allow read, delete: if ownsExisting();
+      allow create: if ownsIncoming();
+      allow update: if ownsExisting() && ownsIncoming();
+    }
+
+    // Per-user custom instructions (Part F.3). Singleton doc keyed by uid,
+    // so ownership is enforced by matching the doc id to request.auth.uid.
+    match /users/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow create, update: if isSignedIn() && request.auth.uid == userId;
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
     // Deny everything else by default.
     match /{document=**} {
       allow read, write: if false;

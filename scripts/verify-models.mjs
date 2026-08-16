@@ -87,15 +87,66 @@ async function listModels(provider) {
 }
 
 // Parsed straight out of the TS source so the script cannot drift from the
-// catalogue it is meant to check.
+// catalogue it is meant to check. Each entry carries its `kind` so image routes
+// are checked against the right surface instead of the chat /v1/models lists:
+// a genai id like nvidia/sana never appears there, so checking it against the
+// chat catalogue produced a false "NOT in catalogue" row while the id was
+// actually just being asked the wrong question.
 function parseCatalogue() {
   const src = readFileSync(join(root, "src/lib/providers.ts"), "utf-8");
-  const routes = [];
-  const re = /\{\s*provider:\s*"(\w+)",\s*modelId:\s*"([^"]+)"\s*\}/g;
-  for (let m = re.exec(src); m; m = re.exec(src)) {
-    routes.push({ provider: m[1], modelId: m[2] });
+  const start = src.indexOf("const MODELS");
+  const end = src.indexOf("\n];", start);
+  const modelsSrc = src.slice(start, end < 0 ? undefined : end);
+
+  const models = [];
+  // Each catalogue entry opens at two-space indent and closes at two-space
+  // indent. Nested objects (route entries) are indented deeper, so the lazy
+  // block can't stop on them.
+  const blockRe = /\n  \{\n\s*id:\s*"([^"]+)",([\s\S]*?)\n  \},/g;
+  const routeRe = /\{\s*provider:\s*"(\w+)",\s*modelId:\s*"([^"]+)"\s*\}/g;
+
+  for (let b = blockRe.exec(modelsSrc); b; b = blockRe.exec(modelsSrc)) {
+    const [, id, body] = b;
+    const kind = (body.match(/kind:\s*"(\w+)"/) || [])[1] || "Chat";
+    const routes = [];
+    for (let r = routeRe.exec(body); r; r = routeRe.exec(body)) {
+      routes.push({ provider: r[1], modelId: r[2] });
+    }
+    models.push({ id, kind, routes });
   }
-  return routes;
+  return models;
+}
+
+// NVIDIA's genai image endpoint has no /models list — the only faithful check
+// is whether the model id itself resolves. A 404 means the id is not deployed
+// (that is how nvidia/sana and stabilityai/sdxl-turbo died in 3.6); anything
+// else means the route exists, even if the call would need a real payload.
+//
+// WHY EVERY IMAGE ID CURRENTLY 404s (verified 3.8, both this host and
+// ai.api.nvidia.com, GET and POST): build.nvidia.com badges a model either
+// "Free Endpoint" (NVIDIA hosts it; the id is in /v1/models and answers) or
+// "Downloadable" (a NIM container you self-host; the id is NOT hosted and 404s
+// here). Every text-to-image model NVIDIA lists — stable-diffusion-3.5-large,
+// qwen-image, qwen-image-edit — is Downloadable-only, so there is no hosted
+// text-to-image model to probe. google/diffusiongemma-26b-a4b-it looks like a
+// counterexample but is a diffusion-architecture *language* model: it answers on
+// /v1/chat/completions and returns text.
+//
+// So a "dead" result here means "not hosted by NVIDIA", which is not the same as
+// "does not exist". Seeing the model on build.nvidia.com does not contradict it.
+async function probeGenaiImage(modelId, key) {
+  try {
+    const res = await fetch(
+      `https://integrate.api.nvidia.com/v1/genai/${modelId}`,
+      {
+        method: "GET",
+        headers: key ? { Authorization: `Bearer ${key}` } : {},
+      },
+    );
+    return res.status === 404 ? "dead" : "alive";
+  } catch (err) {
+    return `error:${String(err).slice(0, 60)}`;
+  }
 }
 
 const GREEN = "\x1b[32m";
@@ -124,33 +175,58 @@ async function main() {
 
   console.log("\nChecking our catalogue against them:\n");
 
-  const routes = parseCatalogue();
+  const models = parseCatalogue();
   let ok = 0;
   let bad = 0;
   let unchecked = 0;
 
-  for (const route of routes) {
-    const providerResult = available[route.provider];
-    if (!providerResult || providerResult.status !== "ok") {
-      console.log(`${DIM}?  ${route.provider}/${route.modelId} — provider unavailable${RESET}`);
-      unchecked++;
-      continue;
-    }
+  for (const model of models) {
+    for (const route of model.routes) {
+      // Image routes live on a different surface than chat. Pollinations has no
+      // /models list at all; NVIDIA genai ids are probed live. Either way these
+      // must NOT be compared against the chat catalogues — a genai id will never
+      // be in them, so "not in chat catalogue" is a false alarm (the exact bug
+      // 3.6 fixes).
+      if (model.kind === "Image") {
+        if (route.provider === "nvidia") {
+          const key = keyFor(PROVIDERS.find((p) => p.id === "nvidia"));
+          const state = await probeGenaiImage(route.modelId, key);
+          if (state === "alive") {
+            console.log(`${GREEN}✓${RESET}  ${route.provider}/${route.modelId} (genai endpoint)`);
+            ok++;
+          } else {
+            console.log(`${RED}✗  ${route.provider}/${route.modelId} — genai: ${state}${RESET}`);
+            bad++;
+          }
+        } else {
+          console.log(`${DIM}?  ${route.provider}/${route.modelId} — keyless image host, no catalogue${RESET}`);
+          unchecked++;
+        }
+        continue;
+      }
 
-    // Providers vary in whether ids carry a vendor prefix or a ":free" suffix,
-    // so compare on the normalized stem rather than requiring an exact match.
-    const stem = route.modelId.split("/").pop().replace(/:free$/, "");
-    const found = providerResult.models.some((m) => {
-      const mStem = m.split("/").pop().replace(/:free$/, "");
-      return m === route.modelId || mStem === stem;
-    });
+      const providerResult = available[route.provider];
+      if (!providerResult || providerResult.status !== "ok") {
+        console.log(`${DIM}?  ${route.provider}/${route.modelId} — provider unavailable${RESET}`);
+        unchecked++;
+        continue;
+      }
 
-    if (found) {
-      console.log(`${GREEN}✓${RESET}  ${route.provider}/${route.modelId}`);
-      ok++;
-    } else {
-      console.log(`${RED}✗  ${route.provider}/${route.modelId} — NOT in catalogue${RESET}`);
-      bad++;
+      // Providers vary in whether ids carry a vendor prefix or a ":free" suffix,
+      // so compare on the normalized stem rather than requiring an exact match.
+      const stem = route.modelId.split("/").pop().replace(/:free$/, "");
+      const found = providerResult.models.some((m) => {
+        const mStem = m.split("/").pop().replace(/:free$/, "");
+        return m === route.modelId || mStem === stem;
+      });
+
+      if (found) {
+        console.log(`${GREEN}✓${RESET}  ${route.provider}/${route.modelId}`);
+        ok++;
+      } else {
+        console.log(`${RED}✗  ${route.provider}/${route.modelId} — NOT in catalogue${RESET}`);
+        bad++;
+      }
     }
   }
 

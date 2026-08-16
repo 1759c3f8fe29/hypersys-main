@@ -13,3 +13,12 @@ export interface MessageSource {
   link: string;
   source?: string | null;
 }
+
+// A file the create_file tool produced, offered as a download under the reply.
+// `url` is an object URL owned by the tab that made it: valid until reload,
+// which is why these are never written to Firestore with the message.
+export interface MessageFile {
+  filename: string;
+  url: string;
+  mimeType: string;
+}

@@ -4,7 +4,6 @@ import { auth } from "./firebase";
 import {
   getModel,
   PROVIDERS,
-  UTILITY_MODEL_ID,
   isImageModel as catalogueIsImage,
   isVisionModel as catalogueIsVision,
   supportsVision as catalogueSupportsVision,
@@ -36,7 +35,9 @@ export const MODEL_REGISTRY: Record<
   "mistral-large":        { nvidiaId: "", provider: "mistral", mistralId: "mistral-large-latest", kind: "Chat" },
   "mistral-medium":       { nvidiaId: "", provider: "mistral", mistralId: "mistral-medium-latest",kind: "Chat" },
   "mistral-small":        { nvidiaId: "", provider: "mistral", mistralId: "mistral-small-latest", kind: "Chat" },
-  "pixtral-12b":          { nvidiaId: "", provider: "mistral", mistralId: "pixtral-12b-2409",      kind: "Chat" },
+  // pixtral-12b was removed here in 3.6: Mistral retired pixtral-12b-2409, so
+  // the id now resolves to nemotron-vision via LEGACY_MODEL_IDS in providers.ts
+  // and must not route to a dead Mistral upstream through this legacy registry.
   "codestral-latest":     { nvidiaId: "", provider: "mistral", mistralId: "codestral-latest",     kind: "Chat" },
   "devstral-latest":      { nvidiaId: "", provider: "mistral", mistralId: "devstral-latest",      kind: "Chat" },
   "ministral-8b":         { nvidiaId: "", provider: "mistral", mistralId: "ministral-8b-latest",  kind: "Chat" },
@@ -60,9 +61,11 @@ export const MODEL_REGISTRY: Record<
   "vision-engine-2":   { nvidiaId: "meta/llama-3.2-11b-vision-instruct",      kind: "Vision" },
   "vision-engine-3":   { nvidiaId: "microsoft/phi-3-vision-128k-instruct",    kind: "Vision" },
 
-  // ── Image Generation Models (NVIDIA NIM & Pollinations) ──
-  "sana":              { nvidiaId: "nvidia/sana",                              kind: "Image" },
-  "sdxl-turbo":        { nvidiaId: "stabilityai/sdxl-turbo",                   kind: "Image" },
+  // ── Image Generation Models (Pollinations) ──
+  // NVIDIA NIM's genai image ids (sana, sdxl-turbo) were removed in 3.6: the
+  // /v1/genai/* endpoint 404s for every model, so the only live image backend
+  // is keyless Pollinations. The ids resolve via LEGACY_MODEL_IDS in
+  // providers.ts, so nothing here points at a dead NVIDIA route.
   "flux":              { nvidiaId: "pollinations",                             kind: "Image" },
   "turbo":             { nvidiaId: "pollinations",                             kind: "Image" },
   "stable-diffusion":  { nvidiaId: "pollinations",                             kind: "Image" },
@@ -82,18 +85,20 @@ export function getNvidiaId(modelId: string): string | undefined {
 
 
 // The internal vision-capable model any non-vision chat model routes through when an image is attached.
-// Defaults to Mistral Vision (pixtral-12b) as requested.
-export const VISION_ENGINE_MODEL = "pixtral-12b";
+// Mistral retired pixtral-12b (verified in 3.6), so this is the live NVIDIA
+// vision engine; persisted "pixtral-12b" ids still resolve to it via
+// LEGACY_MODEL_IDS in providers.ts.
+export const VISION_ENGINE_MODEL = "nemotron-vision";
 
-// Tried in order by generateVisionResponse. Two Mistral engines first (they
-// accept OpenAI-style `image_url` data URLs directly), then the NIM vision
-// models so an outage or a missing MISTRAL_API_KEY still resolves to an answer.
+// Tried in order by generateVisionResponse. The catalogue vision engine first,
+// then Mistral's multimodal chat engines so an outage or a missing NVIDIA key
+// still resolves to an answer. The old "vision-engine*" aliases all resolve to
+// nemotron-vision via LEGACY_MODEL_IDS now, so naming them here would be
+// redundant.
 export const VISION_ENGINE_FALLBACKS = [
-  "pixtral-12b",
+  "nemotron-vision",
   "mistral-medium",
   "mistral-large-latest",
-  "vision-engine",
-  "vision-engine-2",
 ];
 
 // Models that actually accept image input. Verified live against the provider
@@ -293,13 +298,13 @@ export async function generateChatResponse(
  * that answers, so a rate-limited or saturated provider falls through to the
  * next without changing which model produced the reply.
  */
-async function generateRoutedResponse(
+export async function generateRoutedResponse(
   messages: ChatMessage[],
   modelId: string,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
-  opts?: { deepThink?: boolean },
-) {
+  opts?: { deepThink?: boolean; tools?: ToolSchema[]; toolChoice?: "auto" | "none" | "required" },
+): Promise<StreamResult> {
   const spec = getModel(modelId)!;
 
   const maxTokens = Math.min(
@@ -332,6 +337,11 @@ async function generateRoutedResponse(
       temperature: opts?.deepThink ? 0.3 : 0.7,
       top_p: 0.95,
       max_tokens: maxTokens,
+      // Only sent when the model supports tools. Pollinations (flyer-free) and
+      // the vision engines do not, and a tool payload at an endpoint that
+      // rejects it would burn the last fallback in the chain.
+      ...(opts?.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
+      ...(opts?.toolChoice ? { tool_choice: opts.toolChoice } : {}),
     }),
     signal,
   });
@@ -342,7 +352,7 @@ async function generateRoutedResponse(
     throw new Error(routerError(response.status, errText));
   }
 
-  await pumpOpenAiStream(response, onChunk);
+  return pumpOpenAiStream(response, onChunk);
 }
 
 /**
@@ -427,186 +437,34 @@ async function generateNvidiaChatResponse(
   await pumpOpenAiStream(response, onChunk);
 }
 
-/**
- * Non-streaming helper to get a complete chat response text.
- */
-export async function getCompleteChatResponse(
-  messages: ChatMessage[],
-  modelId: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  let text = "";
-  await generateChatResponse(
-    messages,
-    modelId,
-    (chunk) => { text += chunk; },
-    signal,
-  );
-  return text.trim();
-}
-
-export interface UserIntentEvaluation {
-  needsImage: boolean;
-  needsSearch: boolean;
-  searchQuery: string;
-  fastModelUsed: string;
-}
-
-/**
- * Decide, in one pass, whether a turn needs an image generated or the web
- * searched, and synthesize the search query.
- *
- * Two things this deliberately avoids:
- *
- * 1. Calling a model when the regexes already settle it. Every classifier call
- *    spends the same free-tier quota as a real answer and adds latency before
- *    the first token, so the model is consulted only for genuinely ambiguous
- *    input. Clear-cut cases short-circuit for free.
- * 2. Being duplicated. search.ts used to run a near-identical classifier of its
- *    own, so a single user turn could cost 2-3 utility calls that all asked the
- *    same question. evaluateSmartWebSearch now delegates here.
- */
-export async function evaluateUserIntent(
-  userPrompt: string,
-  selectedModelId: string,
-  signal?: AbortSignal,
-): Promise<UserIntentEvaluation> {
-  const text = (userPrompt || "").trim();
-  if (!text) {
-    return { needsImage: false, needsSearch: false, searchQuery: "", fastModelUsed: "" };
-  }
-
-  // Explicit image model selected
-  const explicitImageModel = isImageModel(selectedModelId);
-
-  // Pattern heuristics
-  const imageKeywordMatch = explicitImageModel ||
-    /\b(generate|create|draw|design|render|illustrate|paint|sketch)\b.*\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|avatar|painting|drawing)\b/i.test(text) ||
-    /\b(image|photo|picture|art|artwork|illustration|logo|icon|wallpaper|poster|banner|avatar|painting|drawing)\b.*\b(generate|create|make|draw|design|render|illustrate|paint|sketch)\b/i.test(text);
-
-  // Split into two tiers. The broad tier is advisory — it only fills in when the
-  // classifier gives us nothing usable, because terms like "what is" or "find"
-  // match plenty of questions that need no web at all ("what is a closure").
-  const searchKeywordMatch = /\b(today|tonight|current(?:ly)?|now|latest|recent(?:ly)?|this (?:week|month|year)|news|weather|score|stock|price of|release date|who is|what is|search|google|find)\b/i.test(text);
-
-  // The decisive tier: phrasing that cannot be answered correctly from training
-  // data no matter how capable the model is. A false negative here is the exact
-  // failure users report as "web search is broken" — the model answers from a
-  // stale snapshot and volunteers that it has no live access. So these OVERRIDE
-  // the classifier rather than deferring to it.
-  const HARD_LIVE_SIGNAL = new RegExp(
-    [
-      // Explicit recency/liveness
-      "\\b(today|tonight|right now|as of (?:today|now)|currently|breaking|just (?:announced|released|happened))\\b",
-      // "latest / newest / most recent X"
-      "\\b(latest|newest|most recent|up[- ]to[- ]date)\\b",
-      // Continuously changing quantities
-      "\\b(weather|forecast|temperature|stock price|share price|exchange rate|who won|final score|standings|box office)\\b",
-      // Explicit user command to search
-      "\\b(search (?:for|the web|online)|look (?:this )?up|google (?:it|this)|cite (?:a )?sources?)\\b",
-      // A year at or beyond the present one — training data cannot cover it
-      "\\b(20(?:2[6-9]|[3-9]\\d))\\b",
-    ].join("|"),
-    "i",
-  );
-  const hardLiveSignal = HARD_LIVE_SIGNAL.test(text);
-
-  // Creative/self-referential work never needs grounding, and asking a model to
-  // confirm that is pure waste.
-  const clearlyNonFactual = /\b(write|compose|rewrite|refactor|debug|translate|summari[sz]e this|explain this code)\b/i.test(text);
-
-  // Short-circuit paths — no API call at all.
-  if (hardLiveSignal) {
-    return {
-      needsImage: imageKeywordMatch,
-      needsSearch: true,
-      searchQuery: text,
-      fastModelUsed: "heuristic",
-    };
-  }
-  if (clearlyNonFactual && !imageKeywordMatch) {
-    return { needsImage: false, needsSearch: false, searchQuery: "", fastModelUsed: "heuristic" };
-  }
-  if (explicitImageModel) {
-    return { needsImage: true, needsSearch: false, searchQuery: "", fastModelUsed: "heuristic" };
-  }
-
-  // Ambiguous — now it is worth paying for a classification.
-  const fastModel = UTILITY_MODEL_ID;
-
-  try {
-    const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-    const classifierSystem = [
-      "You are an expert AI Intent Classifier and Search Query Synthesizer.",
-      `Today's date is ${today}.`,
-      "Analyze the user request and determine:",
-      "1. 'needsImage': true if user explicitly or implicitly wants an image, picture, logo, poster, or artwork generated. Otherwise false.",
-      "2. 'needsSearch': true if user request requires up-to-date, current, real-time news, facts, weather, stock price, scores, or external web search. Otherwise false.",
-      "3. 'searchQuery': clean search keywords if needsSearch is true, otherwise empty string.",
-      "NEVER invent or hardcode a date in 'searchQuery'. Use relative words like 'today' or 'latest' instead — a wrong date returns stale results.",
-      "",
-      "Respond ONLY with valid JSON:",
-      '{"needsImage": false, "needsSearch": false, "searchQuery": ""}',
-    ].join("\n");
-
-    const result = await getCompleteChatResponse(
-      [
-        { role: "system", content: classifierSystem },
-        { role: "user", content: text },
-      ],
-      fastModel,
-      signal,
-    );
-
-    // ministral-8b reliably wraps its JSON in ```json fences despite being told
-    // not to, and a greedy {...} match spanning fences can swallow trailing
-    // prose. Strip fences first, then take the first balanced object.
-    const unfenced = result.replace(/```(?:json)?/gi, "");
-    const jsonMatch = unfenced.match(/\{[\s\S]*?\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      const modelSaysSearch = typeof parsed.needsSearch === "boolean" ? parsed.needsSearch : searchKeywordMatch;
-      // OR, never override: the classifier may add a search the regex missed,
-      // but it may not veto one the hard signal proved necessary.
-      const needsSearch = modelSaysSearch || hardLiveSignal;
-      // A query is only needed when searching. Fall back to the raw text if the
-      // model set needsSearch=false (and thus searchQuery="") but the hard
-      // signal turned it back on — otherwise we'd search for an empty string.
-      const craftedQuery = typeof parsed.searchQuery === "string" ? parsed.searchQuery.trim() : "";
-      return {
-        needsImage: explicitImageModel || (typeof parsed.needsImage === "boolean" ? parsed.needsImage : imageKeywordMatch),
-        needsSearch,
-        searchQuery: needsSearch ? (craftedQuery || text) : "",
-        fastModelUsed: fastModel,
-      };
-    }
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw err;
-    console.warn("[intent] classifier failed, falling back to heuristics:", err);
-  }
-
-  // Classifier unavailable (network, quota, unparseable). Fall back to the
-  // heuristics rather than defaulting search off, so grounding degrades
-  // gracefully instead of disappearing.
-  return {
-    needsImage: imageKeywordMatch,
-    needsSearch: searchKeywordMatch || hardLiveSignal,
-    searchQuery: text,
-    fastModelUsed: fastModel,
-  };
-}
-
-/**
- * Evaluates whether an image generation should be triggered based on AI intent analysis or patterns.
- */
-export async function evaluateImageIntent(
-  userPrompt: string,
-  selectedModelId: string,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  const evalResult = await evaluateUserIntent(userPrompt, selectedModelId, signal);
-  return evalResult.needsImage;
-}
+// ---------------------------------------------------------------------------
+// The pre-flight intent classifier used to live here — deleted in Phase 6
+// ---------------------------------------------------------------------------
+// `evaluateUserIntent` / `evaluateImageIntent` decided "does this turn need a
+// web search or an image?" with a pile of regexes plus a call to a small utility
+// model, *before* the real model had seen the turn. Two structural faults, not
+// tuning problems:
+//
+//  - It had to guess without being able to read its own answer, so it was wrong
+//    in both directions: searching for creative writing, and answering live
+//    questions from a stale training snapshot.
+//  - Every ambiguous turn cost an extra model call, all of it latency in front
+//    of the first token, on the free-tier quota this app runs on.
+//
+// src/lib/agent.ts replaced it: the model that is writing the reply calls
+// web_search / generate_image itself, and can search twice if the first results
+// were thin — something a one-shot pre-flight decision cannot do.
+//
+// `getCompleteChatResponse` (a non-streaming wrapper) went with it: the
+// classifier was its only caller. Anything needing a whole string can still
+// accumulate deltas from `generateChatResponse`, which is what it did.
+//
+// Deliberate consequence: a model with `supportsTools: false` (`flyer-free` on
+// Pollinations) no longer searches or generates images from a phrase like "draw
+// me a cat" — it answers in prose. That is the same graceful degradation
+// runAgentTurn already applies to search, and it is preferable to a keyword
+// guess that fired on "write a story about drawing". Explicitly picking an
+// Image model in the sidebar still generates, and that path needs no classifier.
 
 // ---------------------------------------------------------------------------
 // Vision — with automatic fallback across engines
@@ -838,7 +696,9 @@ export function buildImagePrompt(userPrompt: string): string {
 // Map our internal image model IDs to a valid Pollinations model name.
 // Our IDs are already the exact Pollinations model names (verified live), so
 // this is a passthrough with a safe "flux" fallback for anything unknown.
-const POLLINATIONS_MODELS = new Set(["flux", "gptimage", "turbo", "sana", "stable-diffusion"]);
+// "sana" was removed in 3.6: it is a retired NVIDIA genai id, not a Pollinations
+// model, so a legacy caller asking for it falls back to "flux" here.
+const POLLINATIONS_MODELS = new Set(["flux", "gptimage", "turbo", "stable-diffusion"]);
 function pollinationsModelFor(modelId: string): string {
   return POLLINATIONS_MODELS.has(modelId) ? modelId : "flux";
 }
@@ -911,98 +771,15 @@ export async function craftVisionPrompt(
   }
 }
 
-// System prompt that turns any chat model into an expansive Master Image Prompt Engineer.
-// The chat model expands a user's image request into a ~1000-word master generation prompt.
-// Diffusion models do not benefit from ~1000 words. FLUX/SD text encoders
-// truncate hard (CLIP at 77 tokens, T5 far earlier than 1000 words), so a huge
-// prompt means the tail is silently discarded and the boilerplate at the front
-// dilutes the user's actual subject. Worse, blanket "skin pores / 85mm f/1.4"
-// tags got applied to logos and flat illustrations, fighting the requested
-// style. This version front-loads intent and adapts the vocabulary to the type.
-const IMAGE_PROMPT_ENGINEER_SYSTEM = [
-  "You are a Master Image Prompt Engineer for diffusion models (FLUX, Stable Diffusion, GPT-Image, Sana).",
-  "Rewrite the user's request into one dense, high-signal generation prompt.",
-  "",
-  "LENGTH — scale to the subject, never pad:",
-  "  - Single subject or object: 50-90 words.",
-  "  - Full scene, multiple elements, or a specific art style: 90-180 words.",
-  "  Text encoders truncate, so past ~180 words the tail is silently discarded.",
-  "",
-  "ORDER MATTERS — earliest tokens carry the most weight:",
-  "1. The subject and its defining action or pose, in plain concrete nouns.",
-  "2. The specific visual details that make this image the user's image, not a generic one.",
-  "3. Setting and composition (framing, camera distance, what is behind the subject).",
-  "4. Light and colour (direction, quality, palette, mood).",
-  "5. Medium and finish, chosen to MATCH THE REQUEST TYPE:",
-  "   - photoreal subject → camera, lens, aperture, film or sensor character",
-  "   - illustration / anime → line weight, shading style, named art tradition",
-  "   - logo / icon / UI → flat vector, clean geometry, negative space, no photographic tags",
-  "   - 3D / render → engine, material shading, ambient occlusion",
-  "",
-  "WHAT ACTUALLY RAISES QUALITY — apply these deliberately:",
-  "- ANCHOR THE STYLE ONCE. One named reference — a photographer, director, art",
-  "  movement, studio, or era — steers the whole image far harder than a pile of",
-  "  adjectives. 'lit like a Roger Deakins frame' beats 'cinematic, dramatic, moody'.",
-  "  Pick the single best-fitting anchor and commit to it.",
-  "- DROP GENERIC BOOSTER TAGS. 'masterpiece', '8k', 'ultra detailed', 'award-winning',",
-  "  'trending on artstation', 'sharp focus', 'high quality' are dead weight on modern",
-  "  models: they consume tokens and change nothing. Replace each with a concrete fact",
-  "  about the image.",
-  "- NAME MATERIALS, NOT 'DETAIL'. 'brushed aluminium', 'wet asphalt', 'raw linen',",
-  "  'chipped enamel' produce real texture; 'highly detailed textures' does not.",
-  "- ONE COHERENT LIGHT SOURCE. State direction, quality and colour, then stop.",
-  "  Contradictions ('soft diffused light, harsh shadows') average into flat mush.",
-  "- BUILD DEPTH. Give foreground, midground and background distinct content so the",
-  "  frame reads as composed rather than as a subject pasted on a backdrop.",
-  "- SPECIFY WHAT HANDS AND EYES ARE DOING when a person is present ('hands wrapped",
-  "  around a mug, gaze off-frame left'). Unspecified extremities are where these",
-  "  models fail worst; naming the action constrains them.",
-  "- KEEP COUNTS SIMPLE AND STATE THEM ONCE. 'three' renders; 'a handful of' does not.",
-  "- PREFER CONCRETE OVER EVALUATIVE. 'beautiful', 'stunning', 'perfect' describe a",
-  "  reaction, not pixels. Describe the thing that would cause the reaction.",
-  "",
-  "RULES:",
-  "- Preserve every explicit detail the user gave: subject, colours, count, text, style, aspect. Never silently drop or 'improve' them.",
-  "- If the user asked for text in the image, quote it exactly once in double quotes and keep it short.",
-  "- Add only detail that is consistent with the request. Do not photorealise a request for flat art, and do not stylise a request for a photograph.",
-  "- When the request is sparse, make concrete creative choices rather than hedging — a specific image beats a vague one. Never contradict what was asked for.",
-  "- Write as flowing comma-separated descriptive phrases, not numbered sections or headings.",
-  "- No negative prompts, no parameter flags (--ar, --v), no meta-commentary.",
-  "",
-  "OUTPUT: the prompt text only — no preamble, no quotes around the whole thing, no markdown.",
-].join("\n");
-
-// Have the selected chat model craft the image prompt.
-export async function craftImagePrompt(
-  userPrompt: string,
-  chatModelId: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const base = (userPrompt || "").trim();
-  if (!base) return buildImagePrompt(userPrompt);
-
-  try {
-    let crafted = "";
-    await generateChatResponse(
-      [
-        { role: "system", content: IMAGE_PROMPT_ENGINEER_SYSTEM },
-        { role: "user", content: base },
-      ],
-      chatModelId,
-      (delta) => { crafted += delta; },
-      signal,
-    );
-    const cleaned = crafted
-      .replace(/<\s*think\s*>[\s\S]*?<\s*\/\s*think\s*>/gi, "")
-      .replace(/^["'`\s]+|["'`\s]+$/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    return cleaned.length >= 8 ? cleaned : buildImagePrompt(userPrompt);
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw err;
-    return buildImagePrompt(userPrompt);
-  }
-}
+// The IMAGE_PROMPT_ENGINEER_SYSTEM prompt and `craftImagePrompt` used to sit
+// here — a round-trip that asked a chat model to rewrite the user's request into
+// a dense generation prompt before the renderer ever saw it. Phase 6 removed it:
+// that guidance now lives in `generate_image`'s schema description (see
+// src/lib/tools/generate-image.ts), so the model already writing the reply
+// writes the generation prompt in the same breath instead of a second model
+// being paid to rewrite it afterwards. The explicit Image-model path keeps
+// `buildImagePrompt` below, which does the same intent-aware enrichment locally
+// with no model call at all.
 
 // Image-model fallback order: the requested model first, then 2 proven
 // alternates. If a Pollinations model 500s / times out (a model can go down or
@@ -1023,47 +800,22 @@ export async function generateImageResponse(
   signal?: AbortSignal,
 ): Promise<{ imageDataUrl: string; message: string }> {
   const fullPrompt = (prompt || "").trim() || buildImagePrompt("");
-  let lastErr: unknown;
+  void signal;
 
-  // 1. Try NVIDIA NIM Image Generation (NVIDIA Sana / SDXL Turbo) if user configured key or for sana model
-  if (modelId === "sana" || MODEL_REGISTRY[modelId]?.nvidiaId?.startsWith("nvidia/")) {
-    try {
-      const userKey = getUserNvidiaApiKey();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (userKey) headers["X-Nvidia-Api-Key"] = userKey;
-
-      const res = await fetch("/api/nvidia-image", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ prompt: fullPrompt, model: modelId }),
-        signal,
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data.imageDataUrl) {
-          return {
-            imageDataUrl: data.imageDataUrl,
-            message: "Here is your generated image (NVIDIA Sana):",
-          };
-        }
-      }
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") throw err;
-      console.warn("NVIDIA NIM image generation fallback to Pollinations:", err);
-    }
-  }
-
-  // 2. Pollinations fallback: direct URL via img tag
-  // We skip POST since it is frequently blocked by CORS or AdBlockers.
-  // The direct URL loads perfectly in an <img> tag without needing JS fetch.
+  // Pollinations direct URL via img tag. We skip POST since it is frequently
+  // blocked by CORS or AdBlockers; the direct URL loads perfectly in an <img>
+  // tag without needing JS fetch.
+  //
+  // NVIDIA NIM's genai image path was removed in 3.6 — the /v1/genai/* endpoint
+  // 404s for every model even with a valid key, so there is no NVIDIA leg to
+  // try. modelId still feeds the fallback chain below so a caller that passes a
+  // legacy id (sana, sdxl-turbo) still lands on a live Pollinations model.
 
   const condensedPrompt = fullPrompt.length > 250
     ? fullPrompt.slice(0, 247).replace(/\s+\S*$/, "") + "..."
     : fullPrompt;
   const encoded = encodeURIComponent(condensedPrompt);
 
-  // 3. Ultra-guaranteed fallback: Direct URL for <img> element (renders cleanly even if fetch CORS blocks blob reading)
   const fallbackModel = imageFallbackChain(modelId)[0] || "flux";
   const directUrl = `https://image.pollinations.ai/prompt/${encoded}?nologo=true&model=${fallbackModel}`;
   return {

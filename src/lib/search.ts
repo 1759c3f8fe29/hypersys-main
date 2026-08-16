@@ -24,66 +24,19 @@ export interface SearchResponse {
 
 const SEARCH_PROXY_URL = "/api/search";
 
-// Signals that a query wants fresh, external, or factual information.
-const TIME_SENSITIVE = /\b(today|tonight|current(?:ly)?|now|latest|recent(?:ly)?|this (?:week|month|year)|so far|up to date|as of|breaking|news|weather|score|stock|price of|how much (?:is|does)|release date|when (?:is|was|did|will))\b/i;
-const YEAR_MENTION = /\b(202[4-9]|203\d)\b/;
-const LOOKUP_INTENT = /\b(who (?:is|are|won)|what (?:is|are) the (?:latest|current|newest)|search (?:for|the web)|look up|google|find (?:out|me)|according to|cite|source)\b/i;
-
-// Phrases that clearly do NOT need the web (creative / self-referential / code).
-const NON_FACTUAL = /\b(write|compose|generate|create|draft|imagine|story|poem|joke|rewrite|refactor|debug|translate|summari[sz]e this|explain this code)\b/i;
-
-import { evaluateUserIntent } from "@/lib/ai";
-
-export interface SmartSearchEvaluation {
-  shouldSearch: boolean;
-  searchQuery: string;
-}
-
-/**
- * Whether this turn should be grounded, and with what query.
- *
- * Delegates to evaluateUserIntent rather than running its own classifier. The
- * two used to ask a small model nearly the same question independently, so one
- * user message could spend two or three utility calls on the same decision —
- * pure waste of the free-tier budget this app runs on, and latency before the
- * first token. evaluateUserIntent also short-circuits on decisive heuristics,
- * so most turns now cost no classification call at all.
- */
-export async function evaluateSmartWebSearch(
-  input: string,
-  chatModelId: string,
-  signal?: AbortSignal,
-): Promise<SmartSearchEvaluation> {
-  const text = (input || "").trim();
-  if (text.length < 4) {
-    return { shouldSearch: false, searchQuery: "" };
-  }
-
-  try {
-    const intent = await evaluateUserIntent(text, chatModelId, signal);
-    return {
-      shouldSearch: intent.needsSearch,
-      searchQuery: intent.searchQuery || text,
-    };
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw err;
-    // Fall back to the local heuristic so grounding degrades rather than
-    // disappearing when the classifier is unavailable.
-    return { shouldSearch: shouldWebSearch(text), searchQuery: text };
-  }
-}
-
-/**
- * Heuristic: should this user turn be grounded with a web search?
- * Conservative on purpose — false positives waste a SerpApi call and can
- * distract the model, so we require a positive signal and no creative intent.
- */
-export function shouldWebSearch(input: string): boolean {
-  const text = (input || "").trim();
-  if (text.length < 8) return false;
-  if (NON_FACTUAL.test(text)) return false;
-  return TIME_SENSITIVE.test(text) || YEAR_MENTION.test(text) || LOOKUP_INTENT.test(text);
-}
+// ---------------------------------------------------------------------------
+// What used to be here
+// ---------------------------------------------------------------------------
+// `evaluateSmartWebSearch` and `shouldWebSearch`, plus the TIME_SENSITIVE /
+// YEAR_MENTION / LOOKUP_INTENT / NON_FACTUAL regexes they ran on, decided before
+// the turn whether to ground it. Deleted in Phase 6 along with the classifier in
+// ai.ts they delegated to: the model now calls `web_search` itself when it knows
+// it is missing something, and can search again if the first results were thin.
+// A regex could only ever guess from the wording — it searched for "write a
+// story about the 2027 election" and skipped "how much is a Switch 2".
+//
+// `webSearch` and `buildSearchContext` below are the live path: the tool
+// executor in src/lib/tools/web-search.ts calls both.
 
 export async function webSearch(query: string, signal?: AbortSignal): Promise<SearchResponse | null> {
   try {

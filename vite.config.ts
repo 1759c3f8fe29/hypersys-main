@@ -65,8 +65,6 @@ function localApiProxy(): Plugin {
             await proxyNvidia(req, res, body);
           } else if (route === "llm") {
             await proxyLlm(req, res, body);
-          } else if (route === "nvidia-image") {
-            await proxyNvidiaImage(req, res, body);
           } else if (route === "mistral") {
             await proxyMistral(req, res, body);
           } else if (route === "pollinations") {
@@ -542,58 +540,6 @@ async function streamResponse(
   } finally {
     res.end();
   }
-}
-
-async function proxyNvidiaImage(
-  req: { headers: Record<string, string | string[] | undefined> },
-  res: { writeHead: Function; end: Function },
-  body: Record<string, unknown>,
-) {
-  const key =
-    h(req.headers, "x-nvidia-api-key") ||
-    h(req.headers, "authorization")?.split(" ")[1] ||
-    env("VITE_NVIDIA_API_KEY") ||
-    env("NVIDIA_API_KEY");
-
-  if (!key) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "NVIDIA API key is missing." }));
-    return;
-  }
-
-  const { prompt, model } = body as any;
-  const nvidiaModel = model === "sana" || model === "nvidia/sana" ? "nvidia/sana" : "stabilityai/sdxl-turbo";
-
-  try {
-    const upstream = await fetch(`https://integrate.api.nvidia.com/v1/genai/${nvidiaModel}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        prompt: prompt || "a high quality image",
-        cfg_scale: 5,
-        aspect_ratio: "1:1",
-      }),
-    });
-
-    if (upstream.ok) {
-      const data = await upstream.json();
-      const base64Image = data.artifacts?.[0]?.base64 || data.image || data.b64_json;
-      if (base64Image) {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ imageDataUrl: `data:image/png;base64,${base64Image}` }));
-        return;
-      }
-    }
-  } catch (err) {
-    console.error("NVIDIA Image generation error:", err);
-  }
-
-  res.writeHead(502, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ error: "nvidia_image_failed" }));
 }
 
 // ---------------------------------------------------------------------------
