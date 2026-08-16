@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, Sparkles, Bot, ChevronDown, ChevronUp, Search, History, Settings } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, Sparkles, Bot, ChevronDown, ChevronUp, Search, History, Settings, Brain } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import { format, isToday, isYesterday, differenceInCalendarDays } from 'date-fns';
@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 
 import { SELECTABLE_MODELS, type ModelSpec } from '@/lib/providers';
+import MemoriesPanel from './MemoriesPanel';
 
 /**
  * The picker's view of a model.
@@ -62,12 +63,18 @@ interface ChatSidebarProps {
   onToggleCollapse: () => void;
   selectedModel: string;
   onSelectModel: (id: string) => void;
+  // Refresh hooks so the parent's prompt-injection cache picks up panel edits
+  // without waiting for a reload. Optional because the panel still owns its
+  // own reads; without these the only consequence is a one-turn-stale snapshot.
+  onMemoriesChanged?: () => void;
+  onInstructionsChanged?: () => void;
 }
 
 export default function ChatSidebar({
   conversations, activeConversationId, onSelectConversation,
   onNewConversation, onDeleteConversation, isCollapsed, onToggleCollapse,
   selectedModel, onSelectModel,
+  onMemoriesChanged, onInstructionsChanged,
 }: ChatSidebarProps) {
   const { user, signOut } = useAuth();
   const [showAllModels, setShowAllModels] = useState(false);
@@ -76,6 +83,9 @@ export default function ChatSidebar({
 
   // Settings State for API Keys (NVIDIA + Mistral only)
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Memories + custom instructions panel (Part F.2/F.3). Self-contained — owns
+  // its Firestore reads via useAuth — so no extra prop drilling here.
+  const [memoriesOpen, setMemoriesOpen] = useState(false);
   const [nvidiaKey, setNvidiaKey] = useState(() => localStorage.getItem('VITE_NVIDIA_API_KEY') || '');
   const [mistralKey, setMistralKey] = useState(() => localStorage.getItem('VITE_MISTRAL_API_KEY') || '');
 
@@ -336,6 +346,9 @@ export default function ChatSidebar({
                   <p className="text-xs text-sidebar-foreground/40 truncate">{user.email}</p>
                 )}
               </div>
+              <button onClick={() => setMemoriesOpen(true)} className="p-2 rounded-lg hover:bg-sidebar-accent text-sidebar-foreground/60 hover:text-sidebar-foreground transition-all duration-200" title="Memory & Instructions">
+                <Brain className="w-4 h-4" />
+              </button>
               <button onClick={() => setSettingsOpen(true)} className="p-2 rounded-lg hover:bg-sidebar-accent text-sidebar-foreground/60 hover:text-sidebar-foreground transition-all duration-200" title="API Settings">
                 <Settings className="w-4 h-4 hover:rotate-45 transition-transform" />
               </button>
@@ -418,6 +431,13 @@ export default function ChatSidebar({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <MemoriesPanel
+        open={memoriesOpen}
+        onOpenChange={setMemoriesOpen}
+        onMemoriesChanged={onMemoriesChanged}
+        onInstructionsChanged={onInstructionsChanged}
+      />
     </>
   );
 }

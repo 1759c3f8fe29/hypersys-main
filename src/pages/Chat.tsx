@@ -32,6 +32,7 @@ import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
 import { extractFirstMarkdownImage, sanitizeAssistantText } from '@/lib/chat-format';
 import { buildMessageForest, linearizeForest, switchBranch } from '@/lib/message-tree';
+import { extractMemories, dedupeMemories } from '@/lib/memory';
 
 interface ArenaResponse {
   modelId: string;
@@ -55,6 +56,11 @@ interface Message {
   // Files the create_file tool produced, shown as download links. Blob URLs,
   // so they live only as long as this tab — not persisted with the message.
   files?: MessageFile[];
+  // Inline Python runs from the run_code tool (Part G): stdout/stderr plus any
+  // matplotlib figures. Rendered as a terminal-style block under the answer so
+  // the computed proof sits beside the model's prose. Like `files`, these are
+  // session-only (data URLs), not persisted to the Firestore message doc.
+  codeRuns?: Array<{ stdout?: string; stderr?: string; images?: string[] }>;
   // Arena Mode
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
@@ -472,6 +478,20 @@ export default function Chat() {
     return parts.join('\n\n');
   }, []);
 
+  // Refresh hooks the Memories panel calls after it mutates memories or
+  // instructions. Re-reads from Firestore and updates both the state (panel
+  // UI) and the ref (prompt injection), so the next send picks up the change.
+  const reloadMemories = useCallback(async () => {
+    if (!user || isGuest) return;
+    const m = await firestoreDb.getMemories(user.uid);
+    setMemories(m); memoriesRef.current = m;
+  }, [user, isGuest]);
+  const reloadInstructions = useCallback(async () => {
+    if (!user || isGuest) return;
+    const s = await firestoreDb.getUserSettings(user.uid);
+    setUserSettings(s); userSettingsRef.current = s;
+  }, [user, isGuest]);
+
   const loadMessages = useCallback(async () => {
     // Opening or switching a conversation disarms autoscroll so the freshly
     // loaded history renders from its natural position instead of snapping to
@@ -582,6 +602,41 @@ export default function Chat() {
     createSparkleBurst();
 
     const trimmedContent = content.trim();
+
+    // Fire-and-forget memory extraction (Part F.2). After a successful turn we
+    // ask a cheap model to pull out durable facts about the user from THIS
+    // turn, dedupe them against the memories already cached in memory, and
+    // persist any new ones to Firestore. Fully non-blocking and failure-proof:
+    // it never awaits here, never throws into the send flow, and a wrong extract
+    // is recoverable from the Memories panel. Only fires for authenticated
+    // users — guests have no Firestore writes.
+    const maybeExtractMemories = (assistantText: string) => {
+      if (!user || isGuest) return;
+      const userText = trimmedContent;
+      // Read the latest memories from the ref (state would be stale across the
+      // await below) and dedupe against it.
+      const existing = memoriesRef.current.map((m) => m.content);
+      void (async () => {
+        try {
+          const candidates = await extractMemories(userText, assistantText);
+          const fresh = dedupeMemories(existing, candidates);
+          if (fresh.length === 0) return;
+          // Persist each new fact and merge into the cache so the NEXT turn in
+          // this same session sees it without a reload.
+          const saved: FirestoreMemory[] = [];
+          for (const c of fresh) {
+            const id = await firestoreDb.addMemory(user.uid, c, 'auto');
+            if (id) saved.push({ id, userId: user.uid, content: c, source: 'auto', createdAt: new Date().toISOString() });
+          }
+          if (saved.length === 0) return;
+          setMemories((prev) => [...saved, ...prev]);
+          memoriesRef.current = [...saved, ...memoriesRef.current];
+        } catch {
+          // best-effort — never surface a memory error to the user
+        }
+      })();
+    };
+
     const pendingAttachments: ChatAttachment[] = await Promise.all(
       files.map(async (file) => ({
         id: crypto.randomUUID(),
@@ -1127,6 +1182,7 @@ export default function Chat() {
         const agentImageUrl = agentArtifacts.images?.[0];
         const agentFiles = agentArtifacts.files || [];
         objectUrlsRef.current.push(...agentFiles.map((f) => f.url));
+        const agentCodeRuns = agentArtifacts.codeRuns || [];
 
         if (cleaned) {
           const finalText = usedVisionFallback
@@ -1141,6 +1197,7 @@ export default function Chat() {
                 content: finalText,
                 imageUrl: agentImageUrl || m.imageUrl,
                 files: agentFiles.length ? agentFiles : m.files,
+                codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns,
                 sources: mergedSources.length ? mergedSources : undefined,
                 followUps: mergedFollowUps.length ? mergedFollowUps : undefined,
                 arenaResponses: activeArenaMode && m.arenaResponses
@@ -1161,6 +1218,7 @@ export default function Chat() {
             // too short-lived for a Firestore document, so a reloaded
             // conversation shows the reply without them.
             await saveMessage(convId, 'assistant', finalText, selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
+            maybeExtractMemories(finalText);
           }
         } else if (agentImageUrl || agentFiles.length) {
           // Tools delivered something the user can see even though the model
@@ -1169,12 +1227,13 @@ export default function Chat() {
           const madeText = agentImageUrl ? 'Here you go.' : `Created ${agentFiles.map((f) => f.filename).join(', ')}.`;
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantMessage.id
-              ? { ...m, content: madeText, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files }
+              ? { ...m, content: madeText, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns }
               : m)),
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
           if (convId && isAuthenticated) {
             await saveMessage(convId, 'assistant', madeText, selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
+            maybeExtractMemories(madeText);
           }
         } else {
           const fallback = 'I had a formatting hiccup—please send that once more 🙏';
@@ -1347,6 +1406,8 @@ export default function Chat() {
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
           selectedModel={selectedModel}
           onSelectModel={handleSelectModel}
+          onMemoriesChanged={reloadMemories}
+          onInstructionsChanged={reloadInstructions}
         />
       )}
 
@@ -1534,6 +1595,7 @@ export default function Chat() {
                           sources={msg.sources}
                           followUps={msg.followUps}
                           files={msg.files}
+                          codeRuns={msg.codeRuns}
                           onFollowUp={(q) => handleSendMessage(q)}
                           onRegenerate={handleRegenerate}
                           canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}
