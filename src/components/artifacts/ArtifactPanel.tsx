@@ -15,6 +15,7 @@ import remarkGfm from "remark-gfm";
 
 import { diffLines, diffSummary } from "@/lib/artifact-diff";
 import type { Artifact } from "@/lib/artifacts";
+import { RunButton, RunOutput, isRunnableLanguage, useCodeRunner } from "@/components/chat/CodeRunner";
 import { useArtifacts, closeArtifact } from "./ArtifactProvider";
 
 // The languages the preview iframe can render live. React would need a runtime
@@ -43,7 +44,32 @@ export function ArtifactPanel({ onEdit, onDownload, fetchFileText }: Props) {
     [artifacts, openId],
   );
 
-  if (!artifact) return null;
+  if (!artifact) {
+    // Reachable only if something opened an id the store does not hold — the
+    // failure that used to render a docked, blank 520px column and no
+    // explanation. `openCodeArtifact` closed that path for code blocks; a stale
+    // `file:` id from a reloaded conversation can still land here, so say so and
+    // give the user the way out rather than showing them an empty panel.
+    return (
+      <div className="h-full flex flex-col bg-card border-l border-border/40">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-border/40 bg-secondary/30">
+          <span className="flex-1 text-sm font-medium text-foreground/90">Not available</span>
+          <button
+            onClick={closeArtifact}
+            title="Close"
+            className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="flex-1 p-6 text-sm text-muted-foreground">
+          This artifact is no longer in this session. Generated files live only as
+          long as the tab that made them, so a reloaded conversation cannot reopen
+          one.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex flex-col bg-card border-l border-border/40">
@@ -223,23 +249,41 @@ function CodeView({ content, language }: { content: string; language: string }) 
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+  // Python in the canvas is runnable on the same terms as Python in the
+  // conversation: a Run button beside Copy, and nothing executes until it is
+  // pressed. The output docks under the code rather than floating, so a long
+  // traceback scrolls with the panel instead of covering it.
+  const runner = useCodeRunner(content);
+  const runnable = isRunnableLanguage(language);
   return (
-    <div className="relative h-full">
-      <button
-        onClick={copy}
-        className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-background/80 hover:bg-background text-xs text-muted-foreground hover:text-foreground border border-border/30 transition-colors"
-      >
-        {copied ? <><Check className="w-3.5 h-3.5 text-primary" /><span>Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
-      </button>
-      <SyntaxHighlighter
-        language={language || "text"}
-        style={oneDark}
-        customStyle={{ margin: 0, padding: "1.25rem 1.5rem", background: "transparent", fontSize: "0.8125rem", lineHeight: 1.65, minHeight: "100%" }}
-        showLineNumbers={content.split("\n").length > 3}
-        lineNumberStyle={{ opacity: 0.4, minWidth: "2.5em" }}
-      >
-        {content}
-      </SyntaxHighlighter>
+    <div className="relative h-full flex flex-col">
+      <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+        <button
+          onClick={copy}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-background/80 hover:bg-background text-xs text-muted-foreground hover:text-foreground border border-border/30 transition-colors"
+        >
+          {copied ? <><Check className="w-3.5 h-3.5 text-primary" /><span>Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
+        </button>
+        {runnable && (
+          <RunButton state={runner.state} onRun={runner.run} onStop={runner.stop} />
+        )}
+      </div>
+      <div className="flex-1 min-h-0 overflow-auto">
+        <SyntaxHighlighter
+          language={language || "text"}
+          style={oneDark}
+          customStyle={{ margin: 0, padding: "1.25rem 1.5rem", background: "transparent", fontSize: "0.8125rem", lineHeight: 1.65, minHeight: "100%" }}
+          showLineNumbers={content.split("\n").length > 3}
+          lineNumberStyle={{ opacity: 0.4, minWidth: "2.5em" }}
+        >
+          {content}
+        </SyntaxHighlighter>
+      </div>
+      {runnable && (
+        <div className="shrink-0 max-h-[45%] overflow-auto">
+          <RunOutput state={runner.state} />
+        </div>
+      )}
     </div>
   );
 }

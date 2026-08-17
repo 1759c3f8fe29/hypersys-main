@@ -1,9 +1,8 @@
-import { useEffect } from 'react';
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/hooks/useAuth";
 import Auth from "./pages/Auth";
 import Chat from "./pages/Chat";
@@ -12,6 +11,25 @@ import { Sparkles } from "lucide-react";
 import { Analytics } from "@vercel/analytics/react"
 
 const queryClient = new QueryClient();
+
+// ---------------------------------------------------------------------------
+// Router: history API on the web, hash under file://
+// ---------------------------------------------------------------------------
+// The desktop shell's packaged mode loads dist/index.html straight off disk
+// (electron/main.cjs → loadFile), so location.pathname is the FILE PATH —
+// "/home/you/hypersys/dist/index.html" — which matches no <Route> below and
+// renders NotFound instead of the app. HashRouter keeps the whole route after
+// the "#", leaving the path as whatever the file URL happens to be, so "/"
+// resolves normally.
+//
+// Keyed off the protocol rather than a build-mode flag on purpose: `desktop:dev`
+// loads http://localhost:8080, a real server that can serve any path, so it
+// wants the same BrowserRouter as the web build. Only a file:// document needs
+// the hash — one predicate, and no env var to keep in sync with the build mode.
+const Router =
+  typeof window !== "undefined" && window.location.protocol === "file:"
+    ? HashRouter
+    : BrowserRouter;
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading, isGuest } = useAuth();
@@ -72,23 +90,15 @@ function AppRoutes() {
 
 
 const App = () => {
-  useEffect(() => {
-    const color = localStorage.getItem('Flyer_theme_color') || '172 66% 50%';
-    document.documentElement.style.setProperty('--primary', color);
-    document.documentElement.style.setProperty('--ring', color);
-    document.documentElement.style.setProperty('--accent', color);
-    document.documentElement.style.setProperty('--sidebar-primary', color);
-  }, []);
-
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <AuthProvider>
           <Toaster />
           <Sonner />
-          <BrowserRouter>
+          <Router>
             <AppRoutes />
-          </BrowserRouter>
+          </Router>
         </AuthProvider>
       </TooltipProvider>
     </QueryClientProvider>

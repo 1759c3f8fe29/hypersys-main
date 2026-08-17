@@ -22,7 +22,7 @@ export const GENERATE_IMAGE_SCHEMA: ToolSchema = {
     name: "generate_image",
     description:
       "Generate an image from a text description. Use when the user asks to draw, create, design, render, illustrate, or visualize something, or asks for a logo, poster, diagram, icon, wallpaper, or artwork.\n\n" +
-      "Generate directly without asking for confirmation. The one exception: if the user asks for an image containing themselves, ask them to upload a photo first unless one is already in the conversation.\n\n" +
+      "Generate directly without asking for confirmation. This generates from text only — it cannot use an uploaded photo as a reference and cannot edit an existing image. If the user asks you to alter, restyle, or extend a picture they provided, say plainly that you can only create a new image from a description, then offer to do that; do not ask them to upload anything, and do not imply their photo was used.\n\n" +
       "Write a rich, specific prompt — the user's words are a starting point, not the final prompt. Lead with the subject and its action, then the specific details that make this image theirs, then composition, then light and colour, then medium. Name one style anchor rather than stacking adjectives. Name concrete materials. Do not use generic booster tags like 'masterpiece', '8k', 'ultra detailed' — modern models ignore them.\n\n" +
       "After the image is generated, do not describe it back to the user. A short caption is enough.",
     parameters: {
@@ -31,7 +31,7 @@ export const GENERATE_IMAGE_SCHEMA: ToolSchema = {
         prompt: {
           type: "string",
           description:
-            "The full generation prompt. 50-90 words for a single subject, 90-180 for a full scene. Longer is silently truncated by the text encoder.",
+            "The full generation prompt. 40-70 words for a single subject, 70-110 for a full scene. Anything past ~700 characters is dropped before the image model sees it, so spend the budget on the subject and the specifics rather than on a long preamble.",
         },
         aspect_ratio: {
           type: "string",

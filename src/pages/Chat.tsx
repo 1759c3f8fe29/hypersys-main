@@ -9,7 +9,7 @@ import {
   supportsTools,
 } from '@/lib/providers';
 import ChatMessage from '@/components/chat/ChatMessage';
-import ChatInput, { ACCENT_COLORS } from '@/components/chat/ChatInput';
+import ChatInput from '@/components/chat/ChatInput';
 import ModelSelector from '@/components/chat/ModelSelector';
 import WelcomeScreen from '@/components/chat/WelcomeScreen';
 import { generateChatResponse, generateVisionResponse, generateImageResponse, buildImagePrompt, craftVisionPrompt, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
@@ -22,15 +22,17 @@ import {
 import { webSearch, buildSearchContext } from '@/lib/search';
 import { runAgentTurn, AGENT_TOOLS_ENABLED, MAX_STEPS } from '@/lib/agent';
 import type { ToolArtifacts } from '@/lib/tools';
+import { LOGO_URL } from '@/lib/assets';
 import { extractDocument, canExtract, buildDocumentContext } from '@/lib/documents';
 import { extractArtifacts } from '@/lib/artifacts';
-import { ingestArtifacts, resetArtifacts, openArtifact, useArtifacts } from '@/components/artifacts/ArtifactProvider';
+import { clearFinishedRuns } from '@/lib/code-runs';
+import { ingestArtifacts, resetArtifacts, useArtifacts } from '@/components/artifacts/ArtifactProvider';
 import { ArtifactCanvas } from '@/components/artifacts/ArtifactCanvas';
-import type { ChatAttachment, MessageFile, MessageSource } from '@/components/chat/types';
+import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource } from '@/components/chat/types';
 import { Menu, ArrowDown, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
-import { extractFirstMarkdownImage, sanitizeAssistantText } from '@/lib/chat-format';
+import { extractFirstMarkdownImage, sanitizeAssistantText, withPersistedImage } from '@/lib/chat-format';
 import { buildMessageForest, linearizeForest, switchBranch } from '@/lib/message-tree';
 import { extractMemories, dedupeMemories } from '@/lib/memory';
 
@@ -56,11 +58,10 @@ interface Message {
   // Files the create_file tool produced, shown as download links. Blob URLs,
   // so they live only as long as this tab — not persisted with the message.
   files?: MessageFile[];
-  // Inline Python runs from the run_code tool (Part G): stdout/stderr plus any
-  // matplotlib figures. Rendered as a terminal-style block under the answer so
-  // the computed proof sits beside the model's prose. Like `files`, these are
-  // session-only (data URLs), not persisted to the Firestore message doc.
-  codeRuns?: Array<{ stdout?: string; stderr?: string; images?: string[] }>;
+  // Python the run_code tool staged this turn (Part G). Execution is user-gated:
+  // these carry the script, not its output, and the block's Run button is the only
+  // thing that starts the interpreter. Session-only, like `files`.
+  codeRuns?: MessageCodeRun[];
   // Arena Mode
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
@@ -100,6 +101,16 @@ interface Conversation {
 // always error. Verified worst-case first-token was ~100s on 2026-07-21.
 const REQUEST_TIMEOUT_MS = 130_000;
 const SLOW_REQUEST_TIMEOUT_MS = 130_000;
+// How long a stream may sit silent between chunks before we treat the
+// connection as dead. Distinct from REQUEST_TIMEOUT_MS, which guards only the
+// cold-start wait (cleared on the first token). This one arms AFTER streaming
+// starts and resets on every chunk, so it catches the failure the cold-start
+// guard structurally cannot — a model that streams one token then hangs. 60s is
+// above the pauses reasoning models take between their thinking block and the
+// answer, which measured at ~30s on minimax-m3; below it, healthy answers would
+// be cut. The abort it triggers reuses the existing AbortError path, so no new
+// teardown is needed.
+const STREAM_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_VISION_MODEL = VISION_ENGINE_MODEL;
 
 // Open-ended requests benefit from the crafted master analysis prompt; targeted
@@ -195,18 +206,21 @@ const fileToDataUrl = (file: File): Promise<string> => {
 
 export default function Chat() {
   const { user, isGuest } = useAuth();
-  // openId drives the desktop right-padding on the messages column so the
-  // overlay canvas never hides message text. The canvas hides itself below md.
-  const { openId: openArtifactId } = useArtifacts();
-  const [accentColor, setAccentColor] = useState(() => localStorage.getItem('Flyer_theme_color') || '172 66% 50%');
-
-  useEffect(() => {
-    localStorage.setItem('Flyer_theme_color', accentColor);
-    document.documentElement.style.setProperty('--primary', accentColor);
-    document.documentElement.style.setProperty('--ring', accentColor);
-    document.documentElement.style.setProperty('--accent', accentColor);
-    document.documentElement.style.setProperty('--sidebar-primary', accentColor);
-  }, [accentColor]);
+  // The canvas is absolutely docked inside <main>, so every full-width row in
+  // that column (header, message scroller, composer) has to reserve the space it
+  // occupies or it renders underneath the panel. The width comes from the store
+  // because the panel is drag-resizable: a fixed gutter and a variable panel
+  // disagree the moment the user drags, and the conversation loses its right
+  // edge. The reservation cannot go on <main> itself — `right-0` on the canvas
+  // resolves against main's padding box, so padding there would move the panel
+  // rather than make room for it.
+  const { openId: openArtifactId, canvasWidth } = useArtifacts();
+  const canvasGutter = openArtifactId
+    ? ({ ["--canvas-gutter" as string]: `${canvasWidth}px` } as React.CSSProperties)
+    : undefined;
+  // Applied unconditionally; with the variable unset the fallback is 0px, so
+  // there is no conditional-class path that can go stale.
+  const canvasGutterClass = "lg:pr-[var(--canvas-gutter,0px)]";
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
@@ -537,6 +551,13 @@ export default function Chat() {
 
   useEffect(() => { loadMessages(); }, [loadMessages]);
 
+  // Finished runs hold matplotlib PNGs as data URLs, so a long session of "plot
+  // this" turns into megabytes of retained strings. Switching conversations is
+  // the natural point to drop them: the blocks that displayed them are gone.
+  // Only finished ones — a run still executing belongs to the user who started
+  // it and survives navigation on purpose (see lib/code-runs.ts).
+  useEffect(() => { clearFinishedRuns(); }, [activeConversationId]);
+
   // Restore the selected model when switching conversations. Older chats carry
   // ids that have since been renamed or retired, so resolve through the
   // catalogue's legacy map first and only fall back to the default when the id
@@ -713,23 +734,36 @@ export default function Chat() {
     //   forceWebSearch — they pressed the Search toggle.
     //
     // Everything else the model decides mid-turn by calling a tool. On the paths
-    // the loop does not cover (no tool support, image understanding, Arena mode)
-    // that means no search unless the toggle is on: those models cannot call the
-    // tool themselves, so the toggle is the only grounding they get.
+    // the loop does not cover (no tool support, Arena mode) that means no search
+    // unless the toggle is on: those models cannot call the tool themselves, so
+    // the toggle is the only grounding they get.
     const isImageGen = isImageModel(selectedModel);
-
-    const useAgent =
-      AGENT_TOOLS_ENABLED &&
-      !hasImages &&
-      !isArenaMode &&
-      !isImageGen &&
-      supportsTools(selectedModel);
 
     let effectiveModelId = selectedModel;
     if (!isImageGen && hasImages && !isVisionCapableModel(selectedModel)) {
       effectiveModelId = DEFAULT_VISION_MODEL;
     }
     const usedVisionFallback = effectiveModelId !== selectedModel;
+
+    // Tools are on for every turn the provider will accept them on — the point
+    // of the loop is that the model reaches for one whenever it judges one
+    // useful, so the only legitimate reasons to withhold them are mechanical.
+    //
+    // Gated on effectiveModelId, not selectedModel: on a vision fallback the
+    // request goes to a different model, and asking THAT model for tools when it
+    // has none is a provider-level rejection.
+    //
+    // Attached images used to disable the loop outright. That was wrong on the
+    // default model, which is both vision- and tool-capable on one route: "read
+    // this chart and compute the CAGR" needs run_code exactly as much as a text
+    // turn does, and "what is this landmark, and what does it cost to visit now"
+    // needs web_search. supportsTools() already withholds them from the
+    // vision-only engines, so the mechanical check is sufficient on its own.
+    const useAgent =
+      AGENT_TOOLS_ENABLED &&
+      !isArenaMode &&
+      !isImageGen &&
+      supportsTools(effectiveModelId);
 
     // Build the API message history (text only) and the current turn (multimodal
     // when the effective model can accept images).
@@ -753,6 +787,11 @@ export default function Chat() {
       modelName: selectedModelMeta.name,
       memories: memoriesAsPromptBlock(memoriesRef.current),
       userInstructions: instructionsAsPromptBlock(userSettingsRef.current),
+      // Renders the tool-use policy section. Passed the SAME expression that
+      // decides whether the schemas actually go out, because the two disagreeing
+      // is what produces fabricated tool output (block without tools) or a model
+      // that hedges instead of searching (tools without block).
+      toolsAvailable: useAgent,
     };
 
     const allMessages: AiChatMessage[] = [
@@ -823,6 +862,7 @@ export default function Chat() {
       : REQUEST_TIMEOUT_MS;
 
     let timeoutReached = false;
+    let stalledMidStream = false;
     let receivedAssistantContent = false;
     const timeoutId = setTimeout(() => {
       timeoutReached = true;
@@ -831,6 +871,36 @@ export default function Chat() {
     // Once the first token arrives the model is alive and streaming — cancel the
     // cold-start guard so a long-but-healthy answer is never cut off mid-stream.
     const clearColdStartGuard = () => clearTimeout(timeoutId);
+
+    // A second guard the cold-start one cannot cover: the provider that stalls
+    // AFTER streaming begins. The cold-start timer is cleared on the first token,
+    // so a connection that sends one token then hangs (the NVIDIA POST black-
+    // hole: GET /v1/models returns in 0.3s while POST /v1/chat/completions gives
+    // http_code=000 after 45s) leaves reader.read() awaiting forever and the turn
+    // wedged until Stop is clicked. This is a self-resetting idle timer: it arms
+    // once streaming starts, resets on every chunk, and aborts if no chunk
+    // arrives within STREAM_IDLE_TIMEOUT_MS. A token every few hundred ms keeps
+    // it alive indefinitely, which is correct — a healthy stream is never cut,
+    // only a dead one. Sized above the cold-start window because reasoning
+    // models sometimes pause between the thinking block and the answer.
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const armIdleWatchdog = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        stalledMidStream = true;
+        abortControllerRef.current?.abort();
+      }, STREAM_IDLE_TIMEOUT_MS);
+    };
+    const disarmIdleWatchdog = () => {
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    };
+
+    // The partial answer the model streamed before a stall. Hoisted to this
+    // scope (rather than living only in runPrimary) so the AbortError handler
+    // can persist it: without this, a mid-stream stall sets React state with the
+    // partial + a stall note but never calls saveMessage, and the whole bubble
+    // is lost on reload. runPrimary's handleDelta appends to this.
+    let runPrimaryPartialText = '';
 
     try {
       if (isImageGen) {
@@ -1006,9 +1076,16 @@ export default function Chat() {
           let fullContent = '';
           const handleDelta = (delta: string) => {
             fullContent += delta;
-            if (!receivedAssistantContent) clearColdStartGuard();
-            receivedAssistantContent = true;
+            if (!receivedAssistantContent) {
+              clearColdStartGuard();
+              receivedAssistantContent = true;
+            }
+            // The cold-start guard is gone after the first token; the idle
+            // watchdog takes over and resets on every chunk, so only a genuine
+            // stall — not a model that is simply slow between tokens — trips it.
+            armIdleWatchdog();
             const liveContent = sanitizeAssistantText(fullContent) || fullContent;
+            runPrimaryPartialText = liveContent;
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantMessage.id ? { ...m, content: liveContent } : m)),
             );
@@ -1018,6 +1095,7 @@ export default function Chat() {
           // placeholder back so the real answer streams into an empty message.
           const discardStreamed = () => {
             fullContent = '';
+            runPrimaryPartialText = '';
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantMessage.id ? { ...m, content: '' } : m)),
             );
@@ -1102,6 +1180,11 @@ export default function Chat() {
                 // because one image generation can outlast the 130s budget by
                 // itself and would otherwise be aborted mid-flight.
                 clearColdStartGuard();
+                // A tool is not a streamed token, so the idle watchdog must not
+                // count the tool's runtime against the stream. An image gen that
+                // takes 45s would else trip the 60s idle timer and abort the
+                // turn mid-tool. handleDelta re-arms it when the model resumes.
+                disarmIdleWatchdog();
                 // The answer is not being written yet, so the status line has to
                 // say what is actually happening — otherwise it reads
                 // "Generating response" through a five-second search.
@@ -1115,6 +1198,12 @@ export default function Chat() {
                   setStatusText('Creating file...');
                 } else if (name === 'edit_file') {
                   setStatusText('Editing file...');
+                } else if (name === 'run_code') {
+                  // Not "Running Python" — the tool no longer runs anything, it
+                  // stages a script for the user to run. Saying otherwise here
+                  // would be the interface telling the same lie the prompt
+                  // forbids the model from telling.
+                  setStatusText('Writing Python...');
                 } else {
                   setStatusText('Working...');
                 }
@@ -1213,11 +1302,20 @@ export default function Chat() {
           ingestArtifacts(extractArtifacts(finalText, agentFiles, assistantMessage.id));
 
           if (convId && isAuthenticated) {
-            // Only the text is persisted. A generated image is a data URL and a
-            // file is a blob URL scoped to this tab — both are far too large or
-            // too short-lived for a Firestore document, so a reloaded
-            // conversation shows the reply without them.
-            await saveMessage(convId, 'assistant', finalText, selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
+            // A file is a blob URL scoped to this tab and a matplotlib PNG is a
+            // multi-megabyte data URL — neither belongs in a Firestore document,
+            // so a reloaded conversation shows the reply without them.
+            //
+            // A *generated* image is different, and used to be lost for no
+            // reason: generate_image returns a short, permanently-addressable
+            // https URL (the endpoint sends `immutable`), and the loader already
+            // recovers one from the text via extractFirstMarkdownImage. It was
+            // dropped only because the tool's schema tells the model not to write
+            // the link, so nothing put it in the text. Appending it here is what
+            // the explicit Image-model path has always done, and it renders the
+            // same: ChatMessage hoists the markdown image out of the prose with
+            // stripMarkdownImages, so this adds nothing visible to the reply.
+            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
             maybeExtractMemories(finalText);
           }
         } else if (agentImageUrl || agentFiles.length) {
@@ -1232,7 +1330,7 @@ export default function Chat() {
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
           if (convId && isAuthenticated) {
-            await saveMessage(convId, 'assistant', madeText, selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
+            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
             maybeExtractMemories(madeText);
           }
         } else {
@@ -1248,7 +1346,34 @@ export default function Chat() {
       if (isAuthenticated) loadConversations();
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        if (timeoutReached && !receivedAssistantContent) {
+        if (stalledMidStream) {
+          // The stream started and then fell silent for STREAM_IDLE_TIMEOUT_MS.
+          // Keep what was already streamed so the user keeps the partial answer,
+          // and append a note that the connection died rather than leaving the
+          // bubble looking done-but-incomplete with no explanation. Persisted
+          // too: without a save the partial would be lost on reload, since the
+          // success-path saveMessage is skipped on the abort.
+          const stallSuffix = '\n\n_The stream stalled partway through. Send it again if you want the rest._';
+          const persistedPartial = withPersistedImage(
+            (runPrimaryPartialText || '').replace(/\s*$/, '') + stallSuffix,
+            undefined,
+          );
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessage.id ? { ...m, content: persistedPartial } : m,
+            ),
+          );
+          if (convId && isAuthenticated) {
+            await saveMessage(
+              convId,
+              'assistant',
+              persistedPartial,
+              selectedModelMeta.name,
+              undefined,
+              assistantMessage.parentMessageId,
+            ).catch((e) => console.warn('[chat] failed to persist stalled partial:', e));
+          }
+        } else if (timeoutReached && !receivedAssistantContent) {
           const timeoutMessage = 'That took too long on my side—please send it again and I’ll keep it short.';
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantMessage.id ? { ...m, content: timeoutMessage } : m)),
@@ -1264,6 +1389,7 @@ export default function Chat() {
       }
     } finally {
       clearTimeout(timeoutId);
+      disarmIdleWatchdog();
       setIsLoading(false);
       setStatusText('');
       setIsSearching(false);
@@ -1418,7 +1544,7 @@ export default function Chat() {
         </div>
 
         {/* Header */}
-        <header className="h-14 sm:h-16 liquid-header flex items-center px-3 sm:px-4 gap-3 sm:gap-4 relative z-20 flex-shrink-0">
+        <header style={canvasGutter} className={`h-14 sm:h-16 liquid-header flex items-center px-3 sm:px-4 gap-3 sm:gap-4 relative z-20 flex-shrink-0 ${canvasGutterClass}`}>
           <div className="absolute inset-0 bg-gradient-to-r from-transparent via-primary/[0.02] to-transparent pointer-events-none" />
 
           {isAuthenticated && (
@@ -1434,7 +1560,7 @@ export default function Chat() {
           
           <div className="flex items-center gap-3 min-w-0 flex-1">
             <motion.div className="flex w-10 h-10 rounded-xl items-center justify-center flex-shrink-0 bg-black/10 overflow-hidden" whileHover={{ scale: 1.1, rotate: 5 }}>
-              <img src="/flyer-logo.png" alt="Flyer AI" className="w-full h-full object-cover" />
+              <img src={LOGO_URL} alt="Flyer AI" className="w-full h-full object-cover" />
             </motion.div>
             <div className="min-w-0">
               <h1 className="font-display font-semibold text-base sm:text-lg truncate text-foreground/90">
@@ -1468,19 +1594,6 @@ export default function Chat() {
                   <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
                 )}
               </button>
-            </div>
-
-            {/* Accent Color Switcher */}
-            <div className="hidden sm:flex items-center gap-1.5 bg-secondary/40 border border-border/30 rounded-xl p-1.5 backdrop-blur-md">
-              {ACCENT_COLORS.map((c) => (
-                <button
-                  key={c.value}
-                  onClick={() => setAccentColor(c.value)}
-                  className={`w-3.5 h-3.5 rounded-full transition-all duration-200 hover:scale-125 ${c.bg} ${accentColor === c.value ? 'ring-2 ring-white scale-110 shadow-md shadow-white/30' : 'opacity-55 hover:opacity-100'}`}
-                  title={`${c.name} Accent`}
-                  aria-label={`Change accent color to ${c.name}`}
-                />
-              ))}
             </div>
 
             {/* Model pickers — desktop only. On mobile the sidebar's model list
@@ -1529,7 +1642,7 @@ export default function Chat() {
             keeps scroll from chaining to the document while re-enabling iOS
             momentum, which the document-level -webkit-overflow-scrolling reset
             had killed for this region too. */}
-        <div ref={scrollContainerRef} className="relative z-10 flex-1 min-h-0 touch-scroll-y">
+        <div ref={scrollContainerRef} style={canvasGutter} className={`relative z-10 flex-1 min-h-0 touch-scroll-y ${canvasGutterClass}`}>
           <AnimatePresence mode="wait">
             {isMessagesLoading ? (
               <div key="loading-messages" className="flex flex-col items-center justify-center h-full min-h-[50dvh] overflow-y-auto scrollbar-thin">
@@ -1579,7 +1692,7 @@ export default function Chat() {
                   increaseViewportBy={{ top: 400, bottom: 400 }}
                   computeItemKey={(_index, msg) => msg.id}
                   itemContent={(index, msg) => (
-                    <div className={`${isArenaMode ? 'max-w-full px-2' : 'max-w-4xl px-3 sm:px-4 lg:px-6'} ${openArtifactId ? 'lg:pr-[34rem]' : ''} mx-auto py-4 sm:py-6 lg:py-8`}>
+                    <div className={`${isArenaMode ? 'max-w-full px-2' : 'max-w-4xl px-3 sm:px-4 lg:px-6'} mx-auto py-4 sm:py-6 lg:py-8`}>
                       {/* Each row owns its own vertical rhythm instead of the old
                           gap-y on a flex parent: Virtuoso lays items flush, so the
                           spacing must live inside each rendered row. */}
@@ -1601,7 +1714,6 @@ export default function Chat() {
                           canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}
                           isArenaMode={msg.isArenaMode}
                           arenaResponses={msg.arenaResponses}
-                          onOpenArtifact={(id) => openArtifact(id)}
                           branchIndex={msg.__branchIndex}
                           branchCount={msg.__branchCount}
                           onSwitchBranch={(dir) => handleSwitchBranch(msg.parentMessageId, dir)}
@@ -1622,9 +1734,12 @@ export default function Chat() {
           </AnimatePresence>
         </div>
 
-        {/* Input. z-40 lifts the composer above the canvas overlay (z-30) so
-            typing stays possible while an artefact is open on desktop. */}
-        <div className="relative z-40 flex-shrink-0">
+        {/* Input. The composer reserves the canvas width like the rest of the
+            column rather than being lifted above the panel: overlapping it kept
+            typing possible but drew the composer bar straight across the bottom
+            of the artefact, which reads as a rendering fault. z-40 still stacks
+            it above the message list. */}
+        <div style={canvasGutter} className={`relative z-40 flex-shrink-0 ${canvasGutterClass}`}>
           {/* Jump-to-latest. Anchored to the composer so it sits clear of the
               home indicator on mobile, and only mounts once there is a real
               distance to travel — see the 240px gate in handleScroll. */}
@@ -1654,8 +1769,6 @@ export default function Chat() {
             onToggleDeepThink={() => setDeepThink((v) => !v)}
             webSearch={forceWebSearch}
             onToggleWebSearch={() => setForceWebSearch((v) => !v)}
-            accentColor={accentColor}
-            onSelectAccent={setAccentColor}
           />
         </div>
 

@@ -7,6 +7,7 @@ import {
   KNOWLEDGE_CUTOFFS,
   PERSONALITY_PRESETS,
 } from '@/lib/prompts';
+import { TOOL_NAMES } from '@/lib/tools';
 
 const base = { modelName: 'test-model' };
 
@@ -98,5 +99,47 @@ describe('prompts', () => {
     expect(instant).toContain('current events, news, weather, prices');
     // ...but nothing instructs the model to call a web tool it cannot call.
     expect(instant).not.toMatch(/call (the )?(web|web_search|search)/i);
+  });
+
+  // ── Tool-use policy block ────────────────────────────────────────────────
+  // The flag gates a real behavioural fork, so both sides are asserted. Getting
+  // it backwards is not a cosmetic bug: a prompt that advertises tools the
+  // request never carried makes the model invent tool output, and a prompt that
+  // withholds the policy while the schemas ARE attached leaves it hedging about
+  // its knowledge cutoff instead of searching.
+
+  it('no tool policy leaks into a turn that carries no tools', () => {
+    for (const p of [buildFlyerSystemPrompt(base), buildFlyerThinkingPrompt(base), buildVisionSystemPrompt(base)]) {
+      expect(p).not.toContain('# Tools');
+      for (const name of TOOL_NAMES) expect(p).not.toContain(name);
+    }
+  });
+
+  it('documents every registered tool when tools are available', () => {
+    // The drift guard. A sixth tool added to the registry without a line in
+    // toolsBlock() fails here rather than shipping a tool the model was never
+    // told the policy for.
+    const withTools = { ...base, toolsAvailable: true };
+    for (const p of [
+      buildFlyerSystemPrompt(withTools),
+      buildFlyerThinkingPrompt(withTools),
+      buildVisionSystemPrompt(withTools),
+    ]) {
+      expect(p).toContain('# Tools');
+      for (const name of TOOL_NAMES) expect(p).toContain(`\`${name}\``);
+    }
+  });
+
+  it('orders automatic tool use and forbids fabricating tool output', () => {
+    const p = buildFlyerSystemPrompt({ ...base, toolsAvailable: true });
+    // Automatic, not permission-seeking.
+    expect(p).toContain('Never ask for permission');
+    expect(p).toContain('NEVER claim an inability you do not have');
+    // The staleness section must be explicitly overridden, or it wins.
+    expect(p).toContain('not permission to hedge');
+    // The exact failure that was observed in a live run: the model reported a
+    // fabricated hash and claimed it had run the code "locally".
+    expect(p).toContain('NO SILENT SUBSTITUTION');
+    expect(p).toContain('locally');
   });
 });

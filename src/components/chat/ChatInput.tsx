@@ -4,17 +4,6 @@ import { Send, Mic, Square, Loader2, ImagePlus, X, FileText, Atom, Globe, Plus }
 import { toast } from 'sonner';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 
-// Single source of truth for the accent palette — the header swatch row and the
-// composer's "+" menu both render from this, so they can't drift apart.
-export const ACCENT_COLORS = [
-  { name: 'Teal', value: '172 66% 50%', bg: 'bg-[#1ad1b9]' },
-  { name: 'Blue', value: '210 90% 55%', bg: 'bg-[#258eff]' },
-  { name: 'Purple', value: '270 85% 60%', bg: 'bg-[#984cff]' },
-  { name: 'Rose', value: '340 85% 55%', bg: 'bg-[#ff2d74]' },
-  { name: 'Amber', value: '30 95% 55%', bg: 'bg-[#ff8f1f]' },
-  { name: 'Emerald', value: '145 75% 45%', bg: 'bg-[#1cb866]' },
-];
-
 interface ChatInputProps {
   onSend: (message: string, files?: File[]) => void;
   isLoading: boolean;
@@ -26,8 +15,6 @@ interface ChatInputProps {
   onToggleDeepThink?: () => void;
   webSearch?: boolean;
   onToggleWebSearch?: () => void;
-  accentColor?: string;
-  onSelectAccent?: (value: string) => void;
 }
 
 export default function ChatInput({
@@ -41,8 +28,6 @@ export default function ChatInput({
   onToggleDeepThink,
   webSearch = false,
   onToggleWebSearch,
-  accentColor,
-  onSelectAccent,
 }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [isFocused, setIsFocused] = useState(false);
@@ -406,28 +391,6 @@ export default function ChatInput({
                           <span>Search</span>
                           {webSearch && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
                         </button>
-
-                        {/* Accent picker. The header's swatch row is hidden below
-                            the sm breakpoint, so without this there is no way to
-                            change the accent on a phone at all. */}
-                        {onSelectAccent && (
-                          <div className="sm:hidden pt-1 mt-0.5 border-t border-border/40">
-                            <div className="flex items-center justify-between px-1.5 pb-1">
-                              {ACCENT_COLORS.map((c) => (
-                                <button
-                                  key={c.value}
-                                  type="button"
-                                  onClick={() => { onSelectAccent(c.value); setPlusOpen(false); }}
-                                  aria-label={`Accent ${c.name}`}
-                                  title={c.name}
-                                  className={`w-4 h-4 rounded-full transition-transform ${c.bg} ${
-                                    accentColor === c.value ? 'ring-2 ring-white scale-110' : 'opacity-60'
-                                  }`}
-                                />
-                              ))}
-                            </div>
-                          </div>
-                        )}
                       </motion.div>
                     )}
                   </AnimatePresence>

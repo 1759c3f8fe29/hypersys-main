@@ -10,8 +10,11 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useTextToSpeech } from '@/hooks/useTextToSpeech';
 import { extractFirstMarkdownImage, sanitizeAssistantText, stripMarkdownImages } from '@/lib/chat-format';
-import { artifactIdForCode, isSubstantialCodeBlock } from '@/lib/artifacts';
-import type { ChatAttachment, MessageFile, MessageSource } from './types';
+import { isSubstantialCodeBlock } from '@/lib/artifacts';
+import { openCodeArtifact, openFileArtifact } from '@/components/artifacts/ArtifactProvider';
+import { LOGO_URL } from '@/lib/assets';
+import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource } from './types';
+import { RunButton, RunOutput, isRunnableLanguage, useCodeRunner } from './CodeRunner';
 
 interface ArenaResponse {
   modelId: string;
@@ -30,18 +33,14 @@ interface ChatMessageProps {
   sources?: MessageSource[];
   followUps?: string[];
   files?: MessageFile[];
-  // Inline Python runs from the run_code tool (Part G). Each entry is one
-  // sandboxed Pyodide run; rendered as a terminal block with stdout/stderr and
-  // any matplotlib figures inline, so computed answers are visibly proven.
-  codeRuns?: Array<{ stdout?: string; stderr?: string; images?: string[] }>;
+  // Python the run_code tool staged this turn (Part G). Nothing has executed:
+  // each entry renders as a runnable block whose Run button — beside Copy — is
+  // the only thing that starts the interpreter.
+  codeRuns?: MessageCodeRun[];
   onFollowUp?: (question: string) => void;
   onRegenerate?: () => void;
   canRegenerate?: boolean;
   isArenaMode?: boolean;
-  /** Open one of this turn's artifacts in the canvas. The id comes from the
-   * shared extractor; the assistant turn's artefacts are ingested into the store
-   * already, so ChatMessage only needs to hand over the id and the store opens. */
-  onOpenArtifact?: (artifactId: string) => void;
   arenaResponses?: ArenaResponse[];
   // Branching (Part F). branchIndex is this message's 1-based position among
   // its siblings that share a parent; branchCount is how many siblings there
@@ -92,43 +91,201 @@ function FollowUpChips({ followUps, onFollowUp }: { followUps: string[]; onFollo
   );
 }
 
-// Inline results from the run_code tool (Part G). Each run is one Python
-// execution: stdout/stderr in a terminal-style block and any matplotlib figures
-// the capture shim pulled out, rendered inline so the computed proof sits
-// beside the model's prose. Empty stdout+stderr+images collapses to nothing.
-function CodeRunBlocks({ runs }: { runs: Array<{ stdout?: string; stderr?: string; images?: string[] }> }) {
-  const meaningful = runs.filter(r => (r.stdout && r.stdout.trim()) || (r.stderr && r.stderr.trim()) || (r.images && r.images.length));
+// A generated image, with the two states a bare <img> cannot express.
+//
+// Both of them are things that happen: generation on the Pollinations endpoint
+// takes anywhere from 2 to 45 seconds, and it can fail outright (a filtered
+// prompt, a gated model, the CDN down). The URL is handed to the browser
+// unverified on purpose — an <img> loads progressively, so the caption arrives
+// while the pixels are still coming, which beats blocking the whole turn on a
+// 45-second fetch. The cost of that choice is that this component is the only
+// place that can tell the user which of the two happened, and a bare <img> told
+// them neither: a 45-second generation showed an empty bordered box, and a
+// failure showed a broken-image icon under a model cheerfully saying "here you
+// go".
+//
+// Not `loading="lazy"`: the image is the entire point of the turn. Deferring the
+// request until the box scrolls into view adds latency to the one thing the user
+// is waiting for.
+function GeneratedImage({ url, onDownload, downloaded }: {
+  url: string;
+  onDownload: () => void;
+  downloaded: boolean;
+}) {
+  const [state, setState] = useState<'loading' | 'loaded' | 'failed'>('loading');
+  // Remounts the <img> on retry. A plain re-render would reuse the cached failed
+  // response; a changed key forces a fresh request.
+  const [attempt, setAttempt] = useState(0);
+  // A new URL is a new image, so the state has to reset or a second generation
+  // in the same message renders under the first one's verdict.
+  useEffect(() => { setState('loading'); setAttempt(0); }, [url]);
+
+  if (state === 'failed') {
+    return (
+      <div className="mb-4 rounded-2xl liquid-surface border border-border/30 p-5 flex flex-col items-center gap-3 text-center">
+        <p className="text-sm text-foreground/80">That image didn’t come through.</p>
+        <p className="text-xs text-muted-foreground max-w-sm">
+          The image service returned nothing for this prompt. Retrying often works; so does asking
+          for it again in different words.
+        </p>
+        <button
+          type="button"
+          onClick={() => { setAttempt((n) => n + 1); setState('loading'); }}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-background/70 border border-border/40 text-xs font-medium text-foreground/90 hover:text-primary hover:border-primary/40 transition-all duration-200"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-4 relative group/image rounded-2xl overflow-hidden liquid-surface border border-border/30 shadow-2xl">
+      {state === 'loading' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 bg-background/40 z-10">
+          <Loader2 className="w-5 h-5 text-primary animate-spin" />
+          <span className="text-xs text-muted-foreground">Painting…</span>
+        </div>
+      )}
+      <img
+        key={attempt}
+        // The cache-buster is added only on a retry: the endpoint sends
+        // `immutable`, so without it "try again" would replay the same failure
+        // out of the HTTP cache.
+        src={attempt === 0 ? url : `${url}${url.includes('?') ? '&' : '?'}retry=${attempt}`}
+        alt="Generated image"
+        // Reserves height while loading so the spinner has a box and the
+        // conversation does not jump when the pixels land.
+        className={`w-full h-auto block transition-opacity duration-300 ${state === 'loaded' ? 'opacity-100' : 'opacity-0 min-h-[16rem]'}`}
+        onLoad={() => setState('loaded')}
+        onError={() => setState('failed')}
+      />
+      {state === 'loaded' && (
+        <button
+          type="button"
+          onClick={onDownload}
+          /* max-hover: on touch there is no hover, so without this the
+             only way to save a generated image is a long-press. */
+          className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-2 rounded-xl bg-background/70 backdrop-blur-md border border-border/40 text-xs font-medium text-foreground/90 hover:text-primary hover:border-primary/40 opacity-0 group-hover/image:opacity-100 max-hover:opacity-100 transition-all duration-200"
+          title="Download image"
+          aria-label="Download image"
+        >
+          {downloaded ? <><Check className="w-4 h-4 text-primary" />Saved</> : <><Download className="w-4 h-4" />Download</>}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Python the run_code tool staged (Part G) — code the model wrote, waiting for
+// the user to run it.
+//
+// This deliberately looks like a code block rather than a terminal: nothing has
+// executed, so a terminal frame would imply output that does not exist. Read it,
+// copy it, or press Run — and Run is what starts Pyodide, here and nowhere else.
+//
+// The legacy shape (stdout/stderr/images with no `code`) still renders as a
+// results block, because a message restored from an older session may carry one.
+function CodeRunBlocks({ runs }: { runs: MessageCodeRun[] }) {
+  const meaningful = runs.filter(
+    (r) =>
+      (r.code && r.code.trim()) ||
+      (r.stdout && r.stdout.trim()) ||
+      (r.stderr && r.stderr.trim()) ||
+      (r.images && r.images.length),
+  );
   if (meaningful.length === 0) return null;
   return (
     <div className="mt-4 space-y-3">
-      {meaningful.map((run, i) => {
-        const stdout = (run.stdout || '').trim();
-        const stderr = (run.stderr || '').trim();
-        const images = run.images || [];
-        const hasText = stdout || stderr;
-        return (
-          <div key={i} className="rounded-lg border border-border/40 overflow-hidden bg-muted/30">
-            <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border/30 bg-muted/50 text-[11px] text-muted-foreground">
-              <Terminal className="w-3 h-3" />
-              <span className="font-medium">Python · run {i + 1}</span>
-            </div>
-            {hasText && (
-              <pre className="overflow-x-auto px-3 py-2.5 text-[12.5px] leading-relaxed font-mono whitespace-pre">
-                {stdout && <span className="text-foreground/90">{stdout}</span>}
-                {stdout && stderr && '\n'}
-                {stderr && <span className="text-red-500/90">{stderr}</span>}
-              </pre>
+      {meaningful.map((run, i) =>
+        run.code && run.code.trim() ? (
+          <StagedRun key={i} run={run} index={i} />
+        ) : (
+          <FinishedRun key={i} run={run} index={i} />
+        ),
+      )}
+    </div>
+  );
+}
+
+function StagedRun({ run, index }: { run: MessageCodeRun; index: number }) {
+  const code = run.code ?? '';
+  const language = run.language || 'python';
+  const runner = useCodeRunner(code);
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    await navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="rounded-xl border border-border/40 overflow-hidden bg-card">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border/30 bg-secondary/40">
+        <Terminal className="w-3.5 h-3.5 text-muted-foreground" />
+        <span className="text-[11px] font-medium text-muted-foreground">
+          Python · run {index + 1}
+        </span>
+        <span className="text-[11px] text-muted-foreground/60">
+          {runner.state.status === 'idle' ? 'not run yet' : ''}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={copy}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-background/60 hover:bg-background text-[11px] text-muted-foreground hover:text-foreground transition-all border border-border/20"
+          >
+            {copied ? (
+              <><Check className="w-3 h-3 text-primary" /><span className="text-primary font-medium">Copied</span></>
+            ) : (
+              <><Copy className="w-3 h-3" /><span>Copy</span></>
             )}
-            {images.length > 0 && (
-              <div className="flex flex-wrap gap-2 p-3 bg-background/40">
-                {images.map((src, j) => (
-                  <img key={j} src={src} alt={`Figure ${j + 1}`} className="max-w-full max-h-64 rounded border border-border/30" />
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
+          </button>
+          <RunButton state={runner.state} onRun={runner.run} onStop={runner.stop} />
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <SyntaxHighlighter
+          language={language}
+          style={oneDark}
+          customStyle={{ margin: 0, padding: '1rem 1.25rem', background: 'transparent', fontSize: '0.8125rem', lineHeight: '1.65' }}
+          showLineNumbers={code.split('\n').length > 3}
+          lineNumberStyle={{ opacity: 0.4, minWidth: '2.5em' }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      </div>
+      <RunOutput state={runner.state} />
+    </div>
+  );
+}
+
+function FinishedRun({ run, index }: { run: MessageCodeRun; index: number }) {
+  const stdout = (run.stdout || '').trim();
+  const stderr = (run.stderr || '').trim();
+  const images = run.images || [];
+  const hasText = stdout || stderr;
+  return (
+    <div className="rounded-lg border border-border/40 overflow-hidden bg-muted/30">
+      <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border/30 bg-muted/50 text-[11px] text-muted-foreground">
+        <Terminal className="w-3 h-3" />
+        <span className="font-medium">Python · run {index + 1}</span>
+      </div>
+      {hasText && (
+        <pre className="overflow-x-auto px-3 py-2.5 text-[12.5px] leading-relaxed font-mono whitespace-pre">
+          {stdout && <span className="text-foreground/90">{stdout}</span>}
+          {stdout && stderr && '\n'}
+          {stderr && <span className="text-red-500/90">{stderr}</span>}
+        </pre>
+      )}
+      {images.length > 0 && (
+        <div className="flex flex-wrap gap-2 p-3 bg-background/40">
+          {images.map((src, j) => (
+            <img key={j} src={src} alt={`Figure ${j + 1}`} className="max-w-full max-h-64 rounded border border-border/30" />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -137,7 +294,12 @@ function CodeRunBlocks({ runs }: { runs: Array<{ stdout?: string; stderr?: strin
 // what makes the browser save it under the model's chosen filename instead of
 // navigating to a blob URL and rendering it inline. An "open" button on each chip
 // surfaces the file in the canvas as well.
-function FileChips({ files, onOpenFile }: { files: MessageFile[]; onOpenFile?: (filename: string) => void }) {
+//
+// Open goes straight to the store with the whole `MessageFile`, not up through a
+// callback carrying an id string: the chip is the only thing that knows this file
+// is still live, and handing over the file itself is what lets the store register
+// an artifact it may never have ingested rather than opening a dangling id.
+function FileChips({ files }: { files: MessageFile[] }) {
   return (
     <div className="mt-4 pt-3 border-t border-border/30 flex flex-wrap gap-2">
       {files.map((file) => (
@@ -149,15 +311,14 @@ function FileChips({ files, onOpenFile }: { files: MessageFile[]; onOpenFile?: (
           <span className="text-sm font-medium text-foreground/85 group-hover:text-foreground truncate max-w-[14rem]">
             {file.filename}
           </span>
-          {onOpenFile && (
-            <button
-              onClick={() => onOpenFile(file.filename)}
-              title="Open in canvas"
-              className="p-1 rounded-md hover:bg-foreground/5 text-muted-foreground/60 hover:text-primary transition-colors"
-            >
-              <ArrowUpRight className="w-3.5 h-3.5" />
-            </button>
-          )}
+          <button
+            onClick={() => openFileArtifact(file)}
+            data-open-file-in-canvas
+            title="Open in canvas"
+            className="p-1 rounded-md hover:bg-foreground/5 text-muted-foreground/60 hover:text-primary transition-colors"
+          >
+            <ArrowUpRight className="w-3.5 h-3.5" />
+          </button>
           <a href={file.url} download={file.filename} title="Download" className="p-1 rounded-md hover:bg-foreground/5 text-muted-foreground/60 hover:text-primary transition-colors">
             <Download className="w-3.5 h-3.5" />
           </a>
@@ -211,7 +372,7 @@ function SourceChips({ sources }: { sources: MessageSource[] }) {
   );
 }
 
-function CodeBlock({ language, children, onOpenArtifact }: { language: string; children: string; onOpenArtifact?: (id: string) => void }) {
+function CodeBlock({ language, children }: { language: string; children: string }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     await navigator.clipboard.writeText(children);
@@ -222,10 +383,11 @@ function CodeBlock({ language, children, onOpenArtifact }: { language: string; c
   // handler exists — a three-line example with a "open in canvas" button is the
   // annoyance the brief names.
   const substantial = isSubstantialCodeBlock(children);
-  const artifactId = useMemo(
-    () => (substantial ? artifactIdForCode(language, children) : null),
-    [language, children, substantial],
-  );
+  // Any Python block in the conversation is runnable, not just the ones the tool
+  // staged — a snippet the model wrote inline is the same thing to the reader, so
+  // the button sits in the same place. It never fires on its own.
+  const runner = useCodeRunner(children);
+  const runnable = isRunnableLanguage(language);
 
   return (
     <div className="relative group my-5 rounded-2xl overflow-hidden border border-border/40 bg-card shadow-xl">
@@ -239,9 +401,10 @@ function CodeBlock({ language, children, onOpenArtifact }: { language: string; c
           <span className="text-xs text-muted-foreground/70 font-mono ml-2 uppercase tracking-wider">{language || 'code'}</span>
         </div>
         <div className="flex items-center gap-2">
-          {substantial && onOpenArtifact && artifactId && (
+          {substantial && (
             <button
-              onClick={() => onOpenArtifact(artifactId)}
+              onClick={() => openCodeArtifact(language, children)}
+              data-open-in-canvas
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-background/60 hover:bg-background text-xs text-muted-foreground hover:text-foreground transition-all border border-border/20"
               title="Open in canvas"
             >
@@ -251,6 +414,9 @@ function CodeBlock({ language, children, onOpenArtifact }: { language: string; c
           <button onClick={handleCopy} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-background/60 hover:bg-background text-xs text-muted-foreground hover:text-foreground transition-all border border-border/20">
             {copied ? <><Check className="w-3.5 h-3.5 text-primary" /><span className="text-primary font-medium">Copied!</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
           </button>
+          {runnable && (
+            <RunButton state={runner.state} onRun={runner.run} onStop={runner.stop} />
+          )}
         </div>
       </div>
       <div className="overflow-x-auto">
@@ -264,14 +430,15 @@ function CodeBlock({ language, children, onOpenArtifact }: { language: string; c
           {children}
         </SyntaxHighlighter>
       </div>
+      {runnable && <RunOutput state={runner.state} />}
     </div>
   );
 }
 
 // Markdown element overrides. Built as a function so the fenced-code renderer
-// can close over `onOpenArtifact` (a substantial block is the trigger that opens
+// can carry per-block affordances (a substantial block is the trigger that opens
 // the canvas); the rest of the overrides are static and shared identically.
-function buildMarkdownComponents(onOpenArtifact?: (id: string) => void): any {
+function buildMarkdownComponents(): any {
  return {
   h1: ({ children }) => (
     <h1 className="text-xl sm:text-2xl font-extrabold mb-3 mt-5 first:mt-0 text-foreground bg-clip-text text-transparent bg-gradient-to-r from-primary via-accent to-primary drop-shadow-sm tracking-tight">
@@ -322,7 +489,7 @@ function buildMarkdownComponents(onOpenArtifact?: (id: string) => void): any {
     if (!match) {
       return <code className="px-1.5 py-0.5 mx-0.5 rounded-md bg-secondary/60 border border-border/40 text-primary font-mono text-[0.85em]">{children}</code>;
     }
-    return <CodeBlock language={match[1]} onOpenArtifact={onOpenArtifact}>{String(children).replace(/\n$/, '')}</CodeBlock>;
+    return <CodeBlock language={match[1]}>{String(children).replace(/\n$/, '')}</CodeBlock>;
   },
   pre: ({ children }) => <>{children}</>,
   a: ({ href, children }) => (
@@ -353,7 +520,7 @@ function buildMarkdownComponents(onOpenArtifact?: (id: string) => void): any {
  };
 }
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, onFollowUp, onRegenerate, canRegenerate, isArenaMode, arenaResponses, onOpenArtifact, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, onFollowUp, onRegenerate, canRegenerate, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedArenaIdx, setCopiedArenaIdx] = useState<number | null>(null);
@@ -369,8 +536,8 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
   // Rebuilt only when the open callback changes (i.e. never per chunk in
   // practice) so ReactMarkdown's own memoization is not defeated.
   const markdownComponents = useMemo(
-    () => buildMarkdownComponents(onOpenArtifact),
-    [onOpenArtifact],
+    () => buildMarkdownComponents(),
+    [],
   );
 
   const displayContent = isUser ? content : sanitizeAssistantText(content);
@@ -601,7 +768,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             <div className="flex items-center gap-2 mb-3 justify-between pb-2.5 border-b border-primary/20">
               <div className="flex items-center gap-2.5">
                 <div className="w-7 h-7 rounded-xl flex items-center justify-center overflow-hidden bg-black/10 shadow-md shadow-primary/20 border border-primary/30">
-                  <img src="/flyer-logo.png" alt="Flyer AI" className="w-full h-full object-cover" />
+                  <img src={LOGO_URL} alt="Flyer AI" className="w-full h-full object-cover" />
                 </div>
                 <span className="text-sm font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">{modelName}</span>
                 {isArenaMode && (
@@ -658,20 +825,11 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             {/* Content */}
             <div className="w-full pt-1">
               {generatedImageUrl && (
-                <div className="mb-4 relative group/image rounded-2xl overflow-hidden liquid-surface border border-border/30 shadow-2xl">
-                  <img src={generatedImageUrl} alt="Generated image" className="w-full h-auto block" loading="lazy" />
-                  <button
-                    type="button"
-                    onClick={handleDownloadImage}
-                    /* max-hover: on touch there is no hover, so without this the
-                       only way to save a generated image is a long-press. */
-                    className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-2 rounded-xl bg-background/70 backdrop-blur-md border border-border/40 text-xs font-medium text-foreground/90 hover:text-primary hover:border-primary/40 opacity-0 group-hover/image:opacity-100 max-hover:opacity-100 transition-all duration-200"
-                    title="Download image"
-                    aria-label="Download image"
-                  >
-                    {downloaded ? <><Check className="w-4 h-4 text-primary" />Saved</> : <><Download className="w-4 h-4" />Download</>}
-                  </button>
-                </div>
+                <GeneratedImage
+                  url={generatedImageUrl}
+                  onDownload={handleDownloadImage}
+                  downloaded={downloaded}
+                />
               )}
 
               {textOnlyContent ? (
@@ -708,7 +866,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
               )}
             </div>
 
-            {!isUser && files && files.length > 0 && <FileChips files={files} onOpenFile={(fn) => onOpenArtifact?.(`file:${fn}`)} />}
+            {!isUser && files && files.length > 0 && <FileChips files={files} />}
             {!isUser && codeRuns && codeRuns.length > 0 && <CodeRunBlocks runs={codeRuns} />}
             {!isUser && sources && sources.length > 0 && <SourceChips sources={sources} />}
             {!isUser && !isStreaming && followUps && followUps.length > 0 && onFollowUp && (

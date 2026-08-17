@@ -44,9 +44,11 @@ import type { AttachmentRef, ToolArtifacts, ToolContext } from "@/lib/tools";
 export const AGENT_TOOLS_ENABLED = true;
 
 /**
- * Tool rounds before prose is forced. Five allows a real chain — search, refine
- * the search, then answer — while staying well inside the context window and
- * the free-tier budget. Raise only with a reason.
+ * Model passes per turn, not tool rounds — the last pass has tools withdrawn, so
+ * the real ceiling is MAX_STEPS - 1 rounds of tools followed by a forced answer.
+ * Four rounds allows a genuine chain (search, refine, compute, answer) while
+ * staying well inside the context window and the free-tier budget. Raise only
+ * with a reason.
  */
 export const MAX_STEPS = 5;
 
@@ -88,7 +90,13 @@ export interface AgentRunResult {
   artifacts: ToolArtifacts;
   /** How many tool rounds ran. 0 means the model answered directly. */
   steps: number;
-  /** True when the step ceiling forced the final answer. */
+  /**
+   * True when the answer came from the pass where tools had been withdrawn, i.e.
+   * the model was still asking for tools when it ran out of steps. The reply is
+   * complete either way — the point of the flag is that it may be less researched
+   * than the model intended, which is worth a log line when diagnosing a shallow
+   * answer.
+   */
   hitStepLimit: boolean;
 }
 
@@ -116,6 +124,20 @@ function toWireToolCalls(calls: ToolCall[]): WireToolCall[] {
 }
 
 /**
+ * What the user is shown when a turn ends having streamed nothing.
+ *
+ * Two live paths reach it. A model can answer with an empty completion — a
+ * content filter, a zero-token budget, a provider hiccup — and a model can ignore
+ * `tool_choice: "none"` and keep asking for tools on the pass that was supposed to
+ * force prose, whose calls this loop drops on the floor. Both used to end the turn
+ * with an assistant bubble containing nothing at all, which reads as the app being
+ * broken and gives the user nothing to act on. Saying so costs one sentence and is
+ * true in both cases.
+ */
+const EMPTY_TURN_NOTICE =
+  "The model finished without producing an answer. Try sending that again, or switch to another model if it keeps happening.";
+
+/**
  * Run one user turn to completion, executing whatever tools the model asks for.
  *
  * Falls straight through to a plain stream when the model cannot use tools
@@ -132,7 +154,8 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
   // No catalogue entry means a legacy id on a direct proxy, which has no tool
   // plumbing; no tool support means the provider would reject the payload.
   if (!spec || !supportsTools(modelId)) {
-    await generateRoutedResponse(messages, modelId, onChunk, signal, { deepThink });
+    const plain = await generateRoutedResponse(messages, modelId, onChunk, signal, { deepThink });
+    if (!plain.sawContent) onChunk(EMPTY_TURN_NOTICE);
     return { artifacts, steps: 0, hitStepLimit: false };
   }
 
@@ -154,7 +177,15 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
     });
 
     if (!result.toolCalls.length) {
-      return { artifacts, steps: step, hitStepLimit: false };
+      // The model answered. If it answered with nothing, say that rather than
+      // leaving the caller to render an empty bubble.
+      if (!result.sawContent) onChunk(EMPTY_TURN_NOTICE);
+      // `lastStep` here means the answer arrived on the pass where tools were
+      // withdrawn — the model had asked for tools on every step up to it. That is
+      // exactly the ceiling doing its job, and it is the common shape of it: only
+      // a provider that ignores `tool_choice: "none"` reaches the other exit
+      // below. Reporting false here left the one case worth logging invisible.
+      return { artifacts, steps: step, hitStepLimit: lastStep };
     }
 
     // A tool-calling step usually streams no prose, but some models narrate
@@ -228,11 +259,16 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
     if (lastStep) {
       // Tools ran on the final step, so their results were never shown to the
       // model. One more pass with no tools available turns them into an answer.
-      await generateRoutedResponse(working, modelId, onChunk, signal, {
+      const final = await generateRoutedResponse(working, modelId, onChunk, signal, {
         deepThink,
         tools: schemas,
         toolChoice: "none",
       });
+      // A provider that honours `tool_choice: "none"` cannot get here with tool
+      // calls; the ones that ignore it can, and this loop has no step left to run
+      // them in — so those calls are dropped, and if the same pass also produced no
+      // prose, nothing whatsoever was streamed for the whole turn.
+      if (!final.sawContent) onChunk(EMPTY_TURN_NOTICE);
       return { artifacts, steps: step + 1, hitStepLimit: true };
     }
   }

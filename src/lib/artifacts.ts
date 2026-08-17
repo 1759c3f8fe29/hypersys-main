@@ -66,14 +66,76 @@ function fingerprint(text: string): string {
  * same id the extractor did, and thus opens the right artifact rather than a
  * refactor's mismatch. Keep this aligned with the `code:` derivation inside
  * `extractArtifacts`.
+ *
+ * The normalisation here is what makes the two callers agree, and each line of it
+ * corresponds to an observed failure. The store hashes the raw assistant
+ * markdown; `CodeBlock` hashes the string react-markdown handed it, which has
+ * already been through a CommonMark parser. Where the parser normalises and a
+ * plain scanner does not, the ids diverge — and a diverged id is invisible: the
+ * button opens an id nothing matches, `ArtifactPanel` renders null, and the
+ * canvas appears docked but blank. So:
+ *
+ *   • line endings collapse to `\n` — a provider streaming CRLF otherwise leaves
+ *     a trailing `\r` on every line of the store's copy and none on the
+ *     renderer's;
+ *   • the language tag lowercases — a model writing ```Python hashes differently
+ *     from the same block described as `python`;
+ *   • trailing blank lines go — the renderer strips the newline before the
+ *     closing fence, the scanner does not always have one to strip.
+ *
+ * None of this touches displayed content; it only decides identity.
  */
 export function artifactIdForCode(language: string, content: string): string {
-  return `code:${fingerprint(language + ":" + content)}`;
+  const lang = (language || "text").toLowerCase();
+  const body = content.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+  return `code:${fingerprint(lang + ":" + body)}`;
+}
+
+/**
+ * Build the artifact for one fenced code block. Shared by the markdown scanner
+ * and by the "Open in canvas" click, so a block opened straight from the
+ * conversation is byte-for-byte the artifact the scanner would have made — the
+ * id, the title, and the history entry all come from here rather than from two
+ * hand-rolled object literals that drift apart on the next edit.
+ */
+export function codeArtifactFrom(
+  language: string,
+  content: string,
+  messageId: string,
+): Artifact {
+  const lang = (language || "text").toLowerCase();
+  return {
+    id: artifactIdForCode(lang, content),
+    language: lang,
+    kind: "code",
+    title: truncate(`${lang} block`, MAX_TITLE),
+    downloadable: false,
+    history: [{ content, messageId, version: 0 }],
+  };
 }
 
 function truncate(text: string, max = MAX_TITLE): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : flat.slice(0, max - 1) + "…";
+}
+
+/**
+ * Build the artifact for one generated file. Shared by the turn scanner and by the
+ * download chip's "open" click, for the same reason `codeArtifactFrom` is shared:
+ * a `file:` id assembled in two places drifts, and a drifted id opens nothing.
+ *
+ * Content starts empty on purpose — a pure function cannot read a blob URL. The
+ * panel fills it by fetching the object URL on open (`fetchFileText`).
+ */
+export function fileArtifactFrom(file: MessageFile, messageId: string): Artifact {
+  return {
+    id: `file:${file.filename}`,
+    language: extensionOf(file.filename) || "text",
+    kind: "file",
+    title: truncate(file.filename),
+    downloadable: true,
+    history: [{ content: "", messageId, version: 0 }],
+  };
 }
 
 /**
@@ -84,13 +146,21 @@ function truncate(text: string, max = MAX_TITLE): string {
  * Indented code blocks are intentionally ignored — they are rare in model
  * answers and ambiguous to detect robustly from prose, so rejecting them is the
  * conservative reading that keeps ordinary paragraphs out of the panel.
+ *
+ * Two normalisations here exist to match what the markdown renderer does, so the
+ * text (and therefore the id) is the same on both sides — see `artifactIdForCode`:
+ * line endings collapse to `\n`, and a fence's own indentation is removed from
+ * its body. The second one matters for any fence nested in a list item, which is
+ * how models format "step 2: run this": CommonMark strips up to the opening
+ * fence's indentation from each line, so keeping it would both mis-identify the
+ * block and show the code in the panel indented by two spaces that are not in it.
  */
 export function extractCodeBlocks(markdown: string): Array<{
   language: string;
   content: string;
   filename?: string;
 }> {
-  const lines = markdown.split("\n");
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
   const blocks: Array<{ language: string; content: string; filename?: string }> = [];
 
   let i = 0;
@@ -101,8 +171,17 @@ export function extractCodeBlocks(markdown: string): Array<{
       i++;
       continue;
     }
+    const indent = (fence[1] || "").length;
     const marker = fence[2];
     const lang = (fence[3] || "").toLowerCase();
+    // Strip at most the opening fence's indentation, per CommonMark: a line
+    // indented less than the fence keeps whatever it has rather than losing
+    // meaningful leading space.
+    const dedent = (text: string): string => {
+      let k = 0;
+      while (k < indent && (text[k] === " " || text[k] === "\t")) k++;
+      return text.slice(k);
+    };
     const body: string[] = [];
     let j = i + 1;
     let closed = false;
@@ -111,7 +190,7 @@ export function extractCodeBlocks(markdown: string): Array<{
         closed = true;
         break;
       }
-      body.push(lines[j]);
+      body.push(dedent(lines[j]));
       j++;
     }
     // An unclosed fence takes the rest of the document as its body — a model
@@ -160,29 +239,13 @@ export function extractArtifacts(
   // object URL on open, so the first version's content starts empty and fills
   // from the UI.
   for (const file of files) {
-    const ext = extensionOf(file.filename) || "text";
-    out.push({
-      id: `file:${file.filename}`,
-      language: ext,
-      kind: "file",
-      title: truncate(file.filename),
-      downloadable: true,
-      history: [{ content: "", messageId, version: 0 }],
-    });
+    out.push(fileArtifactFrom(file, messageId));
   }
 
   const blocks = extractCodeBlocks(markdown);
   for (const block of blocks) {
     if (!isSubstantialCodeBlock(block.content)) continue;
-    const id = artifactIdForCode(block.language, block.content);
-    out.push({
-      id,
-      language: block.language,
-      kind: "code",
-      title: truncate(`${block.language} block`, MAX_TITLE),
-      downloadable: false,
-      history: [{ content: block.content, messageId, version: 0 }],
-    });
+    out.push(codeArtifactFrom(block.language, block.content, messageId));
   }
 
   return out;

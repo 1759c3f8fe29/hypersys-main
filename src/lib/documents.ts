@@ -93,6 +93,10 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
   const doc = await pdfjs.getDocument({ data: buffer }).promise;
 
   const pages: string[] = [];
+  // Tracked rather than recomputed: `pages.join(...).length` inside the loop is
+  // quadratic, and the whole point of the early break is that this runs on
+  // 500-page files.
+  let size = 0;
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
@@ -101,11 +105,15 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
-    if (pageText) pages.push(`--- Page ${i} ---\n${pageText}`);
+    if (pageText) {
+      const block = `--- Page ${i} ---\n${pageText}`;
+      pages.push(block);
+      size += block.length + 2;
+    }
 
     // Stop early on very long PDFs; the cap would discard the rest anyway and
     // parsing every page of a 500-page file just to throw it away is wasteful.
-    if (pages.join("\n\n").length > MAX_CHARS_PER_DOC) break;
+    if (size > MAX_CHARS_PER_DOC) break;
   }
 
   return { text: pages.join("\n\n"), units: doc.numPages };
@@ -124,15 +132,40 @@ async function extractSpreadsheet(file: File): Promise<{ text: string; units: nu
   const wb = XLSX.read(buffer, { type: "array" });
 
   const sheets: string[] = [];
+  let size = 0;
   for (const name of wb.SheetNames) {
     // CSV rather than JSON: it carries the same information in far fewer
     // tokens, which matters when the whole point is fitting in a context window.
     const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name]);
-    if (csv.trim()) sheets.push(`--- Sheet: ${name} ---\n${csv.trim()}`);
-    if (sheets.join("\n\n").length > MAX_CHARS_PER_DOC) break;
+    if (csv.trim()) {
+      const block = `--- Sheet: ${name} ---\n${csv.trim()}`;
+      sheets.push(block);
+      size += block.length + 2;
+    }
+    if (size > MAX_CHARS_PER_DOC) break;
   }
 
   return { text: sheets.join("\n\n"), units: wb.SheetNames.length };
+}
+
+/**
+ * Decode the XML entities a `.pptx` body carries.
+ *
+ * The slide extractor below reads text straight out of the XML with a regex, and
+ * XML text nodes are escaped: a slide that reads "Q&A — 20% < 30%" is stored as
+ * `Q&amp;A — 20% &lt; 30%`. Without this the model is handed the escaped form and
+ * quotes it back that way, which is a wrong reading of the user's own document.
+ * `&amp;` is decoded last so `&amp;lt;` survives as the literal text `&lt;`.
+ */
+function decodeXmlEntities(text: string): string {
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&amp;/g, "&");
 }
 
 async function extractPptx(file: File): Promise<{ text: string; units: number }> {
@@ -149,14 +182,24 @@ async function extractPptx(file: File): Promise<{ text: string; units: number }>
     });
 
   const slides: string[] = [];
+  let size = 0;
   for (let i = 0; i < slidePaths.length; i++) {
     const xml = await zip.files[slidePaths[i]].async("string");
-    const text = (xml.match(/<a:t>([\s\S]*?)<\/a:t>/g) || [])
-      .map((m) => m.replace(/<\/?a:t>/g, ""))
-      .join(" ")
+    const text = decodeXmlEntities(
+      (xml.match(/<a:t>([\s\S]*?)<\/a:t>/g) || [])
+        .map((m) => m.replace(/<\/?a:t>/g, ""))
+        .join(" "),
+    )
       .replace(/\s+/g, " ")
       .trim();
-    if (text) slides.push(`--- Slide ${i + 1} ---\n${text}`);
+    if (text) {
+      const block = `--- Slide ${i + 1} ---\n${text}`;
+      slides.push(block);
+      size += block.length + 2;
+    }
+    // Same early break as the other long formats: a 300-slide deck is past the
+    // cap long before the last slide, and unzipping the rest is wasted work.
+    if (size > MAX_CHARS_PER_DOC) break;
   }
 
   return { text: slides.join("\n\n"), units: slidePaths.length };

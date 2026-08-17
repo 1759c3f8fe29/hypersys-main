@@ -550,12 +550,32 @@ export default defineConfig(({ mode }) => {
   // (SerpApi, NVIDIA, Mistral). "" prefix loads ALL vars, not just VITE_*.
   PROXY_ENV = loadEnv(mode, process.cwd(), "");
 
+  // Desktop shell (`desktop:dev` loads http://localhost:8080, same-origin to
+  // the proxy — base irrelevant there): `desktop:build` packages dist/ to be
+  // loaded from file:// via Electron's loadFile. Asset links must be relative
+  // ("./") so a file:// origin resolves <script src="/assets/x.js"> into the
+  // filesystem root instead of the bundle dir. The web build keeps base "/", so
+  // this is mode-gated and does not regress the Vercel deploy. "desktop" mode is
+  // requested by the `desktop:build` script with `--mode desktop`; `desktop:dev`
+  // does NOT set it (same-origin dev keeps "/").
+  const isDesktopBuild = mode === "desktop";
+
   return {
+  base: isDesktopBuild ? "./" : "/",
   server: {
     host: "::",
     port: 8080,
     hmr: {
       overlay: false,
+    },
+    watch: {
+      // electron-builder writes its output (linux-unpacked/, the AppImage, an
+      // extracted asar — ~600 MB) into release/ inside the project root, and the
+      // dev server would otherwise watch all of it: running `desktop:dev` after a
+      // `desktop:build` spams "page reload release/.../LICENSES.chromium.html"
+      // and burns file handles on packaged bytes that are not sources. dist/ is
+      // build output for the same reason.
+      ignored: ["**/release/**", "**/dist/**"],
     },
     // NOTE: The localApiProxy() plugin handles /api/* routes directly —
     // no need for the external Firebase emulator proxy anymore.

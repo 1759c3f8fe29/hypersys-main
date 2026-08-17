@@ -11,6 +11,30 @@ import {
 } from "./providers";
 
 // ---------------------------------------------------------------------------
+// API base — same-origin on the web, absolute on the desktop shell
+// ---------------------------------------------------------------------------
+//
+// The web build (Vercel) co-locates the /api/* handlers on the same origin, so
+// a bare "/api/llm" is correct and CORS is never a question. The native desktop
+// shell is a different case:
+//
+//   - desktop:dev loads the renderer from http://localhost:8080, which is the
+//     Vite dev server — the /api/* middleware runs on that same origin, so the
+//     calls stay same-origin and base is still "" (unchanged).
+//   - desktop:build loads dist/index.html from file://, where there is no origin
+//     to be same-origin with. The build sets VITE_API_BASE to the deployed
+//     Vercel origin so the four /api/* calls reach https://myflyer.vercel.app.
+//     See electron/main.cjs for the Origin-header rewrite that lets file://
+//     requests through the production API's origin allowlist.
+//
+// Unset VITE_API_BASE (the normal web/dev case) → the helper is a passthrough,
+// so this changes nothing about the existing Vercel deploy.
+const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
+export function apiPath(p: string): string {
+  return API_BASE ? `${API_BASE}${p}` : p;
+}
+
+// ---------------------------------------------------------------------------
 // Legacy model → provider ID mapping
 // ---------------------------------------------------------------------------
 //
@@ -247,6 +271,11 @@ export interface ChatMessage {
 export interface StreamResult {
   toolCalls: ToolCall[];
   finishReason?: string;
+  /**
+   * Whether any text reached `onChunk` — including the reasoning fallback, which
+   * streams a thinking-only reply as the answer. Read it as "the caller has
+   * something to show", not as "a `content` delta arrived".
+   */
   sawContent: boolean;
 }
 
@@ -327,7 +356,7 @@ export async function generateRoutedResponse(
     if (byokHeader && userKey) headers[byokHeader] = userKey;
   }
 
-  const response = await fetch("/api/llm", {
+  const response = await fetch(apiPath("/api/llm"), {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -404,7 +433,7 @@ async function generateNvidiaChatResponse(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (userKey) headers["X-Nvidia-Api-Key"] = userKey;
 
-  const response = await fetch("/api/nvidia", {
+  const response = await fetch(apiPath("/api/nvidia"), {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -518,7 +547,7 @@ async function generateMistralResponse(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (userKey) headers["X-Mistral-Api-Key"] = userKey;
 
-  const response = await fetch("/api/mistral", {
+  const response = await fetch(apiPath("/api/mistral"), {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -550,7 +579,46 @@ async function generateMistralResponse(
   await pumpOpenAiStream(response, onChunk);
 }
 
-async function pumpOpenAiStream(
+/**
+ * Which accumulator slot a streamed tool-call fragment belongs to.
+ *
+ * Exported for tests: the reassembly is the one place where a provider quirk
+ * turns a correct model output into a tool error the user sees, and there is no
+ * way to exercise it from outside without a live stream.
+ */
+export function slotIndexFor(
+  call: { index?: unknown; id?: string },
+  pending: Map<number, unknown>,
+  slotForId: Map<string, number>,
+  openSlot: number,
+): number {
+  if (typeof call.index === "number") {
+    if (call.id) slotForId.set(call.id, call.index);
+    return call.index;
+  }
+  if (call.id) {
+    const known = slotForId.get(call.id);
+    if (known !== undefined) return known;
+    let fresh = pending.size;
+    while (pending.has(fresh)) fresh += 1;
+    slotForId.set(call.id, fresh);
+    return fresh;
+  }
+  // Arguments-only continuation: it extends whichever call is open.
+  return openSlot;
+}
+
+/**
+ * Turn one OpenAI-compatible SSE response into streamed text plus whatever tool
+ * calls it contained.
+ *
+ * Exported for tests. All three providers funnel through here, so a reassembly
+ * bug is a bug in every model at once, and the failure mode is quiet: the model
+ * asked for two tools and the loop reports malformed arguments. A fake Response
+ * over a ReadableStream exercises it exactly as the network does, including the
+ * part that actually breaks — fragments split at arbitrary byte boundaries.
+ */
+export async function pumpOpenAiStream(
   response: Response,
   onChunk: (text: string) => void,
 ): Promise<StreamResult> {
@@ -564,9 +632,17 @@ async function pumpOpenAiStream(
 
   // Tool calls arrive fragmented: the id and name land in the first delta for an
   // index, then `arguments` streams in as a run of partial JSON strings that
-  // must be concatenated in arrival order before they parse. Keyed by index
-  // because a model may open several calls in one turn and interleave them.
+  // must be concatenated in arrival order before they parse.
+  //
+  // `index` is the key when the provider sends one, and most do. Not all: a
+  // delta carrying only an `id` has to open its own slot, or two calls collapse
+  // into one whose `args` is the concatenation of two JSON documents — which
+  // parses as nothing, so the model sees "arguments were not valid JSON" for a
+  // call it wrote correctly. A delta with neither id nor index is an arguments
+  // continuation and belongs to the slot that is currently open.
   const pending = new Map<number, { id: string; name: string; args: string }>();
+  const slotForId = new Map<string, number>();
+  let openSlot = 0;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -594,7 +670,8 @@ async function pumpOpenAiStream(
         // look like it silently ignored the request.
         if (Array.isArray(delta?.tool_calls)) {
           for (const call of delta.tool_calls) {
-            const index = typeof call.index === "number" ? call.index : 0;
+            const index = slotIndexFor(call, pending, slotForId, openSlot);
+            openSlot = index;
             const slot = pending.get(index) ?? { id: "", name: "", args: "" };
             if (call.id) slot.id = call.id;
             if (call.function?.name) slot.name = call.function.name;
@@ -628,10 +705,14 @@ async function pumpOpenAiStream(
   // deliberation about which tool to call as if it were the answer.
   const toolCalls = [...pending.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([, slot]) => slot)
-    .filter((slot) => slot.name)
-    .map((slot) => ({
-      id: slot.id || `call_${slot.name}`,
+    .filter(([, slot]) => slot.name)
+    .map(([index, slot]) => ({
+      // The fallback carries the index. Without it, two calls to the same tool
+      // in one step — "search these two things" — both become `call_web_search`,
+      // and the loop then answers two calls with two tool messages sharing one
+      // tool_call_id: providers reject that, and the ones that don't may pair the
+      // wrong result with the wrong call.
+      id: slot.id || `call_${index}_${slot.name}`,
       name: slot.name,
       // Left as a raw string: the executor parses it and needs to report a
       // malformed payload back to the model rather than throw here.
@@ -640,7 +721,17 @@ async function pumpOpenAiStream(
 
   // Some reasoning models spend their whole budget in `reasoning_content` and
   // never emit `content`. Surface the thinking rather than an empty answer.
-  if (!sawContent && !toolCalls.length && reasoning) onChunk(reasoning);
+  //
+  // `sawContent` is set with it, because the flag answers "did text reach the
+  // caller" — not "did a `content` delta arrive". The distinction is invisible
+  // until something acts on the answer: the agent loop uses this flag to decide a
+  // turn produced nothing and needs a stand-in message, and a reasoning-only reply
+  // that left the flag false would get that message appended under the thinking it
+  // had just streamed.
+  if (!sawContent && !toolCalls.length && reasoning) {
+    onChunk(reasoning);
+    sawContent = true;
+  }
 
   return { toolCalls, finishReason, sawContent };
 }
@@ -781,17 +872,39 @@ export async function craftVisionPrompt(
 // `buildImagePrompt` below, which does the same intent-aware enrichment locally
 // with no model call at all.
 
-// Image-model fallback order: the requested model first, then 2 proven
-// alternates. If a Pollinations model 500s / times out (a model can go down or
-// get gated to the paid tier), the next one is tried so generation still
-// succeeds. "flux" (quality) → "turbo" (fast) → "stable-diffusion" (baseline).
+// Image-model id mapping. `pollinationsModelFor` translates a legacy or
+// catalogue id (sana, sdxl-turbo, flux-schnell) into a name the endpoint
+// recognises, and the constants below are the names known to be live.
+//
+// This is NOT a retry chain, despite reading like one: the URL below is handed
+// straight to an <img>, so nothing here ever observes a failure and there is no
+// point at which a second name could be tried. Only element [0] is used. A real
+// retry lives where the failure is actually visible — the <img> onError in
+// components/chat/ChatMessage.tsx. Kept as a list because the mapping still needs
+// a fallback for an id with no Pollinations equivalent.
 const IMAGE_MODEL_FALLBACKS = ["flux", "turbo", "stable-diffusion"];
 
 function imageFallbackChain(modelId: string): string[] {
   const primary = pollinationsModelFor(modelId);
-  // Primary first, then the standard fallbacks, de-duplicated.
+  // Primary first, then the known-live names, de-duplicated.
   return [...new Set([primary, ...IMAGE_MODEL_FALLBACKS])];
 }
+
+/**
+ * How much of the prompt reaches the endpoint.
+ *
+ * This used to be 250, which quietly undid the instruction it was paired with:
+ * `generate_image`'s schema asks the model for a 40-110 word prompt, and 250
+ * characters cuts that off around word 40 — so the composition, lighting and
+ * medium the model was told to specify were dropped from every single image, and
+ * the schema's claim that truncation happens "in the text encoder" was false
+ * because it happened here first.
+ *
+ * Measured against the live endpoint: 387 chars → 3.0s, 697 → 7.4s, and every
+ * probe from ~1000 chars up sat at ~45s. 700 keeps the whole prompt for the word
+ * count the schema asks for while staying in the band that returns promptly.
+ */
+const MAX_IMAGE_PROMPT_CHARS = 700;
 
 export async function generateImageResponse(
   prompt: string,
@@ -800,19 +913,28 @@ export async function generateImageResponse(
   signal?: AbortSignal,
 ): Promise<{ imageDataUrl: string; message: string }> {
   const fullPrompt = (prompt || "").trim() || buildImagePrompt("");
+  // No fetch happens here, so there is nothing to cancel. Stop still works: the
+  // turn's abort tears down the agent loop around this call, and the <img> that
+  // loads the URL is unmounted with the message.
   void signal;
 
   // Pollinations direct URL via img tag. We skip POST since it is frequently
   // blocked by CORS or AdBlockers; the direct URL loads perfectly in an <img>
-  // tag without needing JS fetch.
+  // tag without needing JS fetch — and loads *progressively*, so the reply's
+  // text arrives while the pixels are still generating instead of the whole turn
+  // blocking on a request that can take 45 seconds.
   //
   // NVIDIA NIM's genai image path was removed in 3.6 — the /v1/genai/* endpoint
   // 404s for every model even with a valid key, so there is no NVIDIA leg to
-  // try. modelId still feeds the fallback chain below so a caller that passes a
-  // legacy id (sana, sdxl-turbo) still lands on a live Pollinations model.
+  // try. modelId still feeds the mapping below so a caller that passes a legacy
+  // id (sana, sdxl-turbo) still lands on a live Pollinations model.
+  //
+  // `_images` is unused and cannot be otherwise: the endpoint takes a prompt in
+  // a URL path and has no img2img leg, so there is nowhere to put a reference
+  // image. Editing an uploaded photo needs a provider that accepts one.
 
-  const condensedPrompt = fullPrompt.length > 250
-    ? fullPrompt.slice(0, 247).replace(/\s+\S*$/, "") + "..."
+  const condensedPrompt = fullPrompt.length > MAX_IMAGE_PROMPT_CHARS
+    ? fullPrompt.slice(0, MAX_IMAGE_PROMPT_CHARS - 3).replace(/\s+\S*$/, "") + "..."
     : fullPrompt;
   const encoded = encodeURIComponent(condensedPrompt);
 

@@ -3,6 +3,12 @@
 // ---------------------------------------------------------------------------
 // The browser calls our Firebase Function at /api/search; the key stays
 // server-side. Used to ground answers to time-sensitive / factual questions.
+//
+// `apiPath` (from ai.ts) routes /api/search through the deployed Vercel origin
+// when running inside the native desktop shell (file:// origin); on the web it
+// is a passthrough, preserving the same-origin call.
+
+import { apiPath } from "./ai";
 
 export interface SearchResult {
   title: string;
@@ -22,7 +28,7 @@ export interface SearchResponse {
   error?: string;
 }
 
-const SEARCH_PROXY_URL = "/api/search";
+const SEARCH_PROXY_PATH = "/api/search";
 
 // ---------------------------------------------------------------------------
 // What used to be here
@@ -35,12 +41,14 @@ const SEARCH_PROXY_URL = "/api/search";
 // A regex could only ever guess from the wording — it searched for "write a
 // story about the 2027 election" and skipped "how much is a Switch 2".
 //
-// `webSearch` and `buildSearchContext` below are the live path: the tool
-// executor in src/lib/tools/web-search.ts calls both.
+// `webSearch` below is the live path for both callers: the tool executor in
+// src/lib/tools/web-search.ts (the agent loop) and Chat.tsx's Search-toggle
+// fallback for models that cannot call tools at all. `buildSearchContext` is
+// only the second of those — the tool hands the model structured rows instead.
 
 export async function webSearch(query: string, signal?: AbortSignal): Promise<SearchResponse | null> {
   try {
-    const res = await fetch(SEARCH_PROXY_URL, {
+    const res = await fetch(apiPath(SEARCH_PROXY_PATH), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, num: 6 }),
@@ -61,6 +69,11 @@ export async function webSearch(query: string, signal?: AbortSignal): Promise<Se
 /**
  * Format search results as a compact system-context string the model can cite.
  * Returns null when there is nothing useful to add.
+ *
+ * Defensive about the response shape on purpose: this reads whatever
+ * `/api/search` returned, and a proxy that failed hard can answer `{error}` with
+ * no `results` key at all. `results.forEach` on that throws a TypeError, which
+ * the caller would then report as a failed *turn* rather than a failed search.
  */
 export function buildSearchContext(search: SearchResponse | null): string | null {
   if (!search) return null;
@@ -70,8 +83,9 @@ export function buildSearchContext(search: SearchResponse | null): string | null
     parts.push(`Featured answer: ${search.answerBox.answer}`);
   }
 
-  search.results.forEach((r, i) => {
-    if (!r.title && !r.snippet) return;
+  const results = Array.isArray(search.results) ? search.results : [];
+  results.forEach((r, i) => {
+    if (!r?.title && !r?.snippet) return;
     const dated = r.date ? ` (${r.date})` : "";
     parts.push(`[${i + 1}] ${r.title}${dated}\n${r.snippet}\nSource: ${r.link}`);
   });
@@ -80,8 +94,14 @@ export function buildSearchContext(search: SearchResponse | null): string | null
 
   return [
     "You have access to the following up-to-date web search results.",
-    "Use them to answer the user's question accurately and cite sources inline . where relevant.",
+    "Use them to answer the user's question accurately, and cite sources inline where relevant.",
     "If the results do not contain the answer, say so rather than guessing.",
+    // A provider can fail after another one succeeded, so results and an error
+    // are not mutually exclusive. Saying so is the difference between an answer
+    // the model knows is partial and one it presents as complete.
+    ...(search.error
+      ? [`Note: part of the search failed (${search.error}), so these results may be incomplete.`]
+      : []),
     "",
     `Web results for "${search.query}":`,
     "",

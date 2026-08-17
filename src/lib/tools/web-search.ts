@@ -82,11 +82,19 @@ export async function executeWebSearch(
   // the artifacts while the model gets the condensed, citable form. Appended,
   // not assigned: the model is told to prefer two narrow searches over one broad
   // one, and overwriting would leave the user's chips showing only the last.
+  //
+  // `seen` is updated as the batch is walked, not just seeded from the previous
+  // one. An engine that returns the same URL twice in a single response — the
+  // same article surfacing in both the news block and the organic block — would
+  // otherwise pass the filter twice and show the user two identical chips.
   const seen = new Set((ctx.artifacts.sources || []).map((r) => r.link));
-  ctx.artifacts.sources = [
-    ...(ctx.artifacts.sources || []),
-    ...results.filter((r) => r.link && !seen.has(r.link)),
-  ];
+  const fresh: SearchResult[] = [];
+  for (const r of results) {
+    if (!r.link || seen.has(r.link)) continue;
+    seen.add(r.link);
+    fresh.push(r);
+  }
+  ctx.artifacts.sources = [...(ctx.artifacts.sources || []), ...fresh];
   if (search.related?.length && !ctx.artifacts.followUps?.length) {
     ctx.artifacts.followUps = search.related.filter(Boolean).slice(0, 3);
   }

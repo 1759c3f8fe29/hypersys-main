@@ -1,24 +1,28 @@
 // ---------------------------------------------------------------------------
-// run_code tool (Part G) — execute Python in the browser via Pyodide.
+// run_code tool (Part G) — stage Python for the user to run.
 // ---------------------------------------------------------------------------
-// This is the highest-leverage anti-hallucination feature in the brief: instead
-// of guessing at arithmetic, dates, or a pandas transform, the model runs it.
-// The actual interpreter lives in a Web Worker (src/lib/pyodide/) so the chat
-// UI never blocks and model runs are isolated from each other.
+// EXECUTION IS USER-GATED. This tool does not start the interpreter. It hands the
+// script to the UI, which renders it with a Run button beside Copy, and Python
+// runs when the user presses it — see components/chat/CodeRunner.tsx, the only
+// path in the app that reaches the Pyodide worker.
 //
-// What the model sees vs. what the UI sees follows the ToolArtifacts contract
-// (tools/types.ts): the model gets a SENTENCE — "computed; 2 charts and 1 csv
-// produced" — never the base64/PNG payloads, which would burn context on bytes
-// a text model can't read anyway. The images and downloads are pushed onto
-// ctx.artifacts, which the agent loop hands to the message for rendering.
+// That gate is a product decision, not a limitation to work around: model-written
+// code should be something a person reads and chooses to execute. The mechanism
+// still matters for correctness though, because it inverts the tool's contract:
 //
-// Failure is a result, not an exception (the central rule of tools/types.ts):
-// a Python traceback, a missing package, or a timeout all become {ok:false}
-// with stderr the model can read, react to, and explain. Only AbortError (the
-// user pressing stop) propagates, taking the whole turn down — which is what
-// stop should do.
+//   • The model gets NO OUTPUT. The run happens after its turn has ended, so
+//     there is nothing to report back and nothing to reason over. The tool result
+//     says exactly that, in those words, because the alternative failure is one
+//     this codebase has actually observed — a model that believed it had run
+//     something reported `H=5a3f7c8d9e1b2c4d` against a true `H=e03af03befe2b7bb`.
+//     prompts.ts carries the matching instruction; the two must stay in step.
+//   • ctx.artifacts.codeRuns therefore carries `{ code, status: "pending" }` and
+//     never stdout — the message renders a runnable block, not a transcript.
+//
+// Validation still belongs here (a script too large to be useful should be
+// rejected while the model can still fix it, not at click time), and failure is
+// still a result rather than an exception, per the central rule in tools/types.ts.
 
-import { runCode } from "@/lib/pyodide/bridge";
 import type { ToolResult, ToolContext } from "./types";
 import { asString } from "./types";
 import type { ToolSchema } from "@/lib/ai";
@@ -32,26 +36,28 @@ export const RUN_CODE_SCHEMA: ToolSchema = {
   function: {
     name: "run_code",
     description:
-      "Execute Python 3 code in an in-browser sandbox (Pyodide) and return stdout, stderr, and any matplotlib figures. " +
-      "Use this for anything the model should compute rather than guess: arithmetic, statistics, date arithmetic, " +
-      "data loading and transformation (pandas is available), and charts (matplotlib). " +
-      "Pre-installed packages: numpy, pandas, matplotlib, scipy, sympy, plus anything pip-installable that is a " +
-      "pure-Python wheel.\n\n" +
-      "Print results you want the user to read — captured stdout comes back verbatim. numPy/matplotlib figures are " +
-      "captured automatically; you do not need to save them. Any pandas DataFrame left in the module scope at the " +
-      "end of the run is exported as a CSV the user can download, so `df = pd.read_csv(...)` alone is useful. " +
-      "Keep runs short (under ~10s); a run that loops forever is killed.\n\n" +
-      "Do NOT use this for text generation, web requests, or anything you can answer directly — it exists to " +
-      "compute, not to substitute for reasoning.",
+      "Offer Python 3 code to the user as a runnable block. The code is NOT executed when you call this tool: it " +
+      "appears in the chat with a Run button next to Copy, and only the user's click executes it, in an in-browser " +
+      "Pyodide sandbox with numpy, pandas, matplotlib, scipy and sympy available.\n\n" +
+      "Because execution happens after your turn ends, YOU NEVER RECEIVE THE OUTPUT. Do not write what the code " +
+      "would print, do not report a computed value, and do not claim to have run anything. Say what the script " +
+      "does and that the user can press Run. If a question turns on a number you cannot work out reliably yourself, " +
+      "stage the code that computes it and say the value comes from running it.\n\n" +
+      "Use this whenever executable code is genuinely useful: a calculation the user should be able to verify or " +
+      "re-run with their own inputs, a data transformation, a chart, a simulation. Print results so the run shows " +
+      "something (captured stdout is displayed verbatim), and keep scripts self-contained — each run starts a fresh " +
+      "interpreter with no state from any earlier one. matplotlib figures are captured and shown automatically, and " +
+      "any pandas DataFrame left in module scope is offered as a CSV download.\n\n" +
+      "Do NOT use it for text generation, web requests, or anything you can answer directly in prose.",
     parameters: {
       type: "object",
       properties: {
         code: {
           type: "string",
           description:
-            "The complete Python 3 program to run. It executes in a fresh interpreter each call, so state does " +
-            "not carry between calls — re-import and re-load data every time. Put the full script here, not a " +
-            "snippet that depends on earlier calls.",
+            "The complete Python 3 program to offer. It must stand alone: a fresh interpreter runs it, so import " +
+            "and load everything it needs. The user reads this before running it, so keep it clear and commented " +
+            "where the intent is not obvious.",
         },
       },
       required: ["code"],
@@ -69,46 +75,21 @@ export async function executeRunCode(
     return { ok: false, error: `run_code: code is ${code.length} bytes; the cap is ${MAX_CODE_BYTES}. Trim or split the script.` };
   }
 
-  try {
-    const result = await runCode(code, { signal: ctx.signal });
-    if (!result.ok) {
-      // A Pyodide/worker failure (not a Python traceback — those come back as
-      // ok:true with stderr set). Still a result: the model can read it.
-      return { ok: false, error: `run_code failed: ${result.stderr || "unknown worker error"}` };
-    }
+  // Stage it. No worker is spawned, nothing is interpreted, and the only side
+  // effect is the runnable block the message will render.
+  ctx.artifacts.codeRuns = [
+    ...(ctx.artifacts.codeRuns ?? []),
+    { code, language: "python", status: "pending" },
+  ];
 
-    // Push the painted outputs to the UI-only side channel.
-    const images = result.images ?? [];
-    const files = result.files ?? [];
-    if (images.length || files.length) {
-      ctx.artifacts.images = [...(ctx.artifacts.images ?? []), ...images];
-      ctx.artifacts.files = [...(ctx.artifacts.files ?? []), ...files];
-    }
-    ctx.artifacts.codeRuns = [
-      ...(ctx.artifacts.codeRuns ?? []),
-      { stdout: result.stdout, stderr: result.stderr, images },
-    ];
-
-    // The model gets a compact sentence — never the bytes.
-    const parts: string[] = [];
-    if (result.stdout) parts.push(`stdout:\n${truncateForModel(result.stdout)}`);
-    if (result.stderr) parts.push(`stderr:\n${truncateForModel(result.stderr)}`);
-    parts.push(
-      images.length ? `${images.length} matplotlib figure${images.length > 1 ? "s" : ""} captured` : "no figures",
-      files.length ? `${files.length} dataset export${files.length > 1 ? "s" : ""} prepared (${files.map((f) => f.filename).join(", ")})` : "no dataset exports",
-    );
-    return { ok: true, summary: parts.join("\n"), stdout: truncateForModel(result.stdout || "") };
-  } catch (err) {
-    // AbortError is the one exception that must propagate (stop = stop).
-    if (err instanceof Error && err.name === "AbortError") throw err;
-    const detail = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `run_code error: ${detail}` };
-  }
-}
-
-// Cap what we echo to the model so a runaway `print(df)` on a million-row
-// frame doesn't swamp the next request's context window.
-function truncateForModel(s: string, max = 4000): string {
-  if (s.length <= max) return s;
-  return `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`;
+  return {
+    ok: true,
+    staged: true,
+    executed: false,
+    summary:
+      "Staged for the user to run. The code has NOT executed and produced no output: it is displayed in the chat " +
+      "with a Run button beside Copy, and only the user's click will run it. You have no stdout, no values, and no " +
+      "figures from it. Describe what the script does and tell the user they can press Run — do not state or guess " +
+      "any result it would produce.",
+  };
 }

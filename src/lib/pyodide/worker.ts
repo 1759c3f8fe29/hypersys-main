@@ -25,13 +25,35 @@
 //     If the run exceeds the deadline we terminate self; the main thread will
 //     also terminate on abort, but this catches the case where nobody aborted
 //     and the model's code wedged the worker.
+//   - The watchdog covers ONLY the user's code, never the boot. Booting means
+//     pulling ~10 MB of WASM off a CDN, which on a slow link takes minutes; a
+//     single budget spanning both makes every first call fail on a slow network
+//     and reports it as if the Python had hung.
+//
+// PACKAGE LOADING IS LAZY
+//   Booting used to eagerly loadPackage(["micropip","matplotlib"]). matplotlib
+//   pulls numpy, pillow, fonts and more — tens of MB — so every run, including
+//   `print(2+2)`, paid for a plotting stack it never used. On a ~100 KB/s link
+//   that is minutes of download before any code runs, which is indistinguishable
+//   from a hang. Packages are now loaded only when the submitted code actually
+//   references them; a plotting run pays for matplotlib, an arithmetic run
+//   doesn't.
+//
+//   Which packages a snippet needs is decided by Pyodide's own
+//   `loadPackagesFromImports`, not by a keyword regex. The regex this replaced
+//   knew four names — matplotlib, micropip, numpy, pandas — so `import sympy`,
+//   `import scipy`, `from sklearn...`, `from PIL import Image` all raised
+//   ModuleNotFoundError for packages the Pyodide distribution ships and would
+//   have loaded on request. To the model that reads as a broken sandbox, and its
+//   usual recovery is to stop using the tool and compute the answer in prose,
+//   which is the exact failure run_code exists to prevent.
 
 /// <reference lib="webworker" />
 
 // Pyodide is loaded from the CDN at runtime — the worker bundles no wheels.
 // `self.importScripts` pulls the bootstrap, which defines `loadPyodide` global.
 const PYODIDE_VERSION = "0.26.4";
-const PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v0.26.4/full/`;
+const PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
 
 let pyodide: any = null;
 let pyodideReady: Promise<any> | null = null;
@@ -40,21 +62,48 @@ let pyodideReady: Promise<any> | null = null;
 let stdoutBuf = "";
 let stderrBuf = "";
 
-async function ensurePyodide(): Promise<any> {
-  if (pyodide) return pyodide;
-  if (pyodideReady) return pyodideReady;
-  pyodideReady = (async () => {
-    // importScripts is sync; the CDN script defines global loadPyodide.
-    (self as any).importScripts(`${PYODIDE_CDN}pyodide.js`);
-    const load = (self as any).loadPyodide;
-    pyodide = await load({ indexURL: PYODIDE_CDN });
-    // matplotlib + micropip (micropip lets the model pip-install pure-Python
-    // wheels if it needs something we didn't pre-bundle). Both ship in Pyodide.
-    await pyodide.loadPackage(["micropip", "matplotlib"]);
-    // Patch matplotlib to use the Agg backend (no display) and auto-capture
-    // figures. We evaluate this once into __main__ so every run inherits it.
-    pyodide.runPython(`
-import io, base64, sys, matplotlib
+// Core bootstrap: output capture plus the per-run reset hook. Deliberately
+// imports nothing heavier than `sys` — see "PACKAGE LOADING IS LAZY" above.
+//
+// __KEEP is the set of names that survive a reset, snapshotted after everything
+// this bootstrap defines. Anything the user's code binds falls outside it and is
+// deleted before the next run, which is what makes reusing one interpreter
+// equivalent to a fresh one from the model's point of view.
+const CORE_BOOTSTRAP = `
+import sys
+
+# Redirect stdout/stderr into buffers the host reads back.
+class _Buf:
+    def __init__(self): self.buf = ""
+    def write(self, s): self.buf += s; return len(s)
+    def flush(self): pass
+__stdout = _Buf(); __stderr = _Buf()
+sys.stdout = __stdout
+sys.stderr = __stderr
+
+# Replaced by MPL_BOOTSTRAP once a run actually needs plotting. Defined here so
+# the host can call it unconditionally without knowing whether matplotlib loaded.
+def __capture_figures():
+    return []
+
+def __reset_run():
+    g = globals()
+    for k in [k for k in g if k not in __KEEP]:
+        del g[k]
+    __stdout.buf = ""
+    __stderr.buf = ""
+    # User code is free to rebind sys.stdout; put our capture back.
+    sys.stdout = __stdout
+    sys.stderr = __stderr
+
+__KEEP = set(globals().keys()) | {"__KEEP"}
+`;
+
+// Loaded only when the submitted code references plotting. Overrides the no-op
+// __capture_figures and extends __KEEP so a reset doesn't delete the names this
+// bootstrap just paid tens of MB to import.
+const MPL_BOOTSTRAP = `
+import io, base64, matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -70,18 +119,69 @@ def __capture_figures():
     plt.close("all")
     return outs
 
-# Redirect stdout/stderr into buffers the host reads back.
-class _Buf:
-    def __init__(self): self.buf = ""
-    def write(self, s): self.buf += s; return len(s)
-    def flush(self): pass
-__stdout = _Buf(); __stderr = _Buf()
-sys.stdout = __stdout
-sys.stderr = __stderr
-`);
+__KEEP |= {"io", "base64", "matplotlib", "plt", "__capture_figures"}
+`;
+
+let mplLoaded = false;
+
+/**
+ * Load whatever this snippet imports, once per worker lifetime.
+ *
+ * `loadPackagesFromImports` parses the code with Python's own tokenizer and maps
+ * the imports it finds onto the distribution's wheels, so it covers every package
+ * Pyodide ships and skips the ones it doesn't. Already-loaded packages are a
+ * no-op, which is what makes this safe to call on every run.
+ */
+async function ensurePackages(code: string): Promise<void> {
+  try {
+    await pyodide.loadPackagesFromImports(code);
+  } catch {
+    // Two cases, neither worth failing the run over: the snippet does not parse
+    // (the run itself will report the SyntaxError, which is a better message than
+    // anything this could say), or a wheel could not be fetched (the import then
+    // raises ModuleNotFoundError, which is legible and actionable).
+  }
+  // The plotting shim can only be installed once matplotlib is actually present.
+  // Asking Pyodide what it loaded is the only reliable test — the import that
+  // pulled it in may have been `seaborn` or `pandas.plotting`, not `matplotlib`.
+  if (!mplLoaded && !!pyodide.loadedPackages?.matplotlib) {
+    pyodide.runPython(MPL_BOOTSTRAP);
+    mplLoaded = true;
+  }
+}
+
+async function ensurePyodide(): Promise<any> {
+  if (pyodide) return pyodide;
+  if (pyodideReady) return pyodideReady;
+  pyodideReady = (async () => {
+    // importScripts is sync; the CDN script defines global loadPyodide.
+    (self as any).importScripts(`${PYODIDE_CDN}pyodide.js`);
+    const load = (self as any).loadPyodide;
+    pyodide = await load({ indexURL: PYODIDE_CDN });
+    pyodide.runPython(CORE_BOOTSTRAP);
     return pyodide;
   })();
   return pyodideReady;
+}
+
+/**
+ * Convert a value returned by runPython into plain JS, releasing the proxy.
+ *
+ * Pyodide hands back a PyProxy for every non-primitive — a list included — and a
+ * PyProxy is neither structured-cloneable nor an Array. Both mistakes are easy
+ * and neither is loud: postMessage()ing one throws "could not be cloned" and
+ * kills the run, while Array.isArray() on one is simply false, so a result gets
+ * dropped with no error at all. Everything crossing the Python→JS boundary goes
+ * through here.
+ */
+function toJs<T>(value: any, fallback: T): T {
+  if (value == null) return fallback;
+  if (typeof value.toJs !== "function") return value as T;
+  try {
+    return value.toJs({ create_pyproxies: false }) as T;
+  } finally {
+    value.destroy?.();
+  }
 }
 
 // Bytes→data-URL for any binary the model wrote (CSV/JSON datasets etc.).
@@ -98,7 +198,8 @@ function exportDataFrames(): Array<{ filename: string; url: string; mimeType: st
   try {
     // Scans the __main__ module dict for pandas DataFrames; returns
     // [[name, csvString], ...]. No private vars (leading underscore).
-    const found = pyodide.runPython(`
+    const found = toJs<Array<[string, string]>>(
+      pyodide.runPython(`
 import sys
 _outs = []
 try:
@@ -112,7 +213,9 @@ try:
 except Exception:
     pass
 _outs
-`);
+`),
+      [],
+    );
     const out: Array<{ filename: string; url: string; mimeType: string }> = [];
     if (Array.isArray(found)) {
       for (const [name, csv] of found) {
@@ -120,7 +223,6 @@ _outs
         out.push({ filename: name, url: bytesToDataUrl(bytes, "text/csv"), mimeType: "text/csv" });
       }
     }
-    found?.destroy?.();
     return out;
   } catch {
     return [];
@@ -129,8 +231,16 @@ _outs
 
 async function runCode(code: string, timeoutMs: number): Promise<void> {
   await ensurePyodide();
+  await ensurePackages(code);
+  // Boot is over: everything from here is the user's code, so the host can stop
+  // allowing a multi-minute download budget and start enforcing the (much
+  // shorter) execution deadline.
+  (self as any).postMessage({ type: "booted" });
 
-  // Reset capture buffers for this run.
+  // Clear whatever the previous run left in __main__ and re-arm output capture.
+  // This is what lets one interpreter serve many runs without the model seeing
+  // another run's variables.
+  pyodide.runPython("__reset_run()");
   stdoutBuf = "";
   stderrBuf = "";
 
@@ -157,26 +267,32 @@ async function runCode(code: string, timeoutMs: number): Promise<void> {
   }
 
   // Drain the redirected stdout/stderr buffers.
-  stdoutBuf = pyodide.runPython("__stdout.buf");
-  stderrBuf += pyodide.runPython("__stderr.buf");
-  // Capture every matplotlib figure still open.
-  const images: string[] = pyodide.runPython("__capture_figures()");
+  stdoutBuf = String(pyodide.runPython("__stdout.buf") ?? "");
+  stderrBuf += String(pyodide.runPython("__stderr.buf") ?? "");
+  // Capture every matplotlib figure still open. This crosses the Python→JS
+  // boundary as a list, so it MUST be converted — a raw PyProxy here is what
+  // makes the postMessage below throw "could not be cloned".
+  const images = toJs<string[]>(pyodide.runPython("__capture_figures()"), []);
   // Auto-export any DataFrames left in __main__.
   const files = exportDataFrames();
 
-  (self as any).postMessage({ ok: true, stdout: stdoutBuf, stderr: stderrBuf, images, files });
+  (self as any).postMessage({ type: "result", ok: true, stdout: stdoutBuf, stderr: stderrBuf, images, files });
 }
 
 self.onmessage = async (e: MessageEvent) => {
   const { code, timeoutMs = 30000 } = e.data ?? {};
   if (typeof code !== "string" || !code.trim()) {
-    (self as any).postMessage({ ok: false, stderr: "No code provided." });
+    (self as any).postMessage({ type: "result", ok: false, stderr: "No code provided." });
     return;
   }
   try {
     await runCode(code, timeoutMs);
   } catch (err) {
     // Unrecoverable: report and let the main thread respawn next call.
-    (self as any).postMessage({ ok: false, stderr: err instanceof Error ? err.message : String(err) });
+    (self as any).postMessage({
+      type: "result",
+      ok: false,
+      stderr: err instanceof Error ? err.message : String(err),
+    });
   }
 };

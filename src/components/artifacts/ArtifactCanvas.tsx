@@ -7,10 +7,10 @@
 // can come and go without disturbing the message layout (Arena mode keeps full
 // width while the canvas is closed).
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef } from "react";
 import { ArtifactPanel } from "./ArtifactPanel";
 import type { Artifact } from "@/lib/artifacts";
-import { useArtifacts } from "./ArtifactProvider";
+import { useArtifacts, setCanvasWidth } from "./ArtifactProvider";
 import type { MessageFile } from "@/components/chat/types";
 
 interface Props {
@@ -19,14 +19,10 @@ interface Props {
   onEdit?: (text: string) => void;
 }
 
-const MIN_W = 320;
-const MAX_W = 900;
-const DEFAULT_W = 520;
-
 export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
   const store = useArtifacts();
   const open = !!store?.openId;
-  const [width, setWidth] = useState(DEFAULT_W);
+  const width = store?.canvasWidth ?? 520;
   const dragging = useRef(false);
 
   const onDown = useCallback((e: React.PointerEvent) => {
@@ -37,8 +33,9 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
 
   const onMove = useCallback((e: React.PointerEvent) => {
     if (!dragging.current) return;
-    const newWidth = window.innerWidth - e.clientX;
-    setWidth(Math.max(MIN_W, Math.min(MAX_W, newWidth)));
+    // Right-docked, so the width is the distance from the pointer to the right
+    // edge of the window. The store clamps.
+    setCanvasWidth(window.innerWidth - e.clientX);
   }, []);
 
   const onUp = useCallback(() => {
@@ -73,12 +70,9 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
     [filesForTurn],
   );
 
-  // When the panel opens, jump to a sensible default width rather than whatever
-  // the last drag left it at — a freshly-opened artefact should read as its own
-  // thing. The user can then drag to taste.
-  useEffect(() => {
-    if (open) setWidth((w) => Math.max(MIN_W, Math.min(MAX_W, w)));
-  }, [open]);
+  // When the panel opens it uses whatever docked width the store holds; there is
+  // no per-open reset, because the width is a preference the user set by
+  // dragging and re-normalising it on every open fights that.
 
   if (!open) return null;
 
@@ -86,10 +80,25 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
   // column (header / messages / input), so a right-docked sibling would force a
   // row restructure that Arena mode relies on as full-width. Overlaid keeps the
   // canvas a pure overlay that appears only when open and does not touch layout.
+  //
+  // Two things here were previously wrong and are worth not re-introducing:
+  //
+  //   1. The class list held both `absolute` and `relative`. Tailwind resolves
+  //      that by stylesheet order, not by the order they are written, and
+  //      `.relative` is emitted after `.absolute` — so the panel was
+  //      `position: relative`, every one of `right-0 top-0 bottom-0` was inert,
+  //      and instead of docking it sat in the flow sized to its content.
+  //   2. It was `hidden md:flex`, but the "Open in canvas" triggers in
+  //      ChatMessage render at every width. Below the breakpoint the button was
+  //      live and did nothing visible. Now the canvas covers the conversation
+  //      full-width on narrow viewports (`inset-x-0`) and only docks to a
+  //      resizable column at `lg`, where there is room for both. The full-width
+  //      case needs `z-50` to clear the composer's `z-40`; docked, it is beside
+  //      the composer rather than over it, so `lg:z-30` is enough.
   return (
     <aside
-      style={{ width }}
-      className="absolute right-0 top-0 bottom-0 hidden md:flex relative z-30 shadow-2xl"
+      style={{ ["--canvas-w" as string]: `${width}px` }}
+      className="absolute inset-y-0 inset-x-0 lg:left-auto lg:right-0 lg:w-[var(--canvas-w)] flex z-50 lg:z-30 shadow-2xl"
       data-artifact-canvas
     >
       <div
@@ -97,7 +106,7 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
         onPointerMove={onMove}
         onPointerUp={onUp}
         title="Drag to resize"
-        className="absolute left-0 top-0 bottom-0 w-1 -translate-x-1/2 cursor-ew-resize hover:bg-primary/40 z-[5]"
+        className="absolute left-0 top-0 bottom-0 w-1 -translate-x-1/2 cursor-ew-resize hover:bg-primary/40 z-[5] hidden lg:block touch-none"
       />
       <ArtifactPanel onEdit={onEdit} onDownload={onDownload} fetchFileText={fetchFileText} />
     </aside>

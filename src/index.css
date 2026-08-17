@@ -21,7 +21,28 @@
     --popover: 222 28% 10%;
     --popover-foreground: 210 40% 98%;
 
-    --primary: 172 70% 50%;
+    /* The accent is fixed, not user-selectable.
+     *
+     * Until the colour picker was removed there were two competing sources for
+     * these three tokens: the values here, and an effect in App.tsx/Chat.tsx that
+     * overwrote --primary/--ring/--accent/--sidebar-primary from a
+     * `Flyer_theme_color` localStorage key on every mount. The stylesheet always
+     * lost. So the app never actually rendered the palette written below — it
+     * rendered whichever swatch was last clicked, with --accent collapsed onto
+     * --primary.
+     *
+     * Deleting that effect without touching these values would therefore have
+     * been a visible restyle rather than a no-op: --accent would revert to the
+     * orange below, and --accent is not a brand hue here — it is also shadcn's
+     * hover-surface token (`bg-accent` in dropdown-menu, menubar, context-menu,
+     * select, command, calendar), so every menu row would have gained a
+     * saturated orange fill.
+     *
+     * These are pinned to the values the effect was injecting, so the rendered
+     * result is byte-identical to what shipped and the only change the user sees
+     * is the absence of the picker.
+     */
+    --primary: 172 66% 50%;
     --primary-foreground: 224 32% 6%;
 
     --secondary: 226 22% 14%;
@@ -30,7 +51,7 @@
     --muted: 224 18% 17%;
     --muted-foreground: 215 20% 55%;
 
-    --accent: 24 92% 60%;
+    --accent: 172 66% 50%;
     --accent-foreground: 224 32% 6%;
 
     --destructive: 0 72% 51%;

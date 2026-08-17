@@ -16,6 +16,7 @@
 
 import type { ToolSchema } from "@/lib/ai";
 import type { SearchResult } from "@/lib/search";
+import type { MessageCodeRun } from "@/components/chat/types";
 
 /**
  * What an executor hands back to the model.
@@ -46,13 +47,15 @@ export interface ToolArtifacts {
   /** Files the user can download. */
   files?: Array<{ filename: string; url: string; mimeType: string }>;
   /**
-   * Inline code-execution results (the `run_code` tool, Part G). Each entry is
-   * one Python run: its stdout/stderr (rendered in a terminal-style block) and
-   * any matplotlib figures the run produced (rendered inline). Charts/datasets
-   * that became downloads ALSO go through `files`; this field is for the painted
-   * output the model computed, so the model's answer has visible proof next to it.
+   * One entry per `run_code` call (Part G).
+   *
+   * Execution is user-gated, so what the tool puts here is a STAGED script —
+   * `{ code, status: 'pending' }` — which the UI renders with a Run button beside
+   * Copy. The run happens after the turn is over, on the user's click, and its
+   * output goes into component state rather than back here: the model that staged
+   * the code is gone by then and must never be handed values it did not see.
    */
-  codeRuns?: Array<{ stdout?: string; stderr?: string; images?: string[] }>;
+  codeRuns?: MessageCodeRun[];
 }
 
 /**

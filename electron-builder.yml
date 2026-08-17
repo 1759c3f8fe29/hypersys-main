@@ -1,0 +1,88 @@
+# electron-builder config for the Flyer native shell (task #23).
+# Invoked by `npm run desktop:build`:
+#   vite build --mode desktop  → dist/ with base:"./" (relative assets for file://)
+#   electron-builder          → packages dist/ + electron/ into a per-OS installer
+#
+# Why a YAML file and not a package.json "build" key: keeps the desktop build
+# config next to the electron/ directory it describes, away from the web
+# build's package.json, and lets the config grow (code-signing, notarization,
+# auto-update) without bloating the root manifest.
+
+appId: ai.flyer.desktop
+productName: Flyer AI
+copyright: Copyright © Flyer
+
+# The renderer is the Vite build output; main.cjs loads dist/index.html via
+# loadFile. Both electron/ and dist/ ship inside the app.
+directories:
+  output: release
+  buildResources: electron
+
+files:
+  - electron/main.cjs
+  - electron/preload.cjs
+  - dist/**/*
+  - package.json
+  - "!**/node_modules/**/*.{md,d.ts,map}"
+  - "!**/node_modules/**/{test,tests,__tests__,docs,doc,examples}/**"
+
+# `main` repoints the entry away from the web package.json's module entry.
+#
+# `flyerApiBase` exists because of a runtime asymmetry: vite inlines
+# VITE_API_BASE into the *renderer* at build time, but electron/main.cjs runs in
+# the *main* process, where nothing sets that env var when a user double-clicks
+# the packaged app — so the Origin rewrite would never arm precisely where it is
+# needed (the file:// build). Baking it into the packaged package.json gives
+# main.cjs a value it can read at runtime; the env var still overrides it for
+# local testing.
+#
+# MUST match VITE_API_BASE in .env.desktop — the renderer sends the requests and
+# the main process rewrites their headers, so a mismatch means the rewrite
+# silently targets an origin no request ever goes to.
+extraMetadata:
+  main: electron/main.cjs
+  flyerApiBase: https://myflyer.vercel.app
+
+# The build injects VITE_API_BASE into the renderer bundle at vite-build time via
+# .env.desktop; electron-builder does not run vite, so `desktop:build` runs vite
+# first and the main-process copy of the value comes from extraMetadata above.
+asar: true
+
+# Per-platform targets. nsis = a single Windows installer; dmg/AppImage are the
+# macOS/Linux one-file flows. Snap/dpkg add more surface and aren't needed for a
+# smoke; ship them later if distribution needs them.
+win:
+  target: nsis
+mac:
+  target: dmg
+  category: public.app-category.productivity
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Office
+  # Required by the deb packager specifically (AppImage does not need it): dpkg
+  # metadata has a mandatory Maintainer field, and without it electron-builder
+  # aborts the deb target *after* the AppImage has already succeeded — so the
+  # build looks half-done rather than failed. Kept here as the authoritative
+  # value; package.json's `author` exists only to silence electron-builder's
+  # warning and must be kept identical to this line.
+  maintainer: Flyer <support@myflyer.vercel.app>
+  # dpkg splits Description into a one-line synopsis and an indented body. The
+  # body comes from package.json's `description`, but the synopsis has no
+  # fallback — leave it out and the control file ships `Description:` with an
+  # empty first line, which is what package managers and app stores actually
+  # display. Keep it short and without a trailing period, per Debian policy.
+  synopsis: Chat, work, create, search and code with AI
+
+# Icon: electron/icon.png is public/flyer-logo.png (512x512 RGB), the same mark
+# the in-app sidebar and welcome screen use, so the launcher/taskbar/dock entry
+# matches the window contents. Without it electron-builder falls back to the
+# stock Electron icon, which is the single most obvious "this is a web app in a
+# window" tell — it shows in the launcher, the alt-tab switcher, and the dock
+# before the user ever sees the UI.
+#
+# 512x512 is electron-builder's minimum for the Linux and Windows targets. macOS
+# icns generation prefers 1024x1024 and will warn at this size; swap in a 1024px
+# master when a signed mac build is actually shipped.
+icon: electron/icon.png

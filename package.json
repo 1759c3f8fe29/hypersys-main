@@ -1,8 +1,11 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "flyer-ai",
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "//": "description and author exist for electron-builder, not for npm: the deb control file and the generated .desktop entry fall back to them, and without them the packaging log warns and the installed app shows an empty description. Keep author matching linux.maintainer in electron-builder.yml.",
+  "description": "Chat, work, create, search and code with AI.",
+  "author": "Flyer <support@myflyer.vercel.app>",
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc -p tsconfig.app.json --noEmit",
@@ -12,7 +15,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:models": "node scripts/verify-models.mjs"
+    "verify:models": "node scripts/verify-models.mjs",
+    "desktop:dev": "node electron/dev-launch.cjs",
+    "desktop:build": "vite build --mode desktop && electron-builder --config electron-builder.yml"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -93,6 +98,8 @@
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react-swc": "^3.11.0",
     "autoprefixer": "^10.4.21",
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8",
     "eslint": "^9.32.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",

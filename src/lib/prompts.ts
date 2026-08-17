@@ -35,13 +35,17 @@
 //
 // SEARCH TRIGGERS
 //
-// The reference prompts order the model to call a web tool. Flyer does not have
-// a tool-calling loop yet: search is decided pre-flight and injected as a system
-// block by src/pages/Chat.tsx. So the trigger categories are preserved as
-// information hygiene ("treat your own knowledge as stale for these topics, and
-// say so") rather than as tool-call instructions the model cannot satisfy. When
-// the agent loop from FLYER_IMPLEMENTATION_BRIEF.md Part B lands, this section
-// becomes the web_search tool description.
+// The reference prompts order the model to call a web tool. Flyer's trigger
+// categories live in accuracyBlock() as information hygiene ("treat your own
+// knowledge as stale for these topics, and say so"), because they must still be
+// correct on the paths that have no tools: a model with supportsTools:false, or
+// Arena mode. Told to call a tool it was never given, a model fabricates both
+// the call and its output.
+//
+// The agent loop (FLYER_IMPLEMENTATION_BRIEF.md Part B) has since landed, so on
+// the paths that DO carry tools those same categories become orders: toolsBlock()
+// renders behind `opts.toolsAvailable` and explicitly overrides the hedging
+// language above it. Two audiences, one document, one flag deciding which.
 
 /**
  * Knowledge cutoffs, stated to the model so it can reason about staleness.
@@ -68,6 +72,17 @@ export interface PromptRenderOptions {
   personality?: PersonalityName;
   /** Trait slider lines, one imperative sentence each. */
   traitLines?: string[];
+  /**
+   * True when this request actually carries the tool schemas — i.e. the agent
+   * loop is running for this turn. Gates the tool-use policy block.
+   *
+   * MUST mirror the real decision (Chat.tsx's `useAgent`), not a wish. Rendering
+   * the block without the tools attached teaches the model to fake tool output;
+   * omitting it with the tools attached leaves it hedging instead of calling
+   * them. Both failure modes have been observed, so this is a single source of
+   * truth passed in by the caller rather than something inferred here.
+   */
+  toolsAvailable?: boolean;
 }
 
 /** Personality preset bodies. "default" is absence, not a body. */
@@ -324,6 +339,110 @@ function mistakesBlock(): string[] {
 }
 
 /**
+ * The tool-use policy block. Renders ONLY when tools are actually advertised on
+ * the request (opts.toolsAvailable), and that condition is load-bearing in both
+ * directions.
+ *
+ * WHY IT HAS TO EXIST AT ALL
+ *
+ * The five tool schemas are already sent in the request's `tools` array, so the
+ * model can see their names and parameters. What it could not see was the
+ * *policy*, and the prompt around it actively pushed the other way: the accuracy
+ * section above orders the model to "treat your own knowledge as stale and say
+ * so" for exactly the categories web_search exists to answer. A model reading
+ * only that complies by hedging — it writes "as of my knowledge cutoff I can't
+ * be sure" and never calls the tool, which is precisely the "tools don't work"
+ * symptom. Advertising a tool is not the same as instructing the model to reach
+ * for it unprompted.
+ *
+ * WHY IT MUST STAY CONDITIONAL
+ *
+ * The inverse failure is worse. On a turn where no tools are advertised (a model
+ * with supportsTools:false, or Arena mode), a model told "you can execute Python"
+ * cannot call anything — so it emits a plausible transcript of a tool call it
+ * never made and invents the output. That is observed behaviour, not a
+ * hypothetical: a run_code turn against a broken sandbox produced "I can run it
+ * locally and report the result: H=5a3f7c8d9e1b2c4d" against a true value of
+ * H=e03af03befe2b7bb. So the block renders when the tools are real and vanishes
+ * when they are not, and the NO SILENT SUBSTITUTION rule below exists to make
+ * that specific fabrication a stated violation rather than a judgement call.
+ *
+ * THE run_code GATE MAKES THAT RULE PERMANENT, NOT SITUATIONAL
+ *
+ * `run_code` no longer executes: it stages a script the user runs by pressing Run
+ * (tools/run-code.ts, components/chat/CodeRunner.tsx). So the state that produced
+ * the fake hash above — holding the tool while having no output from it — is now
+ * the NORMAL state of every code turn, not a broken-sandbox edge case. The gate
+ * section below therefore has to say "you never see the output" in as many words;
+ * a model left to infer it from silence fills the silence with a plausible number.
+ */
+function toolsBlock(): string[] {
+  return [
+    "# Tools — you have them, and using them is your decision to make",
+    "",
+    "You can act, not just answer. These tools are attached to this conversation and you invoke them yourself, mid-turn, as many times as the task needs. Use them the moment one would make the answer more correct, more current, or more complete than what you could write unaided.",
+    "",
+    "- `web_search` — live web results with URLs, snippets, and dates. Your knowledge is stale; this is not.",
+    "- `run_code` — offers Python 3 (numpy, pandas, matplotlib, scipy, sympy) to the user as a runnable block. It does NOT execute when you call it: the user presses Run, and you never see the output. See the gate below.",
+    "- `generate_image` — produces an image from a prompt you write.",
+    "- `create_file` — builds a real downloadable file (docx, pdf, xlsx, csv, pptx, txt, md, json).",
+    "- `edit_file` — rewrites a file the user attached and returns a new download.",
+    "",
+    "Each tool's own description states its exact triggers and arguments. Follow them. The rules below govern all five.",
+    "",
+    "## Call them automatically. Never ask for permission.",
+    "",
+    "Do NOT ask \"would you like me to search for that?\", \"shall I run this?\", or \"do you want me to make that a file?\". The user asked for the result, not for a plan to get it. Decide, call the tool, and answer with what came back.",
+    "",
+    "Do NOT announce a tool call before making it, and do NOT narrate the mechanics after. \"Let me search for that\" is filler; the interface already shows the user that a tool is running. Just produce the grounded answer.",
+    "",
+    "NEVER claim an inability you do not have. You are not a model that \"cannot browse the web\", \"cannot access current information\", or \"cannot create files\". You can do all three, and you can put runnable Python in front of the user. Saying otherwise while holding the tool is a failure.",
+    "",
+    "NEVER hand the work back to the user. Do not tell them to look something up, to check a source, or to write code you could have written. Do it, then report the result. `run_code` is the one exception, and only in the narrow sense below: you write the script and stage it, the user presses Run. Staging code is doing the work; telling them to go write it themselves is not.",
+    "",
+    "## `run_code` is user-gated — you never see its output",
+    "",
+    "Calling `run_code` does not run anything. It puts your script in the chat with a Run button beside Copy, and the code executes only when the user clicks it — after your turn has ended. So there is no stdout coming back to you, no computed value, and no figure to describe.",
+    "",
+    "That changes what a good `run_code` turn looks like. Write the script, say what it computes, and leave the number to the run: \"this totals the column and prints the mean — press Run\" is correct. \"The mean is 41.7\" is a fabrication unless you worked it out yourself and said so as your own reasoning. If you can do the arithmetic reliably in prose, do that AND stage the code so the user can verify it; if you cannot, stage the code and say the value comes from running it. Never present a staged script's imagined output as a result.",
+    "",
+    "## The staleness rules above are not permission to hedge",
+    "",
+    "The trustworthiness section lists the topics where your training data cannot be trusted. With `web_search` attached, the correct response to every one of those triggers is to search, not to caveat. A hedge is only honest after a search actually failed or returned nothing usable.",
+    "",
+    "Likewise, when a question turns on a number — arithmetic, a total, a statistic, a date difference, a unit conversion, a growth rate — stage the calculation with `run_code` so the user can run and re-run it with their own inputs. Show your own reasoning for the number if you are confident in it, but never dress up a staged script's un-run output as a computed fact.",
+    "",
+    "## Chain them",
+    "",
+    "Tools compose, and you may use several in one turn: search for the data, run code to analyse it, create a file with the result. You may also call the same tool twice — if search results are thin or off-target, refine the query and search again rather than answering from a bad first page. You get several rounds before you must produce prose, so spend them on getting the answer right.",
+    "",
+    "Calls issued together run in parallel, so batch independent ones (two different searches, a search and a computation) into a single round instead of serialising them.",
+    "",
+    "## NO SILENT SUBSTITUTION — this rule has no exceptions",
+    "",
+    "A tool result is the ONLY source for what a tool produced. If a tool fails, times out, or returns an error, say plainly that it failed and what you could not determine. Then answer what you can from reasoning, explicitly labelled as unverified.",
+    "",
+    "NEVER fabricate, guess, estimate, or recall from memory a value that was supposed to come from a tool, and never present such a value as though the tool returned it. Specifically forbidden:",
+    "",
+    "- writing what code \"would\" print, or reporting a value as computed, when nothing returned it to you — `run_code` never does",
+    "- claiming you ran something \"locally\", \"offline\", or \"in the sandbox\" — you did not; the user's Run click is the only thing that executes code",
+    "- citing a URL, headline, price, or date that no search result contained",
+    "- describing an image that `generate_image` did not produce, or a file that `create_file` did not build",
+    "",
+    "A hash, a sum, or a statistic invented to fill the gap left by a broken tool is indistinguishable from a real one to the user, which is exactly what makes it the most damaging thing you can do here. \"The sandbox failed, so I can't give you the value\" is a good answer. A plausible fake is not.",
+    "",
+    "## What the interface does with the results",
+    "",
+    "Images, files, and charts the tools produce are attached to your message and rendered automatically. So:",
+    "",
+    "- Do NOT paste base64, data URLs, or raw file bytes into your reply. The user already has the artifact.",
+    "- Do NOT re-describe a generated image at length; a one-line caption is enough.",
+    "- Do NOT paste a whole file's contents back after creating it; say what you made and what is in it.",
+    "- DO explain a staged script in prose: what it computes and what the user will see when they run it. The printed output is theirs, not yours — interpret the approach, not results you never received.",
+  ];
+}
+
+/**
  * Optional trailing blocks: personality, sliders, user instructions, memories.
  * Each renders only when supplied, mirroring the reference {{#if}} structure.
  */
@@ -400,6 +519,10 @@ export function buildFlyerSystemPrompt(opts: PromptRenderOptions): string {
     "",
     ...accuracyBlock(),
     "",
+    // After accuracyBlock deliberately: the tool policy has to be able to say
+    // "the staleness rules you just read are not permission to hedge", which
+    // only reads correctly downstream of them.
+    ...(opts.toolsAvailable ? [...toolsBlock(), ""] : []),
     ...codeBlock(),
     "",
     ...imagePolicyBlock(),
@@ -435,6 +558,7 @@ export function buildFlyerThinkingPrompt(opts: PromptRenderOptions): string {
     "",
     ...accuracyBlock(),
     "",
+    ...(opts.toolsAvailable ? [...toolsBlock(), ""] : []),
     ...codeBlock(),
     "",
     ...imagePolicyBlock(),
@@ -582,6 +706,10 @@ export function buildVisionSystemPrompt(opts: PromptRenderOptions): string {
     "",
     ...imagePolicyBlock(),
     "",
+    // A vision turn on a tool-capable model gets the same policy: "read this
+    // chart, then compute the growth rate" needs run_code as much as a text turn
+    // does, and the caller only sets the flag when the schemas really went out.
+    ...(opts.toolsAvailable ? [...toolsBlock(), ""] : []),
     "FORMATTING:",
     "- This interface renders GitHub-flavoured Markdown, KaTeX math, and syntax-highlighted code blocks. Nothing else renders; never emit bracket-markup UI directives or content-reference tokens.",
     "- Use **bold** for key findings and `inline code` for extracted text, file names, and technical terms.",
