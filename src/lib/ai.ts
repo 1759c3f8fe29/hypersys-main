@@ -534,6 +534,115 @@ export async function generateVisionResponse(
     : new Error("All vision engines are currently unavailable. Please try again.");
 }
 
+// ---------------------------------------------------------------------------
+// OCR — nemotron-parse document extraction
+// ---------------------------------------------------------------------------
+//
+// Unlike the vision engine above, `nemotron-parse` is a non-conversational
+// document utility: it takes an image (a rendered page or a photograph of a
+// document) and returns the text it contains as structured regions — not a
+// prose answer. Its contract is rigid in ways the chat engines are not:
+//
+//   * image-only content. Any text segment gets a hard 400 ("The model does
+//     not support text input"); the caller must send just the image.
+//   * one shot, non-streaming. The structured result arrives in a single
+//     `markdown_bbox` tool_call on `choices[0].message`. Streamed, the same
+//     model emits loose `<x_><y_><class_>` content tokens instead — a grammar
+//     the caller would have to reassemble. Non-streaming keeps it intact.
+//
+// The route /api/ocr is a sibling of /api/nvidia (same key precedence, same
+// retry set) but non-streaming. We flatten the regions here so `documents.ts`
+// gets plain text it can feed straight into the document context block.
+
+export interface OcrRegion {
+  bbox: { xmin: number; ymin: number; xmax: number; ymax: number };
+  text: string;
+  type: string;
+}
+
+export interface OcrResult {
+  text: string;
+  /** Non-empty regions in reading order, for callers that want structure. */
+  regions?: OcrRegion[];
+  /** Set when the service is down or rejected the image; text is then "". */
+  error?: string;
+}
+
+/**
+ * Parse the `markdown_bbox` tool-call a non-streamed nemotron-parse response
+ * carries. Regions come as `[[{bbox,text,type}, ...]]` (a list containing one
+ * list); we collapse that and drop the entries with no text — a photo returns a
+ * single `Picture` region with `text: ""`, which is the honest empty case, not
+ * an error. Output is joined in reading order (top-to-bottom, left-to-right)
+ * so the model reads it like a page. Titles and list items keep their shape;
+ * tables and plain text pass through verbatim.
+ */
+export function flattenOcrResponse(json: unknown): OcrResult {
+  try {
+    const choice = (json as { choices?: Array<{ message?: { tool_calls?: Array<{ function?: { arguments?: string } }> } }> })?.choices?.[0];
+    const argsRaw = choice?.message?.tool_calls?.[0]?.function?.arguments;
+    if (!argsRaw) return { text: "", error: "ocr: no structured result in the response." };
+    const parsed = JSON.parse(argsRaw) as OcrRegion[] | OcrRegion[][];
+    const regions = (Array.isArray(parsed[0]) ? (parsed[0] as OcrRegion[]) : (parsed as OcrRegion[])).filter(
+      (r) => r && typeof r.text === "string" && r.text.length > 0,
+    );
+    if (regions.length === 0) return { text: "" };
+
+    // Reading order: sort by the top edge, then the left edge. Bboxes are
+    // normalised to the image dimensions, so equal-floor regions compare left.
+    regions.sort((a, b) => a.bbox.ymin - b.bbox.ymin || a.bbox.xmin - b.bbox.xmin);
+
+    const lines = regions.map((r) => {
+      const t = r.text.trim();
+      switch (r.type) {
+        case "Title":
+        case "Section-header":
+          return `${t}\n`;
+        case "ListItem":
+          return `- ${t}`;
+        default:
+          return t;
+      }
+    });
+    return { text: lines.join("\n").replace(/\n{3,}/g, "\n\n").trim(), regions };
+  } catch (e) {
+    return { text: "", error: `ocr: could not parse the structured result (${e instanceof Error ? e.message : "parse error"}).` };
+  }
+}
+
+/**
+ * Run OCR on a single image via /api/ocr. The image must be a data: URL the
+ * serverless function will forward to nemotron-parse. Non-streaming: returns
+ * once the full structured result is back. Aborts cleanly on `signal`.
+ */
+export async function ocrImage(imageDataUrl: string, signal?: AbortSignal): Promise<OcrResult> {
+  if (!imageDataUrl?.startsWith("data:image/")) {
+    return { text: "", error: "ocr: a data: image URL is required (the service will not fetch remote URLs)." };
+  }
+  let res: Response;
+  try {
+    res = await fetch(apiPath("/api/ocr"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: imageDataUrl } }] }],
+        max_tokens: 2000,
+      }),
+      signal,
+    });
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") throw e;
+    return { text: "", error: "ocr: the OCR service could not be reached." };
+  }
+
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json())?.detail || (await res.text()); } catch { /* ignore */ }
+    return { text: "", error: `ocr: the OCR service rejected the request (${res.status}). ${String(detail).slice(0, 160)}` };
+  }
+  return flattenOcrResponse(await res.json());
+}
+
 async function generateMistralResponse(
   messages: ChatMessage[],
   modelId: string,

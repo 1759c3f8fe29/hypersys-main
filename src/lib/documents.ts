@@ -14,6 +14,12 @@
 // parsers are dynamically imported so a user who only ever sends images never
 // downloads the PDF or spreadsheet machinery.
 
+// OCR fallback for scanned PDFs and image-of-text uploads. `nemotron-parse` is
+// a non-conversational service live on the NVIDIA endpoint (verified via
+// scripts/verify-models.mjs); plain text layers stay the fast path and only
+// an empty result routes through it, so a normal PDF never pays the cost.
+import { ocrImage } from "./ai";
+
 export interface ExtractedDocument {
   name: string;
   mimeType: string;
@@ -74,13 +80,47 @@ export function canExtract(file: File): boolean {
     ext === "xlsx" || ext === "xls" ||
     ext === "pptx" ||
     TEXT_LIKE_EXTENSIONS.has(ext) ||
-    file.type.startsWith("text/")
+    file.type.startsWith("text/") ||
+    // An image upload can carry readable text — a photographed receipt, a
+    // screenshot, a scan. We route it through nemotron-parse below rather than
+    // handing the chat model an opaque data URL it has to guess at. A purely
+    // decorative image (no text) returns an honest empty result.
+    (file.type.startsWith("image/") && ext !== "gif" && ext !== "svg")
   );
 }
 
 // ---------------------------------------------------------------------------
 // Per-format extractors
 // ---------------------------------------------------------------------------
+
+/**
+ * Render a pdfjs page to a PNG data URL at a legible scale, the input the
+ * nemotron-parse service expects. The scale is a balance: too low and small body
+ * text grows illegible to the OCR model; too high and the data URL balloons past
+ * what a serverless function will happily forward. 1.5 reads standard body text
+ * on a letter-size page cleanly. Returns null if rendering itself fails — that
+ * page then falls back to its (empty) text-layer result rather than aborting the
+ * whole document.
+ */
+async function renderPageToDataUrl(
+  page: { getViewport: (o: { scale: number }) => { width: number; height: number } } & {
+    render: (o: { canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }) => Promise<unknown>;
+  },
+  scale = 1.5,
+): Promise<string | null> {
+  try {
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    await page.render({ canvasContext: ctx, viewport });
+    return canvas.toDataURL("image/png");
+  } catch {
+    return null;
+  }
+}
 
 async function extractPdf(file: File): Promise<{ text: string; units: number }> {
   // Vite needs the worker resolved explicitly; without this pdf.js tries to
@@ -97,6 +137,12 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
   // quadratic, and the whole point of the early break is that this runs on
   // 500-page files.
   let size = 0;
+  // Fallback OCR is metered: a scanned 500-page book must not fire 500 paid
+  // calls. We OCR only the first pages with no text layer, up to this cap — the
+  // same budget that bounds the fast path. A larger scan still gets a useful
+  // head-start the model can answer from.
+  let ocrBudget = 10;
+  let usedOcr = false;
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
@@ -105,8 +151,27 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
-    if (pageText) {
-      const block = `--- Page ${i} ---\n${pageText}`;
+    let block = pageText ? `--- Page ${i} ---\n${pageText}` : "";
+
+    // No text layer means a scanned page (an image of text). Render it and run
+    // OCR instead of leaving it silently empty. This is the case the old code
+    // punted on with "upload it as an image instead"; the re-upload is now the
+    // app's job, not the user's.
+    if (!pageText && ocrBudget > 0) {
+      ocrBudget--;
+      const dataUrl = await renderPageToDataUrl(page as never);
+      if (dataUrl) {
+        const ocr = await ocrImage(dataUrl);
+        if (ocr.text) {
+          usedOcr = true;
+          block = `--- Page ${i} (OCR) ---\n${ocr.text}`;
+        }
+        // ocr.text === "" with no error is an honest "no text on this page"
+        // (a blank or decorative sheet) — leave block empty and move on.
+      }
+    }
+
+    if (block) {
       pages.push(block);
       size += block.length + 2;
     }
@@ -114,6 +179,14 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
     // Stop early on very long PDFs; the cap would discard the rest anyway and
     // parsing every page of a 500-page file just to throw it away is wasteful.
     if (size > MAX_CHARS_PER_DOC) break;
+
+    if (usedOcr === true && ocrBudget === 0 && i <= doc.numPages) {
+      // The scan had more OCR-able pages than the budget allowed. Tell the
+      // model so it can say "I read the first 10 pages" rather than imply it
+      // saw the whole document.
+      pages.push(`--- (remaining pages not OCR-ed; the scan exceeded the OCR budget) ---`);
+      break;
+    }
   }
 
   return { text: pages.join("\n\n"), units: doc.numPages };
@@ -210,6 +283,40 @@ async function extractPlainText(file: File): Promise<{ text: string }> {
   return { text: text.trim() };
 }
 
+/**
+ * OCR an image-of-text upload via nemotron-parse. The file is converted to a
+ * data URL once (the service takes a data: URL, not a File) and sent in a
+ * single image-only request. A decorative image (no text) returns an honest
+ * empty result; a service failure returns empty text, which the caller turns
+ * into the "no readable text" message rather than a silent guess.
+ */
+async function extractImage(file: File): Promise<{ text: string; units?: number }> {
+  const dataUrl = await fileToDataUrl(file);
+  const ocr = await ocrImage(dataUrl);
+  if (ocr.error && !ocr.text) {
+    // Surface the service-level failure as empty text — extractDocument turns
+    // that into the "no readable text" message above, so the user is told the
+    // OCR service was unavailable rather than that the image was blank.
+    return { text: "" };
+  }
+  return { text: ocr.text, units: ocr.text ? 1 : undefined };
+}
+
+/**
+ * Read a File as a data: URL. Kept here rather than imported from the upload
+ * path so the extractors stay self-contained — the upload code in ChatInput
+ * rolls the same Promise-based FileReader and we do not want this module
+ * coupled to the React layer.
+ */
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("Could not read the image file."));
+    reader.readAsDataURL(file);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -243,6 +350,12 @@ export async function extractDocument(
     else if (ext === "pptx") raw = await extractPptx(file);
     else if (TEXT_LIKE_EXTENSIONS.has(ext) || file.type.startsWith("text/")) {
       raw = await extractPlainText(file);
+    } else if (file.type.startsWith("image/")) {
+      // An uploaded image carries no text layer, so OCR is the only path. A
+      // photograph of a document, a receipt, or a screenshot becomes readable
+      // text instead of an opaque data URL the chat model guesses at. A purely
+      // decorative image returns an honest empty result below.
+      raw = await extractImage(file);
     } else if (ext === "doc" || ext === "ppt") {
       // Legacy binary Office formats need a different parser entirely; saying so
       // is better than returning empty text that reads as an empty document.
@@ -259,12 +372,11 @@ export async function extractDocument(
       return {
         ...base,
         text: "",
-        // The most common cause for a PDF is that it is a scan, which needs OCR
-        // rather than text extraction. Naming that saves the user guessing.
-        error:
-          ext === "pdf"
-            ? "No text found — this PDF is likely a scan. Try uploading it as an image instead."
-            : "No readable text found in this file.",
+        // For a PDF the scan case is now handled inside extractPdf (OCR is
+        // attempted on pages with no text layer), so an empty result here means
+        // OCR was unavailable or returned nothing — an honest "no readable
+        // text" rather than a guessed scan message. For images the same applies.
+        error: "No readable text found in this file (it may be blank, or the OCR service was unavailable).",
         units: raw.units,
       };
     }
