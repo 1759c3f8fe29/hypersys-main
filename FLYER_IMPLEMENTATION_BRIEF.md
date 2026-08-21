@@ -257,8 +257,32 @@ The load-bearing constraint is that `/api/*` has no colocated runtime in a deskt
 | 8(F) | Memory + custom instructions + branching | — | done |
 | 9(G) | Pyodide, user-gated behind Run | Nothing executes unclicked | done |
 | 10 | Native desktop shell (Electron) | window runs the real app | done |
+| 14 | **Native look-and-feel pass** | app reads as a native desktop app, not a web page in a frame | **in progress** |
 
 Phase 6 is done, so the "do not delete the classifier before the loop is verified" ordering constraint has been discharged.
+
+---
+
+## 14. Native look-and-feel pass — IN PROGRESS
+
+The Electron shell (§10) is done: a real window runs the real app. What is *not* done is the thing the window is supposed to deliver — the app still reads as a web page hosted in a frame rather than a native application. This phase is about that gap only. It is a **UI/interaction** phase, not a features phase; nothing here adds a capability.
+
+**The requirement, in the user's words:** improve and update the UI and the look, and it must give the feel of a real native app. Standing constraints from earlier in the same thread: **remove the colour option** (done), and the file/code view is **right-docked** (done).
+
+**What "native" concretely means here** — the checklist this phase is gated on. Each item is a thing a native app does that a web page does not:
+
+1. **Chrome.** No browser-shaped affordances. Custom title bar that owns the window controls, correct platform ordering, drag region, and a real traffic-light/caption inset so content never sits under the controls.
+2. **Typography.** The platform UI font stack, not a webfont — `-apple-system`/`Segoe UI Variable`/`Inter`/`system-ui` in the right order, at native sizes and weights. A web page picks a typeface; a native app inherits one.
+3. **Density and metrics.** Native control heights, hit targets and spacing. Web defaults are consistently too airy and too rounded for desktop.
+4. **Motion.** Fast, short, platform-plausible transitions with correct easing — and **honour `prefers-reduced-motion`**. Long springy animations are the single loudest "this is a web app" tell.
+5. **Selection, focus and cursors.** `user-select: none` on chrome and controls (text stays selectable), real focus-visible rings, native cursor choices, no text-caret over buttons.
+6. **Scrolling.** Overlay scrollbars styled to the platform, no scroll chaining/rubber-band on inner panes, no horizontal body scroll.
+7. **Menus and context menus.** Right-click does something the app chose, not the default browser menu.
+8. **Keyboard.** Real accelerators for the actions that have them, visible shortcut hints, full tab order, Escape/Enter semantics that match the platform.
+9. **State fidelity.** Window-focus-aware chrome (inactive title bar dims, as native windows do), correct dark/light following the OS, no flash-of-wrong-theme on boot.
+10. **Empty, loading and error states** that look designed rather than defaulted.
+
+**Gate:** every item above either implemented or explicitly deferred with a reason recorded; `tsc 0`, `eslint 0`, and the suite still at **21 files / 325 tests** or better with no regression; and the desktop build (`desktop:build`, base `"./"` — see the trap below) still mounts and runs.
 
 ---
 
