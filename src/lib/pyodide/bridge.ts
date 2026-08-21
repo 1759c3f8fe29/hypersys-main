@@ -33,6 +33,24 @@ export interface CodeRunResult {
   files?: Array<{ filename: string; url: string; mimeType: string }>;
 }
 
+/**
+ * Everything the worker is allowed to post back.
+ *
+ * Declared on this side rather than in worker.ts because this is the consuming
+ * side: the worker's job is to satisfy the contract, not to define it. worker.ts
+ * pulls it in with `import type`, which erases at build time, so the worker bundle
+ * keeps no runtime dependency on this module.
+ *
+ * It exists because every postMessage in the worker was an untyped `as any` cast,
+ * so a renamed or misspelled field would have compiled clean and surfaced as a run
+ * that produced nothing — the exact symptom the `data.type !== "result"` guard in
+ * onmessage below was already added to defend against once.
+ *
+ * `booted` switches this side from the boot budget to the execution budget;
+ * `result` is the only message that settles a run.
+ */
+export type WorkerMessage = { type: "booted" } | ({ type: "result" } & CodeRunResult);
+
 export interface RunCodeOptions {
   /** Deadline for the user's code, measured from the end of boot. Default 30s. */
   timeoutMs?: number;
@@ -83,9 +101,11 @@ function getWorker(): { worker: Worker; booted: boolean } {
   // single byte of Pyodide is fetched, so every run_code call fails with an
   // opaque worker error and the model then "helpfully" invents a plausible
   // answer instead. Omitting the type makes Vite bundle this as an IIFE
-  // classic worker, where importScripts is available. worker.ts has no ESM
-  // imports of its own (its `import` lines are inside Python strings), so it
-  // has nothing that needs module semantics.
+  // classic worker, where importScripts is available. worker.ts has no RUNTIME
+  // imports of its own — its one `import` line is `import type`, which is erased
+  // before bundling, and its Python `import`s live inside string literals — so it
+  // has nothing that needs module semantics. Keep it that way: adding a real
+  // value import to worker.ts would reintroduce exactly the failure above.
   cached = { worker: new Worker(new URL("./worker.ts", import.meta.url)), booted: false };
   return cached;
 }
@@ -168,7 +188,14 @@ function runCodeNow(code: string, opts: RunCodeOptions = {}): Promise<CodeRunRes
     signal?.addEventListener("abort", onAbort);
 
     worker.onmessage = (e: MessageEvent) => {
-      const data = e.data ?? {};
+      // Deliberately NOT cast to WorkerMessage. This value arrived over a
+      // postMessage wire; asserting it already is one would undercut the two
+      // guards below, which exist precisely because it might not be — so `type`
+      // stays optional and loosely typed. What the cast does buy is field-name
+      // checking on the five reads: a `data.stdOut` typo now fails the build
+      // instead of quietly delivering an undefined stdout, which is the same
+      // failure WorkerMessage was introduced to catch on the producing side.
+      const data = (e.data ?? {}) as { type?: string } & Partial<CodeRunResult>;
       // Boot finished: stop allowing download time and start the real clock.
       if (data.type === "booted") {
         entry.booted = true;

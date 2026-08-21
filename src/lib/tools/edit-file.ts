@@ -130,6 +130,17 @@ export async function executeEditFile(
     };
   }
 
+  // Images reach the tool context too (ocr_image needs their bytes), but they are
+  // not editable documents: there is no extracted text to rewrite, and the format
+  // map would quietly turn a .png into a .txt. Naming the right tool costs one
+  // round-trip and beats handing the user a text file they did not ask for.
+  if (ref.mimeType?.startsWith("image/")) {
+    return {
+      ok: false,
+      error: `edit_file: "${ref.name}" is an image, not an editable document. To read the text inside it, call ocr_image. To produce a new file from that text, call create_file.`,
+    };
+  }
+
   // Omitting `format` keeps the attachment's own format when the generator can
   // build it; an uploaded .py becomes .txt (the generator has no .py).
   let format = (asString(args.format) || "").toLowerCase();

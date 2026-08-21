@@ -50,13 +50,70 @@
 
 /// <reference lib="webworker" />
 
+// Type-only, so it is erased before bundling and this worker gains no runtime
+// dependency on the bridge module (which matters — see the classic-vs-module
+// comment in bridge.ts). Importing the contract instead of restating it means a
+// field renamed on the consuming side breaks the build here, rather than
+// surfacing as a run that appears to have produced nothing.
+import type { WorkerMessage } from "./bridge";
+
 // Pyodide is loaded from the CDN at runtime — the worker bundles no wheels.
 // `self.importScripts` pulls the bootstrap, which defines `loadPyodide` global.
 const PYODIDE_VERSION = "0.26.4";
 const PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
 
-let pyodide: any = null;
-let pyodideReady: Promise<any> | null = null;
+/**
+ * The slice of Pyodide's API this worker touches — four members, which is the
+ * whole surface.
+ *
+ * Hand-written rather than imported because pyodide is not an npm dependency
+ * here: it is fetched from a CDN by importScripts at runtime (see PYODIDE_CDN),
+ * so there are no types on disk to import. Anything added later belongs here
+ * rather than behind a fresh cast.
+ *
+ * `runPython` returns `unknown` deliberately. Every non-primitive comes back as a
+ * PyProxy, and the only correct thing to do with one is pass it to toJs() below;
+ * `unknown` makes the compiler insist on that, instead of letting a proxy flow
+ * into postMessage where it throws "could not be cloned" and kills the run.
+ */
+interface PyodideAPI {
+  runPython: (code: string) => unknown;
+  runPythonAsync: (code: string) => Promise<unknown>;
+  loadPackagesFromImports: (code: string) => Promise<void>;
+  /** Present only once something has been loaded; keyed by package name. */
+  loadedPackages?: Record<string, string>;
+}
+
+/**
+ * The worker global, narrowed to the members this file uses.
+ *
+ * It goes through `unknown` because a direct cast is rejected: tsconfig.app.json
+ * loads the DOM lib for the rest of the app, so `self` is typed as a Window and
+ * the compiler refuses the conversion as insufficiently overlapping. That is why
+ * the pre-existing `close()` call in the watchdog below was already written as
+ * `as unknown as` — this consolidates that same move into one place instead of
+ * six scattered `as any`s.
+ *
+ * `postMessage` takes WorkerMessage rather than any, which is the point of the
+ * whole exercise. `importScripts` exists only in a classic worker, and
+ * `loadPyodide` is the global the CDN bootstrap defines as a side effect of it.
+ */
+interface WorkerSelf {
+  importScripts: (...urls: string[]) => void;
+  loadPyodide: (opts: { indexURL: string }) => Promise<PyodideAPI>;
+  postMessage: (msg: WorkerMessage) => void;
+  close: () => void;
+}
+
+const workerSelf = self as unknown as WorkerSelf;
+
+/** The single exit back to the host. Typed, so a bad payload fails the build. */
+function post(msg: WorkerMessage): void {
+  workerSelf.postMessage(msg);
+}
+
+let pyodide: PyodideAPI | null = null;
+let pyodideReady: Promise<PyodideAPI> | null = null;
 
 // stdout/stderr buffers for the run in flight.
 let stdoutBuf = "";
@@ -150,13 +207,13 @@ async function ensurePackages(code: string): Promise<void> {
   }
 }
 
-async function ensurePyodide(): Promise<any> {
+async function ensurePyodide(): Promise<PyodideAPI> {
   if (pyodide) return pyodide;
   if (pyodideReady) return pyodideReady;
   pyodideReady = (async () => {
     // importScripts is sync; the CDN script defines global loadPyodide.
-    (self as any).importScripts(`${PYODIDE_CDN}pyodide.js`);
-    const load = (self as any).loadPyodide;
+    workerSelf.importScripts(`${PYODIDE_CDN}pyodide.js`);
+    const load = workerSelf.loadPyodide;
     pyodide = await load({ indexURL: PYODIDE_CDN });
     pyodide.runPython(CORE_BOOTSTRAP);
     return pyodide;
@@ -174,13 +231,19 @@ async function ensurePyodide(): Promise<any> {
  * dropped with no error at all. Everything crossing the Python→JS boundary goes
  * through here.
  */
-function toJs<T>(value: any, fallback: T): T {
+function toJs<T>(value: unknown, fallback: T): T {
   if (value == null) return fallback;
-  if (typeof value.toJs !== "function") return value as T;
+  // Duck-typed rather than instanceof-checked: PyProxy is a runtime class living
+  // inside the CDN bundle, so there is no constructor here to compare against.
+  const proxy = value as {
+    toJs?: (opts: { create_pyproxies: boolean }) => unknown;
+    destroy?: () => void;
+  };
+  if (typeof proxy.toJs !== "function") return value as T;
   try {
-    return value.toJs({ create_pyproxies: false }) as T;
+    return proxy.toJs({ create_pyproxies: false }) as T;
   } finally {
-    value.destroy?.();
+    proxy.destroy?.();
   }
 }
 
@@ -235,7 +298,7 @@ async function runCode(code: string, timeoutMs: number): Promise<void> {
   // Boot is over: everything from here is the user's code, so the host can stop
   // allowing a multi-minute download budget and start enforcing the (much
   // shorter) execution deadline.
-  (self as any).postMessage({ type: "booted" });
+  post({ type: "booted" });
 
   // Clear whatever the previous run left in __main__ and re-arm output capture.
   // This is what lets one interpreter serve many runs without the model seeing
@@ -253,7 +316,7 @@ async function runCode(code: string, timeoutMs: number): Promise<void> {
     // PyErr is not recoverable from here; killing the worker is the cleanest
     // reset. The main thread respawns lazily on the next runCode call. `close()`
     // is the worker-scope API to terminate a dedicated worker.
-    (self as unknown as { close: () => void }).close();
+    workerSelf.close();
   }, timeoutMs);
 
   try {
@@ -263,8 +326,18 @@ async function runCode(code: string, timeoutMs: number): Promise<void> {
     stderrBuf += err instanceof Error ? err.message : String(err);
   } finally {
     clearTimeout(watchdog);
-    if (timedOut) return; // we're terminating; the post below is moot
   }
+
+  // Deliberately *after* the finally block rather than inside it. A `return` in a
+  // finally discards whatever is in flight — including an exception thrown by the
+  // catch block above — and silently wins over the try's own outcome
+  // (no-unsafe-finally). The ordering here is unchanged, because clearTimeout
+  // always runs and neither try nor catch returns a value; what changes is the one
+  // edge case the rule exists for. If the catch itself throws (a PyProxy whose
+  // .message getter raises, say), that error now propagates to self.onmessage and
+  // is reported as `{ok: false}` instead of vanishing into a bare return, which is
+  // the difference between "the run failed" and "the run produced nothing".
+  if (timedOut) return; // we're terminating; the post below is moot
 
   // Drain the redirected stdout/stderr buffers.
   stdoutBuf = String(pyodide.runPython("__stdout.buf") ?? "");
@@ -276,20 +349,20 @@ async function runCode(code: string, timeoutMs: number): Promise<void> {
   // Auto-export any DataFrames left in __main__.
   const files = exportDataFrames();
 
-  (self as any).postMessage({ type: "result", ok: true, stdout: stdoutBuf, stderr: stderrBuf, images, files });
+  post({ type: "result", ok: true, stdout: stdoutBuf, stderr: stderrBuf, images, files });
 }
 
 self.onmessage = async (e: MessageEvent) => {
   const { code, timeoutMs = 30000 } = e.data ?? {};
   if (typeof code !== "string" || !code.trim()) {
-    (self as any).postMessage({ type: "result", ok: false, stderr: "No code provided." });
+    post({ type: "result", ok: false, stderr: "No code provided." });
     return;
   }
   try {
     await runCode(code, timeoutMs);
   } catch (err) {
     // Unrecoverable: report and let the main thread respawn next call.
-    (self as any).postMessage({
+    post({
       type: "result",
       ok: false,
       stderr: err instanceof Error ? err.message : String(err),

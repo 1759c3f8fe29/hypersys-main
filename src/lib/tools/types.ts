@@ -72,6 +72,16 @@ export interface AttachmentRef {
   id: string;
   name: string;
   mimeType?: string;
+  /**
+   * The attachment's data URL — the one exception to the metadata-only rule
+   * above, and set only for images.
+   *
+   * `ocr_image` genuinely needs the bytes: unlike `edit_file`, there is no
+   * earlier extraction step whose output it could reuse, because an image has no
+   * text layer to extract. Document attachments deliberately leave this unset so
+   * a tool cannot re-read a file whose text is already in the system prompt.
+   */
+  url?: string;
 }
 
 /** Everything an executor may need that is not one of its own arguments. */

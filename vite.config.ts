@@ -102,12 +102,123 @@ const DEV_PROVIDER_ENDPOINTS: Record<string, { url: string; envKeys: string[]; b
 
 const DEV_FAILOVER_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
 
+/**
+ * The slice of Node's ServerResponse these dev proxies actually touch.
+ *
+ * Structural rather than an import of `node:http`, so a handler can be called with
+ * a plain object; that is also why it stays a hand-written shape instead of
+ * `ServerResponse`. It replaces six byte-identical inline copies of the same
+ * annotation, each of which typed all four methods as `Function` — a type that
+ * accepts any callable at all, including one taking the wrong arguments, so it
+ * gave up exactly the checking the annotation was there to provide
+ * (no-unsafe-function-type).
+ *
+ * Signatures verified against every call site in this file rather than guessed:
+ * `writeHead` is called both bare (204) and with a header map, `end` both bare and
+ * with a JSON string, `write` only ever with a Buffer, and no return value is used
+ * anywhere — hence the optional parameters and the deliberately loose returns.
+ */
+type DevRes = {
+  writeHead: (status: number, headers?: Record<string, string>) => unknown;
+  setHeader: (name: string, value: string) => unknown;
+  write: (chunk: Uint8Array | string) => unknown;
+  end: (body?: string) => unknown;
+  headersSent: boolean;
+};
+
+/**
+ * One hop in the router's failover chain: which provider to ask, and what that
+ * provider calls the model. Mirrors the route objects api/llm.js consumes in
+ * production, and the ones src/lib/providers.ts builds on the client.
+ */
+interface ProviderRoute {
+  provider: string;
+  modelId: string;
+}
+
+/**
+ * The OpenAI-shaped chat-completion fields these four dev proxies read out of a
+ * request body.
+ *
+ * Each handler receives `body: Record<string, unknown>` — genuinely arbitrary
+ * parsed JSON — and used to destructure it through `body as any`, which switched
+ * off checking across the whole destructure at once. A typo'd `max_token` would
+ * then have forwarded `undefined` upstream and silently dropped the caller's token
+ * limit, with nothing to notice it: every one of these fields is passed straight
+ * through to the provider rather than interpreted here.
+ *
+ * Naming the shape keeps the arbitrary-JSON parameter type honest while making the
+ * five field names checked. It is emphatically NOT validation — the runtime
+ * `Array.isArray(messages)` guard in each handler is still the only thing standing
+ * between a malformed request and the upstream call, and remains load-bearing
+ * despite what the declared type below suggests.
+ *
+ * Mirrors api/llm.js, api/nvidia.js, api/mistral.js and the Pollinations leg,
+ * which serve production; this file only serves `vite dev`.
+ */
+interface ChatRequestBody {
+  messages?: unknown[];
+  model?: string;
+  /**
+   * Provider chain for the router proxy, tried in order. Typed rather than
+   * `unknown[]` because the failover loop reads `provider` and `modelId` off
+   * every entry — under `unknown[]` those were two hopeful property reads, and a
+   * client that renamed either field would compile clean here and surface as a
+   * chain where every hop 404s with "unknown provider".
+   */
+  routes?: ProviderRoute[];
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+}
+
+// The slice of a SerpApi search response this proxy reads.
+//
+// These exist because `upstream.json()` resolves to `unknown` under this project's
+// typings (lib is ES2023 with no DOM, so fetch comes from @types/node/undici), and
+// every `data.x` access below was a hard type error. Nothing caught it: the root
+// tsconfig references tsconfig.node.json, which is the only project that includes
+// this file, but no npm script ever compiled it — `typecheck` and `build` both run
+// tsconfig.app.json alone. Nine real errors sat here unreported as a result.
+//
+// Every field is optional because SerpApi omits whole sections per query — that is
+// the shape the `|| []` guards below were already written for, and making them
+// non-optional would be claiming a contract the API does not offer.
+type SerpResult = {
+  title?: string;
+  link?: string;
+  snippet?: string;
+  original_snippet?: string;
+  source?: string;
+  date?: string;
+};
+
+type SerpAnswerBox = {
+  title?: string;
+  name?: string;
+  answer?: string;
+  snippet?: string;
+  description?: string;
+};
+
+type SerpResponse = {
+  organic_results?: SerpResult[];
+  news_results?: SerpResult[];
+  top_stories?: SerpResult[];
+  answer_box?: SerpAnswerBox;
+  knowledge_graph?: SerpAnswerBox;
+  sports_results?: SerpAnswerBox;
+  ai_overview?: { text_blocks?: Array<{ snippet?: string }> };
+  related_questions?: Array<{ question?: string }>;
+  related_searches?: Array<{ query?: string }>;
+};
+
 async function proxyLlm(
   req: { headers: Record<string, string | string[] | undefined> },
-  res: { writeHead: Function; setHeader: Function; write: Function; end: Function; headersSent: boolean },
+  res: DevRes,
   body: Record<string, unknown>,
 ) {
-  const { messages, routes, temperature, top_p, max_tokens } = body as any;
+  const { messages, routes, temperature, top_p, max_tokens } = body as ChatRequestBody;
   if (!Array.isArray(messages) || messages.length === 0) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "`messages` array is required" }));
@@ -188,7 +299,7 @@ async function proxyLlm(
 
 async function proxyNvidia(
   req: { headers: Record<string, string | string[] | undefined> },
-  res: { writeHead: Function; setHeader: Function; write: Function; end: Function; headersSent: boolean },
+  res: DevRes,
   body: Record<string, unknown>,
 ) {
   const key =
@@ -203,7 +314,7 @@ async function proxyNvidia(
     return;
   }
 
-  const { messages, model, temperature, top_p, max_tokens } = body as any;
+  const { messages, model, temperature, top_p, max_tokens } = body as ChatRequestBody;
   if (!Array.isArray(messages) || messages.length === 0) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "`messages` array is required" }));
@@ -257,7 +368,7 @@ async function proxyNvidia(
 
 async function proxyMistral(
   req: { headers: Record<string, string | string[] | undefined> },
-  res: { writeHead: Function; setHeader: Function; write: Function; end: Function; headersSent: boolean },
+  res: DevRes,
   body: Record<string, unknown>,
 ) {
   const key =
@@ -272,7 +383,7 @@ async function proxyMistral(
     return;
   }
 
-  const { messages, model, temperature, top_p, max_tokens } = body as any;
+  const { messages, model, temperature, top_p, max_tokens } = body as ChatRequestBody;
   const requestedModel = model || "mistral-large-latest";
 
   // Serve exactly the model that was asked for — mirrors api/mistral.js. Never
@@ -313,10 +424,10 @@ async function proxyMistral(
 
 async function proxyPollinations(
   _req: unknown,
-  res: { writeHead: Function; setHeader: Function; write: Function; end: Function; headersSent: boolean },
+  res: DevRes,
   body: Record<string, unknown>,
 ) {
-  const { messages, model } = body as any;
+  const { messages, model } = body as ChatRequestBody;
 
   const upstream = await fetch("https://text.pollinations.ai/openai", {
     method: "POST",
@@ -340,7 +451,7 @@ async function proxyPollinations(
 
 async function proxySearch(
   _req: unknown,
-  res: { writeHead: Function; setHeader: Function; write: Function; end: Function; headersSent: boolean },
+  res: DevRes,
   body: Record<string, unknown>,
 ) {
   const serpKey =
@@ -368,8 +479,8 @@ async function proxySearch(
         console.error("[search] SerpApi error:", upstream.status);
       }
       if (upstream.ok) {
-        const data = await upstream.json();
-        const organic = (data.organic_results || []).map((r: any) => ({
+        const data = (await upstream.json()) as SerpResponse;
+        const organic = (data.organic_results || []).map((r) => ({
           title: r.title || "",
           link: r.link || "",
           snippet: r.snippet || "",
@@ -377,7 +488,7 @@ async function proxySearch(
           date: r.date || null,
         }));
 
-        const news = (data.news_results || []).map((r: any) => ({
+        const news = (data.news_results || []).map((r) => ({
           title: r.title || "",
           link: r.link || "",
           snippet: r.snippet || "",
@@ -385,7 +496,7 @@ async function proxySearch(
           date: r.date || null,
         }));
 
-        const topStories = (data.top_stories || []).map((r: any) => ({
+        const topStories = (data.top_stories || []).map((r) => ({
           title: r.title || "",
           link: r.link || "",
           snippet: r.original_snippet || r.snippet || "",
@@ -407,7 +518,7 @@ async function proxySearch(
 
         const ab = data.answer_box || data.knowledge_graph || data.sports_results;
         const overview = data.ai_overview?.text_blocks
-          ?.map((b: any) => b.snippet)
+          ?.map((b) => b.snippet)
           .filter(Boolean)
           .join(" ");
         const answerBox = ab
@@ -417,8 +528,8 @@ async function proxySearch(
           : null;
 
         const related = [
-          ...(data.related_questions || []).map((q: any) => q.question),
-          ...(data.related_searches || []).map((r: any) => r.query),
+          ...(data.related_questions || []).map((q) => q.question),
+          ...(data.related_searches || []).map((r) => r.query),
         ].filter(Boolean).slice(0, 4);
 
         // Only treat this as a win if something usable came back. A 200 with an
@@ -522,7 +633,7 @@ function h(headers: Record<string, string | string[] | undefined>, key: string):
 
 async function streamResponse(
   upstream: Response,
-  res: { writeHead: Function; setHeader: Function; write: Function; end: Function; headersSent: boolean },
+  res: DevRes,
 ) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",

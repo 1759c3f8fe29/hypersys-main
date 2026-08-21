@@ -6,9 +6,78 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 // streamed to `onResult` as the user speaks. Supported in Chrome, Edge, and
 // Safari; unsupported browsers report `isSupported === false`.
 
-function getSpeechRecognition(): any | null {
+// ---------------------------------------------------------------------------
+// Web Speech API types, declared here because TypeScript's DOM lib does not
+// ship them: SpeechRecognition never made it into lib.dom.d.ts (it is specced
+// separately from the rest of Web Speech, and only the synthesis half is
+// generated), which is why this file was written against `any` throughout.
+//
+// Only the members this hook touches are declared. Two of these shapes are the
+// reason it is worth doing at all rather than suppressing the rule:
+//
+//   - SpeechRecognitionResult is ARRAY-LIKE, NOT AN ARRAY. It has `length` and
+//     numeric indices, so `result[0].transcript` is correct while
+//     `result.map(...)` or `[...result]` are not. Under `any`, either mistake
+//     compiles and then throws at runtime mid-dictation.
+//   - `results` is a live SpeechRecognitionResultList, also array-like, and is
+//     re-walked from `resultIndex` on every event rather than iterated whole.
+//
+// These are module-scoped, so if a future TS release does add them to the DOM
+// lib these shadow the globals locally instead of colliding with them.
+// ---------------------------------------------------------------------------
+
+interface SpeechRecognitionAlternative {
+  readonly transcript: string;
+  readonly confidence: number;
+}
+
+interface SpeechRecognitionResult {
+  readonly length: number;
+  /** True once the engine has committed this phrase and will not revise it. */
+  readonly isFinal: boolean;
+  readonly [index: number]: SpeechRecognitionAlternative;
+}
+
+interface SpeechRecognitionResultList {
+  readonly length: number;
+  readonly [index: number]: SpeechRecognitionResult;
+}
+
+interface SpeechRecognitionEvent extends Event {
+  /** Index of the first result changed by this event; earlier ones are settled. */
+  readonly resultIndex: number;
+  readonly results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  /** A spec code: "no-speech", "aborted", "not-allowed", "network", … */
+  readonly error: string;
+  readonly message: string;
+}
+
+interface SpeechRecognition {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: (() => void) | null;
+}
+
+type SpeechRecognitionConstructor = new () => SpeechRecognition;
+
+function getSpeechRecognition(): SpeechRecognitionConstructor | null {
   if (typeof window === 'undefined') return null;
-  return (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition || null;
+  // Both spellings are optional: Chrome and Safari expose only the webkit-
+  // prefixed one, and Firefox exposes neither — which is what isSupported reports.
+  const w = window as typeof window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+  return w.SpeechRecognition || w.webkitSpeechRecognition || null;
 }
 
 interface UseSpeechToTextOptions {
@@ -18,7 +87,7 @@ interface UseSpeechToTextOptions {
 
 export function useSpeechToText({ onResult, onError }: UseSpeechToTextOptions = {}) {
   const [isListening, setIsListening] = useState(false);
-  const recognitionRef = useRef<any>(null);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   // Keep the latest callbacks in refs so the recognition handlers always call
   // the current closures without needing to re-create the recognition object.
@@ -64,7 +133,7 @@ export function useSpeechToText({ onResult, onError }: UseSpeechToTextOptions = 
     recognition.interimResults = true;
     recognition.lang = navigator.language || 'en-US';
 
-    recognition.onresult = (event: any) => {
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
       let finalText = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
@@ -74,7 +143,7 @@ export function useSpeechToText({ onResult, onError }: UseSpeechToTextOptions = 
       if (trimmed) onResultRef.current?.(trimmed);
     };
 
-    recognition.onerror = (event: any) => {
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       onErrorRef.current?.(event.error || 'unknown');
     };
 
@@ -87,7 +156,7 @@ export function useSpeechToText({ onResult, onError }: UseSpeechToTextOptions = 
     try {
       recognition.start();
       setIsListening(true);
-    } catch (err) {
+    } catch {
       recognitionRef.current = null;
       setIsListening(false);
       onErrorRef.current?.('start-failed');

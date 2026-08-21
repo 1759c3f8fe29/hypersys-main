@@ -11,17 +11,43 @@ import {
   deleteDoc,
   serverTimestamp,
   writeBatch,
-  setDoc
+  setDoc,
+  type FieldValue
 } from 'firebase/firestore';
 import { db } from './firebase';
 import type { ChatAttachment } from '@/components/chat/types';
+
+// ---------------------------------------------------------------------------
+// A note on the timestamp fields below, which were all `any`.
+//
+// `createdAt`/`updatedAt` carry a different type in each direction, which is why
+// one loose annotation looked like the only option: a Firestore `FieldValue`
+// sentinel goes IN (`createdAt: serverTimestamp()`), and a Timestamp comes back
+// OUT. These interfaces describe the OUT shape only — every read path normalizes
+// with `data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString()`
+// before the value reaches the app, so an ISO-8601 `string` is what a consumer
+// actually receives, always, with a fallback that guarantees never undefined.
+//
+// The write paths are unaffected by tightening this: each passes a bare inline
+// literal to addDoc/setDoc/updateDoc and is not annotated with these interfaces,
+// so the sentinel never has to satisfy them. UserSettings.updatedAt below was
+// already declared `string | null` on exactly this reasoning.
+//
+// The payoff is downstream: message-tree's nodeTime() does `typeof c === 'string'`
+// then Date.parse on this field to break ties between sibling branches, and under
+// `any` nothing connected the two ends. If a read path ever stops normalizing,
+// that is now a build error here rather than a sibling sort that silently
+// degrades to insertion order.
+// ---------------------------------------------------------------------------
 
 export interface FirestoreConversation {
   id: string;
   title: string;
   userId: string;
-  createdAt: any;
-  updatedAt: any;
+  /** ISO-8601; normalized on read. See the note above. */
+  createdAt: string;
+  /** ISO-8601; normalized on read. Sorted on descending for the sidebar. */
+  updatedAt: string;
   modelId?: string; // the model selected when active/updated
 }
 
@@ -34,7 +60,8 @@ export interface FirestoreMemory {
   userId: string;
   content: string;
   source: 'auto' | 'manual';
-  createdAt: any;
+  /** ISO-8601; normalized on read. See the note above. */
+  createdAt: string;
 }
 
 // Per-user custom instructions (Part F.3). Singleton doc at users/{uid}.
@@ -51,7 +78,8 @@ export interface FirestoreMessage {
   conversationId: string;
   role: 'user' | 'assistant';
   content: string;
-  createdAt: any;
+  /** ISO-8601; normalized on read. Read by message-tree's sibling tiebreak. */
+  createdAt: string;
   modelName?: string; // The model used to generate/respond to this message
   attachments?: ChatAttachment[];
   // Threading: a message is a node in a tree, not a slot in a list. Each
@@ -202,7 +230,11 @@ export const firestoreDb = {
 
     // Update conversation timestamp & possibly active model
     const convRef = doc(db, 'conversations', conversationId);
-    const updateData: Record<string, any> = {
+    // Heterogeneous by design — a serverTimestamp() sentinel plus, sometimes, a
+    // plain model name — which is why this is a Record rather than a named shape.
+    // Union-typed rather than `any` so a stray object (an unserializable Date, a
+    // nested literal Firestore would reject) fails here instead of at the wire.
+    const updateData: Record<string, FieldValue | string> = {
       updatedAt: serverTimestamp()
     };
     if (role === 'assistant' && modelName) {

@@ -17,13 +17,18 @@
 
 import { describe, it, expect } from "vitest";
 import { fromMarkdown } from "mdast-util-from-markdown";
+import type { Root, RootContent } from "mdast";
 import { extractArtifacts, artifactIdForCode, extractCodeBlocks } from "@/lib/artifacts";
 
 /** The ids ChatMessage's CodeBlock would produce for a given markdown source. */
 function idsFromRenderer(markdown: string): string[] {
   const tree = fromMarkdown(markdown);
   const out: string[] = [];
-  const walk = (node: any) => {
+  // Typed against mdast rather than `any`: `type === "code"` then narrows to the
+  // Code node, so `lang` and `value` below are the real fields and not two
+  // hopeful property reads. `"children" in node` is the honest recursion guard —
+  // a Code node is a leaf and has none.
+  const walk = (node: Root | RootContent) => {
     if (node.type === "code") {
       // react-markdown gives `language-<lang>` on the <code> element and the
       // node's value as children; ChatMessage strips one trailing newline.
@@ -31,7 +36,9 @@ function idsFromRenderer(markdown: string): string[] {
       const content = String(node.value).replace(/\n$/, "");
       out.push(artifactIdForCode(language, content));
     }
-    for (const child of node.children || []) walk(child);
+    if ("children" in node) {
+      for (const child of node.children) walk(child);
+    }
   };
   walk(tree);
   return out;

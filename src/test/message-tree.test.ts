@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildMessageForest, linearizeForest, switchBranch, type TreeMessage } from '@/lib/message-tree';
+import { buildMessageForest, linearizeForest, switchBranch, type TreeMessage, type TreeNode } from '@/lib/message-tree';
 
 // Helpers build minimal tree messages. createdAt is a parseable ISO string so
 // the sibling tiebreak has something deterministic to order on.
@@ -34,7 +34,7 @@ describe('message-tree', () => {
     const out = linearizeForest(forest);
     expect(out.map((m) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2']);
     // All roots report branch 1/1 → no switcher anywhere.
-    expect(out.every((m) => (m as any).__branchCount === 1)).toBe(true);
+    expect(out.every((m) => m.__branchCount === 1)).toBe(true);
   });
 
   it('walks a threaded chain down to the leaf', () => {
@@ -48,7 +48,7 @@ describe('message-tree', () => {
     const out = linearizeForest(buildMessageForest(flat));
     expect(out.map((m) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2']);
     // One root only.
-    expect(out.filter((m) => (m as any).__branchCount === 1)).toHaveLength(4);
+    expect(out.filter((m) => m.__branchCount === 1)).toHaveLength(4);
   });
 
   it('treats a regenerated reply as a sibling under the same parent', () => {
@@ -68,8 +68,8 @@ describe('message-tree', () => {
     expect(out.map((m) => m.id)).toEqual(['u1', 'a2']);
     // u1 is a sole root (1/1), a2 reports it's branch 2 of 2.
     const a2 = out.find((m) => m.id === 'a2')!;
-    expect((a2 as any).__branchIndex).toBe(2);
-    expect((a2 as any).__branchCount).toBe(2);
+    expect(a2.__branchIndex).toBe(2);
+    expect(a2.__branchCount).toBe(2);
   });
 
   it('switchBranch flips the visible sibling and re-linearizes without rereading', () => {
@@ -86,8 +86,8 @@ describe('message-tree', () => {
     const prev = switchBranch(forest, 'u1', 'prev');
     expect(prev.map((m) => m.id)).toEqual(['u1', 'a1']);
     // The older branch reports index 1 of 2.
-    expect((prev[1] as any).__branchIndex).toBe(1);
-    expect((prev[1] as any).__branchCount).toBe(2);
+    expect(prev[1].__branchIndex).toBe(1);
+    expect(prev[1].__branchCount).toBe(2);
     // Switch next again returns to a2.
     const next = switchBranch(forest, 'u1', 'next');
     expect(next.map((m) => m.id)).toEqual(['u1', 'a2']);
@@ -120,7 +120,7 @@ describe('message-tree', () => {
     ] as TreeMessage[];
     const forest = buildMessageForest(flat);
     // a1 is a child of u1, so it isn't one of the roots; find it by id.
-    const findNode = (nodes: any[], id: string): any => {
+    const findNode = (nodes: TreeNode[], id: string): TreeNode | undefined => {
       for (const n of nodes) {
         if (n.id === id) return n;
         const r = findNode(n.children ?? [], id);

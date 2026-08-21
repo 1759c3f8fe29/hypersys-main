@@ -404,6 +404,19 @@ function routerError(status: number, errText: string): string {
     if (parsed.error === "no_provider_configured") {
       return "No AI provider is configured on the server.";
     }
+    // Every route answered 404. Since 3.11 that is a *capacity* reading first and
+    // an identity reading second — NVIDIA 404s a route that is merely unserved at
+    // that moment (evidence in api/_failover.js) — so the advice is "try again",
+    // not "that model is gone".
+    if (parsed.error === "model_unavailable") {
+      return "This model isn't being served right now. That's usually temporary — try again in a moment, or pick another model.";
+    }
+    // Nothing refused the request — every route in the chain went quiet. Worth
+    // its own message because the generic one reads as "your request was wrong",
+    // and the useful advice here is the opposite: retry, or pick another model.
+    if (parsed.error === "all_providers_timed_out") {
+      return "The model didn't respond in time. Try again, or switch to another model — some large models are slow to wake up.";
+    }
     if (typeof parsed.detail === "string" && parsed.detail) return parsed.detail;
   } catch {
     // Not JSON — fall through to the generic message.
@@ -847,7 +860,12 @@ export async function pumpOpenAiStream(
 
 function friendlyHttpError(status: number, providerLabel: string): string {
   if (status === 401 || status === 403) return `Authentication failed with ${providerLabel}. Please check your API key.`;
-  if (status === 404) return "That model is currently unavailable on NVIDIA NIM. Try a different one.";
+  // "Currently" is load-bearing and was verified in 3.11: NVIDIA returned 404 three
+  // times running for an id that answered three times minutes later, so this must
+  // not read as "that model no longer exists". Suggesting a retry before a switch
+  // is the cheaper of the two actions and works about as often.
+  if (status === 404)
+    return "That model isn't being served by NVIDIA NIM right now. Try again in a moment, or pick a different one.";
   if (status === 429) return "Rate limit reached. Please wait a moment and try again.";
   // 529 = NIM's "Service temporarily overloaded". The model exists and works;
   // its capacity pool is just saturated. Say so instead of implying it's broken.

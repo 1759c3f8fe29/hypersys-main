@@ -345,7 +345,7 @@ function mistakesBlock(): string[] {
  *
  * WHY IT HAS TO EXIST AT ALL
  *
- * The five tool schemas are already sent in the request's `tools` array, so the
+ * The tool schemas are already sent in the request's `tools` array, so the
  * model can see their names and parameters. What it could not see was the
  * *policy*, and the prompt around it actively pushed the other way: the accuracy
  * section above orders the model to "treat your own knowledge as stale and say
@@ -387,8 +387,9 @@ function toolsBlock(): string[] {
     "- `generate_image` — produces an image from a prompt you write.",
     "- `create_file` — builds a real downloadable file (docx, pdf, xlsx, csv, pptx, txt, md, json).",
     "- `edit_file` — rewrites a file the user attached and returns a new download.",
+    "- `ocr_image` — reads the text out of an attached image (a scan, a receipt, a form, a table screenshot) verbatim, when the exact words matter more than a description.",
     "",
-    "Each tool's own description states its exact triggers and arguments. Follow them. The rules below govern all five.",
+    "Each tool's own description states its exact triggers and arguments. Follow them. The rules below govern all six.",
     "",
     "## Call them automatically. Never ask for permission.",
     "",

@@ -12,7 +12,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 
-import { RunButton, RunOutput, isRunnableLanguage, useCodeRunner } from "@/components/chat/CodeRunner";
+import { RunButton, RunOutput } from "@/components/chat/CodeRunner";
+import { isRunnableLanguage, useCodeRunner } from "@/components/chat/use-code-runner";
 import { resetRunsForTest } from "@/lib/code-runs";
 
 const runCodeStub = vi.hoisted(() => vi.fn());

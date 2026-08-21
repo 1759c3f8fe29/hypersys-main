@@ -10,6 +10,7 @@ import type { ToolDefinition } from "./types";
 import { CREATE_FILE_SCHEMA, executeCreateFile } from "./create-file";
 import { EDIT_FILE_SCHEMA, executeEditFile } from "./edit-file";
 import { GENERATE_IMAGE_SCHEMA, executeGenerateImage } from "./generate-image";
+import { OCR_IMAGE_SCHEMA, executeOcrImage } from "./ocr-image";
 import { RUN_CODE_SCHEMA, executeRunCode } from "./run-code";
 import { WEB_SEARCH_SCHEMA, executeWebSearch } from "./web-search";
 import type { ToolSchema } from "@/lib/ai";
@@ -22,6 +23,7 @@ const DEFINITIONS: ToolDefinition[] = [
   { name: "create_file", schema: CREATE_FILE_SCHEMA, execute: executeCreateFile },
   { name: "edit_file", schema: EDIT_FILE_SCHEMA, execute: executeEditFile },
   { name: "run_code", schema: RUN_CODE_SCHEMA, execute: executeRunCode },
+  { name: "ocr_image", schema: OCR_IMAGE_SCHEMA, execute: executeOcrImage },
 ];
 
 export const TOOL_REGISTRY: Record<string, ToolDefinition> = Object.fromEntries(

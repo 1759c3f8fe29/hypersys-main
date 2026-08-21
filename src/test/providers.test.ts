@@ -8,6 +8,12 @@
 
 import { describe, it, expect } from "vitest";
 
+// Two views of the same set, on purpose. `FAILOVER_STATUSES` as api/llm.js
+// re-exports it — the production request path — and the shared definition both it
+// and providers.ts import. The test below asserts they are one object.
+import { FAILOVER_STATUSES } from "../../api/llm.js";
+import { FAILOVER_STATUSES as SHARED_FAILOVER_STATUSES } from "../../api/_failover.js";
+
 import {
   MODELS,
   SELECTABLE_MODELS,
@@ -17,6 +23,7 @@ import {
   DEFAULT_IMAGE_MODEL_ID,
   DEFAULT_VISION_MODEL_ID,
   IMAGE_FALLBACK_CHAIN,
+  LEGACY_MODEL_IDS,
   getModel,
   canonicalModelId,
   isImageModel,
@@ -137,20 +144,84 @@ describe("getModel", () => {
       expect(SELECTABLE_MODELS.some((m) => m.id === retired)).toBe(false);
     }
   });
+
+  // getModel does exactly ONE alias hop: LEGACY_MODEL_IDS[id], then a single
+  // MODEL_BY_ID lookup. So an alias whose value is itself another alias key
+  // resolves to undefined — the message loses its byline and a retry routes as
+  // unknown, which is the precise failure the map exists to prevent.
+  //
+  // This is not hypothetical. Renaming "kimi-k2.6" to "kimi-k3" left
+  // "deepseek-v4-pro" -> "kimi-k2.6" pointing at a dead key, and nothing in the
+  // type system objects: Record<string, string> is perfectly happy. Caught by
+  // hand that time; caught here from now on.
+  it("points every legacy alias at a live catalogue id, never at another alias", () => {
+    const liveIds = new Set(MODELS.map((m) => m.id));
+    for (const [legacy, target] of Object.entries(LEGACY_MODEL_IDS)) {
+      expect(
+        liveIds.has(target),
+        `"${legacy}" -> "${target}", which is not a model in MODELS` +
+          (LEGACY_MODEL_IDS[target] ? " (it is another legacy alias — chains do not resolve)" : ""),
+      ).toBe(true);
+      // And the alias must actually be reachable through the public accessor.
+      expect(canonicalModelId(legacy), `"${legacy}" does not resolve`).toBe(target);
+    }
+  });
+
+  it("has no legacy alias shadowed by a live id of the same name", () => {
+    // getModel checks MODEL_BY_ID first, so such an entry can never fire. It is
+    // dead weight that reads like an active redirect — worse than absent.
+    const liveIds = new Set(MODELS.map((m) => m.id));
+    for (const legacy of Object.keys(LEGACY_MODEL_IDS)) {
+      expect(
+        liveIds.has(legacy),
+        `"${legacy}" is both a live model id and a legacy alias; the alias is unreachable`,
+      ).toBe(false);
+    }
+  });
 });
 
 describe("shouldFailover", () => {
   it("fails over on transient provider trouble", () => {
-    for (const status of [429, 500, 502, 503, 504, 529]) {
+    for (const status of [404, 429, 500, 502, 503, 504, 529]) {
       expect(shouldFailover(status), `${status} should fail over`).toBe(true);
     }
   });
 
-  // Failing over on these hides a broken key or a dead model id behind a backup
+  // Failing over on these hides a broken request or a rejected key behind a backup
   // that quietly works, so the fault never surfaces.
+  //
+  // 404 was in this list until 3.11 and has moved to the failover list above. It is
+  // not a configuration fault on the provider this catalogue mostly runs on: NVIDIA
+  // returned 404 three times running for an id that answered three times minutes
+  // later. api/_failover.js carries the evidence and the argument for why the
+  // "quietly working backup" worry does not apply to it.
   it("does not fail over on configuration faults", () => {
-    for (const status of [400, 401, 403, 404]) {
+    for (const status of [400, 401, 403]) {
       expect(shouldFailover(status), `${status} must not fail over`).toBe(false);
     }
+  });
+
+  // shouldFailover() is NOT what runs in production — the routing chain lives in
+  // the serverless proxy, api/llm.js. It used to keep its own hand-copied
+  // FAILOVER_STATUSES; the comment there claimed it "mirrored" this function and
+  // nothing checked that, so every assertion above was exercising a copy of the
+  // rule that no request ever reaches. Worse than no coverage: it reads as
+  // confidence.
+  //
+  // The duplication is gone. Both sides now import api/_failover.js, so the
+  // range-walking drift test that used to live here would compare a set against
+  // itself and pass no matter what. This replaces it with the property that still
+  // has teeth: they must be the *same object*. Re-introduce a local copy in either
+  // file — the exact regression the old comment warned about — and this fails,
+  // even if the two copies happen to agree on the day it is written.
+  it("uses the very same failover set as the proxy, not a copy of it", () => {
+    const viaProviders = new Set(
+      Array.from({ length: 200 }, (_, i) => 400 + i).filter(shouldFailover),
+    );
+    expect(viaProviders).toEqual(FAILOVER_STATUSES);
+
+    // Object identity is the part a value comparison cannot give us: two separately
+    // written sets can be equal today and diverge tomorrow.
+    expect(SHARED_FAILOVER_STATUSES).toBe(FAILOVER_STATUSES);
   });
 });

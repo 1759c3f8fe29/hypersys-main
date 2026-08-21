@@ -33,7 +33,7 @@ import { Menu, ArrowDown, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
 import { extractFirstMarkdownImage, sanitizeAssistantText, withPersistedImage } from '@/lib/chat-format';
-import { buildMessageForest, linearizeForest, switchBranch } from '@/lib/message-tree';
+import { buildMessageForest, linearizeForest, switchBranch, type TreeNode } from '@/lib/message-tree';
 import { extractMemories, dedupeMemories } from '@/lib/memory';
 
 interface ArenaResponse {
@@ -245,7 +245,7 @@ export default function Chat() {
   // DB: switching branches is a pure tree reshape (the data didn't change,
   // only which sibling is visible). A fresh conversation load rebuilds this;
   // a live send appends into it. See switchBranch() in message-tree.ts.
-  const messageForestRef = useRef<any[]>([]);
+  const messageForestRef = useRef<TreeNode[]>([]);
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [statusText, setStatusText] = useState('');
@@ -547,7 +547,11 @@ export default function Chat() {
     } finally {
       setIsMessagesLoading(false);
     }
-  }, [activeConversationId]);
+    // revokeObjectUrls is a useCallback with empty deps, so its identity never
+    // changes: listing it satisfies the exhaustive-deps rule without making
+    // loadMessages unstable, which would re-fire the effect below and refetch
+    // the conversation on every render.
+  }, [activeConversationId, revokeObjectUrls]);
 
   useEffect(() => { loadMessages(); }, [loadMessages]);
 
@@ -932,8 +936,6 @@ export default function Chat() {
           await saveMessage(convId, 'assistant', imageContent, selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
         }
       } else {
-        let fullContent = '';
-
         const messagesForModel = [...allMessages];
 
         // When images/files are uploaded, use the Chat model first to craft a 1000-word
@@ -1166,13 +1168,22 @@ export default function Chat() {
               onChunk: handleDelta,
               signal: abortControllerRef.current!.signal,
               deepThink,
-              // edit_file resolves its attachment_id against these. Metadata only
-              // — the file's text already reached the model via buildDocumentContext,
-              // and edit_file never re-extracts. Non-image attachments only: image
-              // attaches never carry a text attachment_id.
+              // Tools that name an attachment resolve it against these.
+              //
+              // Documents carry metadata only: their text already reached the
+              // model via buildDocumentContext, and edit_file never re-extracts.
+              // Images additionally carry their data URL, because ocr_image has
+              // no earlier extraction to reuse — an image has no text layer, so
+              // reading it means sending the bytes. edit_file rejects an image id
+              // rather than rewriting one.
               attachments: pendingAttachments
-                .filter((a) => a.type === 'file')
-                .map((a) => ({ id: a.id, name: a.name, mimeType: a.mimeType })),
+                .filter((a) => a.type === 'file' || a.type === 'image')
+                .map((a) => ({
+                  id: a.id,
+                  name: a.name,
+                  mimeType: a.mimeType,
+                  ...(a.type === 'image' ? { url: a.url } : {}),
+                })),
               onToolStart: ({ name, args }) => {
                 // A tool call is proof of life just as much as a first token is:
                 // the provider answered, it just answered with a call instead of
@@ -1204,6 +1215,8 @@ export default function Chat() {
                   // would be the interface telling the same lie the prompt
                   // forbids the model from telling.
                   setStatusText('Writing Python...');
+                } else if (name === 'ocr_image') {
+                  setStatusText('Reading text from the image...');
                 } else {
                   setStatusText('Working...');
                 }

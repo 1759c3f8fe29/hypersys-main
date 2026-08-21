@@ -1,6 +1,31 @@
-import { motion } from 'framer-motion';
+import { motion, type TargetAndTransition } from 'framer-motion';
 import { Zap, Globe, Shield, Rocket } from 'lucide-react';
 import { LOGO_URL } from '@/lib/assets';
+
+/**
+ * An animation target that is also allowed to drive CSS custom properties.
+ *
+ * framer-motion animates custom properties perfectly well at runtime, but its
+ * `TargetAndTransition` type has no index signature for them, so a `'--angle'`
+ * key is unassignable and both conic-gradient spins below were written as
+ * `as any`. That cast was wider than the problem: it also switched off checking
+ * on the real properties sitting in the same literal, so a mistyped `scale` or a
+ * string where a number belongs would have gone through silently.
+ *
+ * `Record<`--${string}`, …>` becomes a pattern index signature, which constrains
+ * only the keys that actually start with `--` and leaves every known
+ * TargetAndTransition property checked as before. The intersection is assignable
+ * to TargetAndTransition, so the targets below need no cast at all.
+ */
+type CssVarTarget = TargetAndTransition & Record<`--${string}`, string | string[]>;
+
+// Hoisted out of the JSX: both are constant, and these animations repeat forever,
+// so there is no reason to rebuild the target object on every render.
+const RING_SPIN_AND_PULSE: CssVarTarget = {
+  '--angle': ['0deg', '360deg'],
+  scale: [1, 1.1, 1],
+};
+const INNER_GRADIENT_SPIN: CssVarTarget = { '--angle': ['0deg', '360deg'] };
 
 interface WelcomeScreenProps {
   modelName?: string;
@@ -56,10 +81,7 @@ export default function WelcomeScreen({ onSuggestionClick ,
               style={{
                 background: 'conic-gradient(from var(--angle), hsl(var(--primary) / 0.3), hsl(200 80% 50% / 0.3), hsl(280 70% 50% / 0.3), hsl(var(--primary) / 0.3))',
               }}
-              animate={{
-                '--angle': ['0deg', '360deg'],
-                scale: [1, 1.1, 1],
-              } as any}
+              animate={RING_SPIN_AND_PULSE}
               transition={{
                 '--angle': { duration: 4, repeat: Infinity, ease: 'linear' },
                 scale: { duration: 3, repeat: Infinity, ease: 'easeInOut' },
@@ -93,7 +115,7 @@ export default function WelcomeScreen({ onSuggestionClick ,
                 style={{
                   background: 'conic-gradient(from var(--angle), transparent, hsl(var(--primary) / 0.2), transparent)',
                 }}
-                animate={{ '--angle': ['0deg', '360deg'] } as any}
+                animate={INNER_GRADIENT_SPIN}
                 transition={{ duration: 3, repeat: Infinity, ease: 'linear' }}
               />
               <img src={LOGO_URL} alt="Flyer AI" className="w-full h-full object-cover relative z-10 rounded-2xl" />

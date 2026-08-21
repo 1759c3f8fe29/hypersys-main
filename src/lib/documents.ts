@@ -14,10 +14,13 @@
 // parsers are dynamically imported so a user who only ever sends images never
 // downloads the PDF or spreadsheet machinery.
 
-// OCR fallback for scanned PDFs and image-of-text uploads. `nemotron-parse` is
-// a non-conversational service live on the NVIDIA endpoint (verified via
-// scripts/verify-models.mjs); plain text layers stay the fast path and only
-// an empty result routes through it, so a normal PDF never pays the cost.
+// OCR fallback for scanned PDFs — pages that carry no text layer at all.
+// `nemotron-parse` is a non-conversational service live on the NVIDIA endpoint
+// (verified via scripts/verify-models.mjs); a plain text layer stays the fast
+// path and only an empty page routes through OCR, so a normal PDF never pays the
+// cost. Image *uploads* are deliberately not handled here — that case belongs to
+// the `ocr_image` tool, which the model calls when it judges the image to be a
+// document. See src/lib/tools/ocr-image.ts.
 import { ocrImage } from "./ai";
 
 export interface ExtractedDocument {
@@ -44,6 +47,16 @@ export interface ExtractedDocument {
 // Beyond this the budgeter would drop conversation history to make room, which
 // is a worse trade than telling the user their file was truncated.
 const MAX_CHARS_PER_DOC = 120_000;
+
+// Fallback OCR is metered: a scanned 500-page book must not fire 500 paid calls.
+// Only pages with no text layer route through OCR, and only this many of them.
+const OCR_PAGE_BUDGET = 10;
+
+// A bound on pages examined. MAX_CHARS_PER_DOC stops documents that have text;
+// this stops the other shape — an all-scan file past the OCR budget, where every
+// page yields nothing, so the size cap never trips and the loop would parse
+// every text layer in a 2000-page file to find them all empty.
+const MAX_PDF_PAGES_SCANNED = 200;
 
 const TEXT_LIKE_EXTENSIONS = new Set([
   "txt", "md", "markdown", "json", "csv", "tsv", "log", "xml", "yaml", "yml",
@@ -80,13 +93,14 @@ export function canExtract(file: File): boolean {
     ext === "xlsx" || ext === "xls" ||
     ext === "pptx" ||
     TEXT_LIKE_EXTENSIONS.has(ext) ||
-    file.type.startsWith("text/") ||
-    // An image upload can carry readable text — a photographed receipt, a
-    // screenshot, a scan. We route it through nemotron-parse below rather than
-    // handing the chat model an opaque data URL it has to guess at. A purely
-    // decorative image (no text) returns an honest empty result.
-    (file.type.startsWith("image/") && ext !== "gif" && ext !== "svg")
+    file.type.startsWith("text/")
   );
+  // Images are deliberately absent. An image has no text layer to extract, so
+  // "extracting" one means an OCR call, and doing that here would bill every
+  // image upload — including the photo the user just wants looked at — and
+  // report a text-free picture as an unreadable file. That case belongs to the
+  // `ocr_image` tool, which the model calls only when the image is a document.
+  // See src/lib/tools/ocr-image.ts for the full reasoning.
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +136,34 @@ async function renderPageToDataUrl(
   }
 }
 
+/**
+ * The notices appended after a PDF's page blocks, telling the model what it did
+ * not get.
+ *
+ * Pure and exported so the rule that matters here is testable without a real
+ * scanned PDF: **a document that fitted the budget must not be described as
+ * partial.** The version this replaced tested `i <= doc.numPages` — the loop's
+ * own condition, so always true — and therefore announced a budget overrun on
+ * every complete ten-page scan, leaving the model to hedge about a file it had
+ * read in full.
+ */
+export function pdfCoverageNotices(
+  unreadScanPages: number,
+  lastPageScanned: number,
+  totalPages: number,
+): string[] {
+  const notices: string[] = [];
+  if (unreadScanPages > 0) {
+    notices.push(
+      `--- (${unreadScanPages} further scanned ${unreadScanPages === 1 ? "page was" : "pages were"} not OCR-ed: the document exceeded the ${OCR_PAGE_BUDGET}-page OCR budget) ---`,
+    );
+  }
+  if (totalPages > lastPageScanned) {
+    notices.push(`--- (pages ${lastPageScanned + 1}-${totalPages} were not read) ---`);
+  }
+  return notices;
+}
+
 async function extractPdf(file: File): Promise<{ text: string; units: number }> {
   // Vite needs the worker resolved explicitly; without this pdf.js tries to
   // fetch a worker path that does not exist in the built bundle.
@@ -137,13 +179,14 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
   // quadratic, and the whole point of the early break is that this runs on
   // 500-page files.
   let size = 0;
-  // Fallback OCR is metered: a scanned 500-page book must not fire 500 paid
-  // calls. We OCR only the first pages with no text layer, up to this cap — the
-  // same budget that bounds the fast path. A larger scan still gets a useful
-  // head-start the model can answer from.
-  let ocrBudget = 10;
-  let usedOcr = false;
-  for (let i = 1; i <= doc.numPages; i++) {
+  let ocrBudget = OCR_PAGE_BUDGET;
+  // Scanned pages reached after the budget ran out. Counted rather than flagged
+  // so the closing notice can say how many pages went unread — and so a scan that
+  // fits entirely inside the budget produces no notice at all.
+  let unreadScanPages = 0;
+  const lastPage = Math.min(doc.numPages, MAX_PDF_PAGES_SCANNED);
+
+  for (let i = 1; i <= lastPage; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
     const pageText = content.items
@@ -157,17 +200,21 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
     // OCR instead of leaving it silently empty. This is the case the old code
     // punted on with "upload it as an image instead"; the re-upload is now the
     // app's job, not the user's.
-    if (!pageText && ocrBudget > 0) {
-      ocrBudget--;
-      const dataUrl = await renderPageToDataUrl(page as never);
-      if (dataUrl) {
-        const ocr = await ocrImage(dataUrl);
-        if (ocr.text) {
-          usedOcr = true;
-          block = `--- Page ${i} (OCR) ---\n${ocr.text}`;
+    if (!pageText) {
+      if (ocrBudget > 0) {
+        ocrBudget--;
+        const dataUrl = await renderPageToDataUrl(page as never);
+        if (dataUrl) {
+          const ocr = await ocrImage(dataUrl);
+          if (ocr.text) block = `--- Page ${i} (OCR) ---\n${ocr.text}`;
+          // ocr.text === "" with no error is an honest "no text on this page"
+          // (a blank or decorative sheet) — leave block empty and move on.
         }
-        // ocr.text === "" with no error is an honest "no text on this page"
-        // (a blank or decorative sheet) — leave block empty and move on.
+      } else {
+        // Out of OCR budget. Keep scanning rather than breaking: later pages may
+        // carry a text layer, and reading those costs nothing. A PDF with a
+        // scanned cover and forty digital pages must not lose the forty.
+        unreadScanPages++;
       }
     }
 
@@ -179,15 +226,12 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
     // Stop early on very long PDFs; the cap would discard the rest anyway and
     // parsing every page of a 500-page file just to throw it away is wasteful.
     if (size > MAX_CHARS_PER_DOC) break;
-
-    if (usedOcr === true && ocrBudget === 0 && i <= doc.numPages) {
-      // The scan had more OCR-able pages than the budget allowed. Tell the
-      // model so it can say "I read the first 10 pages" rather than imply it
-      // saw the whole document.
-      pages.push(`--- (remaining pages not OCR-ed; the scan exceeded the OCR budget) ---`);
-      break;
-    }
   }
+
+  // Say what was left out, so the model reports "I read the first ten scanned
+  // pages" instead of implying it saw the whole file. Each notice is omitted when
+  // its count is zero — see pdfCoverageNotices for why that matters.
+  pages.push(...pdfCoverageNotices(unreadScanPages, lastPage, doc.numPages));
 
   return { text: pages.join("\n\n"), units: doc.numPages };
 }
@@ -283,40 +327,6 @@ async function extractPlainText(file: File): Promise<{ text: string }> {
   return { text: text.trim() };
 }
 
-/**
- * OCR an image-of-text upload via nemotron-parse. The file is converted to a
- * data URL once (the service takes a data: URL, not a File) and sent in a
- * single image-only request. A decorative image (no text) returns an honest
- * empty result; a service failure returns empty text, which the caller turns
- * into the "no readable text" message rather than a silent guess.
- */
-async function extractImage(file: File): Promise<{ text: string; units?: number }> {
-  const dataUrl = await fileToDataUrl(file);
-  const ocr = await ocrImage(dataUrl);
-  if (ocr.error && !ocr.text) {
-    // Surface the service-level failure as empty text — extractDocument turns
-    // that into the "no readable text" message above, so the user is told the
-    // OCR service was unavailable rather than that the image was blank.
-    return { text: "" };
-  }
-  return { text: ocr.text, units: ocr.text ? 1 : undefined };
-}
-
-/**
- * Read a File as a data: URL. Kept here rather than imported from the upload
- * path so the extractors stay self-contained — the upload code in ChatInput
- * rolls the same Promise-based FileReader and we do not want this module
- * coupled to the React layer.
- */
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new Error("Could not read the image file."));
-    reader.readAsDataURL(file);
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -350,12 +360,6 @@ export async function extractDocument(
     else if (ext === "pptx") raw = await extractPptx(file);
     else if (TEXT_LIKE_EXTENSIONS.has(ext) || file.type.startsWith("text/")) {
       raw = await extractPlainText(file);
-    } else if (file.type.startsWith("image/")) {
-      // An uploaded image carries no text layer, so OCR is the only path. A
-      // photograph of a document, a receipt, or a screenshot becomes readable
-      // text instead of an opaque data URL the chat model guesses at. A purely
-      // decorative image returns an honest empty result below.
-      raw = await extractImage(file);
     } else if (ext === "doc" || ext === "ppt") {
       // Legacy binary Office formats need a different parser entirely; saying so
       // is better than returning empty text that reads as an empty document.
@@ -372,11 +376,12 @@ export async function extractDocument(
       return {
         ...base,
         text: "",
-        // For a PDF the scan case is now handled inside extractPdf (OCR is
-        // attempted on pages with no text layer), so an empty result here means
-        // OCR was unavailable or returned nothing — an honest "no readable
-        // text" rather than a guessed scan message. For images the same applies.
-        error: "No readable text found in this file (it may be blank, or the OCR service was unavailable).",
+        // For a PDF the scan case is handled inside extractPdf (OCR runs on
+        // pages with no text layer), so an empty result here means the OCR
+        // service was unavailable or the pages genuinely hold no text — an
+        // honest "no readable text" rather than the old advice to re-upload the
+        // file as an image, which is work the app now does itself.
+        error: "No readable text found in this file (it may be blank, or a scan the OCR service could not read).",
         units: raw.units,
       };
     }

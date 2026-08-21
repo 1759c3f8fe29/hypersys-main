@@ -17,6 +17,33 @@ export interface TreeMessage {
   role: 'user' | 'assistant';
   parentMessageId?: string | null;
   siblingIndex?: number;
+  /**
+   * ISO-8601 string, used only as the sibling-sort tiebreak (see nodeTime).
+   *
+   * Declared explicitly rather than left to the index signature below, because
+   * that is what makes the read checked: under a bare `[key: string]` a rename
+   * to `created_at` upstream would still compile here, `nodeTime` would silently
+   * return 0 for every node, and the tiebreak would quietly stop working with no
+   * error anywhere. `string` is the right type because firestore-db normalizes
+   * it on the way out — `data.createdAt?.toDate?.()?.toISOString()` — so a raw
+   * Firestore Timestamp never reaches this module. Optional because brand-new UI
+   * placeholders have not been written to the DB yet.
+   */
+  createdAt?: string;
+  /**
+   * The rest of the DB row — content, model, attachments, sources and so on.
+   * This module deliberately models none of it: it threads messages and does not
+   * care what a message says.
+   *
+   * `any` rather than `unknown`, and that is the considered choice. TreeNode
+   * extends this interface and is what the message list renders, so every
+   * consumer reads `node.content`, `node.attachments`, etc. through this
+   * signature. Under `unknown` each of those reads needs its own cast, which
+   * does not remove the unsoundness — it copies it into a dozen call sites and
+   * loses this comment on the way. Keeping it in one declaration, named and
+   * explained, is the smaller lie.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [key: string]: any;
 }
 
@@ -27,6 +54,24 @@ export interface TreeMessage {
 export interface TreeNode extends TreeMessage {
   children: TreeNode[];
   activeChildIndex: number;
+  /**
+   * Branch-switcher metadata, stamped on by linearizeForest: 1-based position
+   * among siblings, and the total sibling count.
+   *
+   * Declared here because this module is what writes them. They were being
+   * assigned through `(node as any)`, which meant the two names existed only as
+   * string literals — so the three places that read them (Chat.tsx's own
+   * Message interface, which had to restate both fields, and the unit tests,
+   * which cast on every assertion) had no way to be checked against the writer.
+   * A typo in either name would have produced a switcher that silently never
+   * appeared.
+   *
+   * Optional, matching the consumer's contract: ChatMessage treats an undefined
+   * branchCount as "sole branch", which is exactly the state of a node that has
+   * not been through linearizeForest — a message just sent, for instance.
+   */
+  __branchIndex?: number;
+  __branchCount?: number;
 }
 
 /**
@@ -118,8 +163,8 @@ function nodeTime(n: TreeMessage): number {
 export function linearizeForest(forest: TreeNode[]): TreeNode[] {
   const out: TreeNode[] = [];
   const visit = (node: TreeNode, branchIndex: number, branchCount: number) => {
-    (node as any).__branchIndex = branchIndex;
-    (node as any).__branchCount = branchCount;
+    node.__branchIndex = branchIndex;
+    node.__branchCount = branchCount;
     out.push(node);
     const kids = node.children ?? [];
     if (kids.length === 0) return;

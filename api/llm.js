@@ -19,6 +19,7 @@
 
 import { applyGuard } from "./_guard.js";
 import { applyMeter } from "./_meter.js";
+import { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES } from "./_failover.js";
 
 // Keep in step with PROVIDERS in src/lib/providers.ts. Server-side only, so no
 // VITE_-prefixed key is read here by preference — those get inlined into the
@@ -36,6 +37,33 @@ const PROVIDER_ENDPOINTS = {
     byokHeader: "x-mistral-api-key",
     supportsTools: true,
   },
+  // The keyless final fallback, and — since api/pollinations.js was deleted — the
+  // only way into Pollinations on this surface.
+  //
+  // That file was a second, standalone POST /api/pollinations handler. It had
+  // ZERO callers (the client's only api paths are /api/llm, /api/nvidia,
+  // /api/mistral, /api/ocr and /api/search, none of them built dynamically), and
+  // it was the one endpoint here that did not import _meter.js — which is the
+  // sole route to _auth.js's verifyRequest. Its own header claimed it "stays
+  // behind applyGuard's Origin allowlist", but _guard.js documents the opposite
+  // for exactly the caller that matters: a request with no Origin header is
+  // "deliberately let through for _auth.js to attribute and meter". So a bare
+  // curl reached the upstream fetch with nothing in between — an open,
+  // unauthenticated, unmetered streaming LLM relay on the deployed origin.
+  //
+  // Worth recording WHY, because it was not an oversight: the handler wanted to
+  // be authenticated but not charged against the daily allowance (correct — the
+  // safety net must not be taken away at the moment it is needed, and Pollinations
+  // costs us nothing). applyMeter cannot express that; it verifies AND consumes,
+  // and its only bypass is opts.byokHeaders. Faced with an API that offered
+  // "authenticated and metered" or nothing, the file took nothing — and lost
+  // authentication as collateral damage. If a keyless route ever does need its own
+  // handler, add an explicit skip-quota option to applyMeter rather than dropping
+  // the module: the two properties are separable and the API should say so.
+  //
+  // Nothing was lost by deleting it. This route serves `flyer-free` through the
+  // guarded, metered chain below, and verify-models now probes it live (it
+  // answered in 5300ms), so the fallback is exercised rather than assumed.
   pollinations: {
     url: "https://text.pollinations.ai/openai",
     envKeys: [],
@@ -44,18 +72,81 @@ const PROVIDER_ENDPOINTS = {
   },
 };
 
-// Mirrors shouldFailover() in src/lib/providers.ts (L283). 401/403 (bad key) and
-// 404 (unknown model) are deliberately absent: those are configuration faults,
-// and failing over would leave us quietly running on backups while the primary
-// stays broken. They surface loudly instead.
-const FAILOVER_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
+// The three failure-classification sets now live in ./_failover.js — one
+// definition, imported by this file AND by src/lib/providers.ts, which used to
+// keep a hand-copied duplicate behind shouldFailover(). See that file for why the
+// shared module is plain dependency-free .js and why it sits in api/.
+//
+// Re-exported because src/test/llm-failover.test.ts and src/test/providers.test.ts
+// both import them from this module by name, and because this is the honest place
+// to look for them: it is the file whose behaviour they govern.
+export { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES };
 
-// Transient-overload statuses worth waiting out on the *same* provider. Most
-// catalogue models have a single route, so without this a 529 blip would surface
-// as a hard failure — the "working models look permanently broken" bug that
-// api/nvidia.js (L41-42) already documents fixing with the same backoff.
-const RETRY_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
+// Backoff between retries against the same provider. Most catalogue models have a
+// single route, so without this a 529 blip surfaces as a hard failure — the
+// "working models look permanently broken" bug api/nvidia.js (L41-42) documents
+// fixing with the same backoff.
 const BACKOFF_MS = [600, 1500];
+
+// ---------------------------------------------------------------------------
+// Deadlines
+// ---------------------------------------------------------------------------
+//
+// WHY THESE EXIST
+//
+// The upstream fetch used to carry no signal at all, so a provider that accepted
+// the TCP connection and then never answered hung this function until the
+// platform killed it. Three things broke at once, and none of them looked like a
+// timeout to the user:
+//
+//   1. The failover loop below never advanced. `await fetch` never settled, so a
+//      model with a second route — nemotron-vision has one precisely for this —
+//      could only ever fail over on an HTTP *status*, never on a hang. The
+//      backup route was unreachable in the exact failure it was added for.
+//   2. The handler never reached its own error reporting, so the client got a
+//      platform 504 with no JSON body instead of the "which of three situations
+//      is this" payload built at the end of this file.
+//   3. The user waited out the client's full REQUEST_TIMEOUT_MS (130s, see
+//      src/pages/Chat.tsx L102) and got a generic failure.
+//
+// This is not theoretical: scripts/verify-models.mjs probes every catalogue route
+// and meta/llama-3.3-70b-instruct has now failed to answer a POST three separate
+// times while nine other NVIDIA routes on the same key answered in under 2s.
+//
+// TWO GUARDS, NOT ONE. The deadline bounds *time to first byte* only, and is
+// cleared the moment response headers arrive. A streaming completion legitimately
+// takes minutes, so a single timer around the whole exchange would cut off long
+// answers mid-sentence — which is a worse bug than the one being fixed. Once the
+// stream is flowing, a stalled connection is the client's STREAM_IDLE_TIMEOUT_MS
+// (60s) to catch, and it does.
+//
+// The chain gets one shared budget rather than a per-route timeout, so the total
+// stays under the client's guard no matter how many routes a model lists. 50s
+// leaves the client ~80s of headroom to receive and render a real error.
+//
+// UPPER BOUND: vercel.json pins `maxDuration: 60` for api/**. It was previously
+// unset, which means the invocation inherited whatever the account default is —
+// documented as low (on the order of 10-15s for Node functions, though it varies
+// by plan and with Fluid compute, and this was NOT re-verified against Vercel's
+// current docs). Either way an unset value is the wrong way to run a streaming AI
+// proxy: a default shorter than an answer takes truncates it mid-sentence, and it
+// makes every deadline in this file unreachable. 60 is the Hobby-plan ceiling, so
+// it is the highest value that cannot fail a deploy on any plan. Raising
+// CHAIN_DEADLINE_MS above ~55s therefore does nothing until maxDuration goes up
+// with it (Pro allows 300).
+//
+// This bounds the *whole* invocation including streaming, so a very long answer
+// can still be cut off by the platform. That is a plan limit, not something this
+// file can fix.
+const CHAIN_DEADLINE_MS = 50_000;
+export { CHAIN_DEADLINE_MS };
+
+// Per-attempt cap on time-to-first-byte, applied only when another route is left
+// to try. Observed cold starts on this endpoint run to ~13s (minimaxai/minimax-m3,
+// measured), so this clears a genuinely slow scale-from-zero with margin while
+// still leaving room for a second route inside CHAIN_DEADLINE_MS.
+const FIRST_BYTE_TIMEOUT_MS = 22_000;
+export { FIRST_BYTE_TIMEOUT_MS };
 
 // The client is untrusted; a huge max_tokens is a cost attack.
 const MAX_OUTPUT_TOKENS = 8192;
@@ -118,13 +209,31 @@ async function pipeStream(upstream, res) {
 /**
  * One attempt at one provider, with backoff on transient overload.
  * Returns { upstream } on success, or { status, detail } on failure.
+ *
+ * `deadline` is an absolute epoch-ms cap shared by the whole chain. `isLastRoute`
+ * relaxes the per-attempt cap: with no backup left there is nothing to fail over
+ * *to*, so the final route is allowed the entire remaining budget rather than
+ * being cut off at FIRST_BYTE_TIMEOUT_MS to protect a route that does not exist.
  */
-async function callProvider({ cfg, route, key, payload }) {
+export async function callProvider({ cfg, route, key, payload, deadline, isLastRoute }) {
   let lastStatus = 0;
   let lastDetail = "";
 
   for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return { status: 504, detail: `chain deadline of ${CHAIN_DEADLINE_MS}ms exhausted` };
+    }
+    const attemptMs = isLastRoute ? remaining : Math.min(FIRST_BYTE_TIMEOUT_MS, remaining);
+
     let upstream = null;
+    let timedOut = false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, attemptMs);
+
     try {
       upstream = await fetch(cfg.url, {
         method: "POST",
@@ -134,18 +243,46 @@ async function callProvider({ cfg, route, key, payload }) {
           ...(cfg.keyless ? {} : { Authorization: `Bearer ${key}` }),
         },
         body: JSON.stringify({ ...payload, model: route.modelId }),
+        signal: controller.signal,
       });
     } catch (err) {
-      lastStatus = 502;
-      lastDetail = String(err);
+      lastStatus = timedOut ? 504 : 502;
+      lastDetail = timedOut ? `no response in ${attemptMs}ms` : String(err);
       upstream = null;
+    } finally {
+      // Cleared as soon as headers are in. This is what keeps the guard on
+      // time-to-first-byte instead of on the whole stream: leaving the timer
+      // armed would abort `upstream.body` mid-answer once it fired.
+      clearTimeout(timer);
+    }
+
+    // A route that produced nothing in attemptMs will not produce anything in
+    // attemptMs + 600ms. Retrying it here would spend the entire chain budget
+    // re-hanging one dead route and never reach the backup — the original bug
+    // with extra steps. Return so the caller fails over; 504 is in
+    // FAILOVER_STATUSES, so it will.
+    if (timedOut) {
+      console.warn(`[llm] ${route.provider}/${route.modelId} → no first byte in ${attemptMs}ms`);
+      return { status: lastStatus, detail: lastDetail };
     }
 
     if (upstream) {
       if (upstream.ok && upstream.body) return { upstream };
       lastStatus = upstream.status;
       lastDetail = (await upstream.text().catch(() => "")).slice(0, 300);
-      // A genuine 4xx (bad key, unknown model) must not be retried.
+      // 404 is ambiguous on NVIDIA — transient unavailability and an id they do not
+      // host look identical from here (see api/_failover.js). It fails over now, so
+      // this line is the only place the signal survives: a 404 that shows up in the
+      // logs for one model over and over is a catalogue entry to re-probe with
+      // scripts/probe-id.mjs, not a busy pool.
+      if (upstream.status === 404) {
+        console.warn(
+          `[llm] ${route.provider}/${route.modelId} → 404. Transient on NVIDIA, or the id is no longer served; failing over. Re-probe before editing the catalogue.`,
+        );
+      }
+      // A genuine 4xx (bad request, rejected key) must not be retried. 404 is not
+      // in RETRY_STATUSES either — three 404s inside six seconds were observed, so
+      // knocking again on the same route is measured waste — but it does fail over.
       if (!RETRY_STATUSES.has(upstream.status)) break;
     }
 
@@ -158,6 +295,91 @@ async function callProvider({ cfg, route, key, payload }) {
   }
 
   return { status: lastStatus, detail: lastDetail };
+}
+
+/**
+ * Which of the four situations a fully-failed chain is in, as
+ * `{ error, status, detail }`. `error` is a wire contract: routerError() in
+ * src/lib/ai.ts switches on these strings, so the two must change together.
+ *
+ * Pure and exported so it can be tested without standing up req/res plus
+ * applyGuard and applyMeter — the same reason callProvider above and canExtract()
+ * in src/lib/documents.ts are separate from their callers. This was previously
+ * four inline ternaries evaluated three times over (once for `error`, once for the
+ * HTTP status, once for the detail string), which is how 503 came to be handled in
+ * two of the three places and missed in the third.
+ */
+export function classifyFailure(attempts) {
+  // every() on an empty array is true, so without this guard a chain that never
+  // ran would confidently report "no provider configured". Unreachable today —
+  // `routes` is validated non-empty and every iteration either returns or pushes —
+  // which is exactly what makes it cheap to keep.
+  if (attempts.length === 0) {
+    return { error: "all_providers_failed", status: 502, detail: "All providers failed." };
+  }
+
+  if (attempts.every((a) => a.status === 0)) {
+    return {
+      error: "no_provider_configured",
+      status: 400,
+      detail:
+        "No provider key is configured on the server. Set NVIDIA_API_KEY and/or MISTRAL_API_KEY (Pollinations needs no key and answers as the final fallback).",
+    };
+  }
+
+  if (attempts.every((a) => OVERLOAD_STATUSES.has(a.status))) {
+    // The wire code still says "rate_limited" although the set is now broader.
+    // Renaming it would strand the desktop builds in release/, which ship a frozen
+    // client bundle pointed at the deployed API (see .env.desktop) and would fall
+    // through to the generic message for a code they have never heard of. Both
+    // user-facing strings already say "busy"/"overloaded" rather than naming a
+    // status, so the code name is the only thing narrower than the behaviour.
+    return {
+      error: "all_providers_rate_limited",
+      status: 429,
+      detail: "Every provider for this model is rate limited or overloaded right now.",
+    };
+  }
+
+  // Every leg answered 404. Its own branch because the generic fallback below
+  // pastes `attempts[last].detail` — a raw NVIDIA 404 body — into the chat, which
+  // is the same class of bug 503 had before OVERLOAD_STATUSES existed.
+  //
+  // The wording deliberately does not claim to know which of the two causes it is,
+  // because from one request they are indistinguishable (see api/_failover.js): the
+  // id may be temporarily unserved, or withdrawn for good. Both leave the user with
+  // the same two useful options, so the message gives those instead of a diagnosis.
+  //
+  // `detail` is written as user-facing prose on purpose. routerError() in
+  // src/lib/ai.ts falls through to `parsed.detail` for a code it does not know, and
+  // the desktop builds in release/ ship a frozen client bundle against the deployed
+  // API — so this exact sentence is what those older builds will show. A terse
+  // machine detail here would degrade them to the generic HTTP message.
+  if (attempts.every((a) => a.status === 404)) {
+    return {
+      error: "model_unavailable",
+      status: 503,
+      detail:
+        "This model isn't being served right now. That is usually temporary — try again in a moment, or pick another model.",
+    };
+  }
+
+  // Nothing rejected the request; the providers simply never answered. Worth its
+  // own message because the generic one invites the user to debug a request that
+  // was never refused.
+  if (attempts.every((a) => a.status === 504)) {
+    return {
+      error: "all_providers_timed_out",
+      status: 504,
+      detail: `No provider for this model returned a first byte within the ${CHAIN_DEADLINE_MS / 1000}s budget.`,
+    };
+  }
+
+  return {
+    error: "all_providers_failed",
+    status: 502,
+    detail: attempts[attempts.length - 1]?.detail || "All providers failed.",
+  };
 }
 
 export default async function handler(req, res) {
@@ -201,7 +423,23 @@ export default async function handler(req, res) {
 
   const attempts = [];
 
-  for (const route of routes) {
+  // One budget for the whole chain, fixed before the first attempt, so total time
+  // stays under the client's REQUEST_TIMEOUT_MS however many routes a model has.
+  const deadline = Date.now() + CHAIN_DEADLINE_MS;
+
+  // Whether any route *after* this one could actually be tried. Not the same as
+  // "is this the last element": routes with an unknown provider or a missing key
+  // are skipped below, so with an unconfigured backup the first route is
+  // effectively the last one and deserves the full remaining budget rather than
+  // being cut short to preserve a failover that cannot happen.
+  const usableRouteAfter = (i) =>
+    routes.slice(i + 1).some((r) => {
+      const c = PROVIDER_ENDPOINTS[r?.provider];
+      return Boolean(c) && (c.keyless || Boolean(resolveKey(req, c).key));
+    });
+
+  for (let i = 0; i < routes.length; i++) {
+    const route = routes[i];
     const cfg = PROVIDER_ENDPOINTS[route?.provider];
     if (!cfg) {
       attempts.push({ provider: String(route?.provider), status: 0, detail: "unknown provider" });
@@ -223,7 +461,14 @@ export default async function handler(req, res) {
       if (tool_choice) routePayload.tool_choice = tool_choice;
     }
 
-    const result = await callProvider({ cfg, route, key, payload: routePayload });
+    const result = await callProvider({
+      cfg,
+      route,
+      key,
+      payload: routePayload,
+      deadline,
+      isLastRoute: !usableRouteAfter(i),
+    });
 
     if (result.upstream) {
       // The client reads these to show who actually served the reply.
@@ -242,28 +487,14 @@ export default async function handler(req, res) {
     console.warn(`[llm] ${route.provider}/${route.modelId} → ${result.status}, trying next`);
   }
 
-  // --- Everything failed: say which of the three situations this is ---------
-  // src/lib/ai.ts:286-306 maps these to user-facing messages.
-  const noneConfigured = attempts.length > 0 && attempts.every((a) => a.status === 0);
-  const allRateLimited =
-    attempts.length > 0 && attempts.every((a) => a.status === 429 || a.status === 529);
-
-  const error = noneConfigured
-    ? "no_provider_configured"
-    : allRateLimited
-      ? "all_providers_rate_limited"
-      : "all_providers_failed";
-
+  // --- Everything failed: say which of the four situations this is ----------
   console.error("[llm] all providers failed:", JSON.stringify(attempts));
 
-  res.status(noneConfigured ? 400 : allRateLimited ? 429 : 502).json({
+  const { error, status, detail } = classifyFailure(attempts);
+  res.status(status).json({
     error,
-    detail: noneConfigured
-      ? "No provider key is configured on the server. Set NVIDIA_API_KEY and/or MISTRAL_API_KEY (Pollinations needs no key and answers as the final fallback)."
-      : allRateLimited
-        ? "Every provider for this model is rate limited or overloaded right now."
-        : attempts[attempts.length - 1]?.detail || "All providers failed.",
-    attempts: attempts.map(({ provider, status }) => ({ provider, status })),
+    detail,
+    attempts: attempts.map(({ provider, status: s }) => ({ provider, status: s })),
   });
 }
 

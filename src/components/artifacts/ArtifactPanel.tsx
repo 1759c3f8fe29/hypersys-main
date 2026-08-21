@@ -15,7 +15,8 @@ import remarkGfm from "remark-gfm";
 
 import { diffLines, diffSummary } from "@/lib/artifact-diff";
 import type { Artifact } from "@/lib/artifacts";
-import { RunButton, RunOutput, isRunnableLanguage, useCodeRunner } from "@/components/chat/CodeRunner";
+import { RunButton, RunOutput } from "@/components/chat/CodeRunner";
+import { isRunnableLanguage, useCodeRunner } from "@/components/chat/use-code-runner";
 import { useArtifacts, closeArtifact } from "./ArtifactProvider";
 
 // The languages the preview iframe can render live. React would need a runtime

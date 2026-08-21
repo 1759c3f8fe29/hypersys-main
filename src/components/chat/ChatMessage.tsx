@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
 import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, Terminal } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -14,7 +14,8 @@ import { isSubstantialCodeBlock } from '@/lib/artifacts';
 import { openCodeArtifact, openFileArtifact } from '@/components/artifacts/ArtifactProvider';
 import { LOGO_URL } from '@/lib/assets';
 import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource } from './types';
-import { RunButton, RunOutput, isRunnableLanguage, useCodeRunner } from './CodeRunner';
+import { RunButton, RunOutput } from './CodeRunner';
+import { isRunnableLanguage, useCodeRunner } from './use-code-runner';
 
 interface ArenaResponse {
   modelId: string;
@@ -438,7 +439,13 @@ function CodeBlock({ language, children }: { language: string; children: string 
 // Markdown element overrides. Built as a function so the fenced-code renderer
 // can carry per-block affordances (a substantial block is the trigger that opens
 // the canvas); the rest of the overrides are static and shared identically.
-function buildMarkdownComponents(): any {
+//
+// The return type is react-markdown's own `Components` rather than `any`, which is
+// what contextually types every handler's props below — `children`, `node`,
+// `className`, `href`, `src` all come from the library instead of being implicit
+// anys, and an override keyed to an element that does not exist is now a build
+// error rather than an override that silently never fires.
+function buildMarkdownComponents(): Components {
  return {
   h1: ({ children }) => (
     <h1 className="text-xl sm:text-2xl font-extrabold mb-3 mt-5 first:mt-0 text-foreground bg-clip-text text-transparent bg-gradient-to-r from-primary via-accent to-primary drop-shadow-sm tracking-tight">
@@ -455,8 +462,15 @@ function buildMarkdownComponents(): any {
     <h3 className="text-base sm:text-lg font-semibold mb-2 mt-3.5 first:mt-0 text-foreground/90 tracking-tight">{children}</h3>
   ),
   p: ({ children, node }) => {
-    // If paragraph contains only an image, render as div to avoid nesting issues
-    const hasImage = node?.children?.some((child: any) => child.tagName === 'img');
+    // If paragraph contains only an image, render as div to avoid nesting issues.
+    // `type === 'element'` first, then tagName: a hast paragraph's children are
+    // Element | Text | Comment, and only Element carries a tagName. The previous
+    // `(child: any) => child.tagName === 'img'` read undefined off every text node
+    // it walked — harmless by luck, since undefined !== 'img', but nothing was
+    // checking that and the same shape one property deeper would have thrown.
+    const hasImage = node?.children?.some(
+      (child) => child.type === 'element' && child.tagName === 'img',
+    );
     if (hasImage) {
       return <div className="text-sm sm:text-[15px] leading-relaxed mb-3.5 last:mb-0 text-foreground/85">{children}</div>;
     }

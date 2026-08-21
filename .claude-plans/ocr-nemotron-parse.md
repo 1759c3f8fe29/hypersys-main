@@ -50,6 +50,47 @@ On `res.ok`, parse `json.choices[0].message.tool_calls[0].function.arguments` (J
 
 **Image uploads.** Extend `canExtract` to accept `image/*` when the turnaround is OCR (treat an uploaded image as a 1-page document). Add an `extractImageFile` branch in `extractDocument` that calls `ocrImage` on the file's data URL. This closes the "upload it as an image instead" loop from both directions — the re-upload is no longer needed because the scan itself is now OCR-able.
 
+> **REVISED DURING IMPLEMENTATION — the image half became a tool, not a pre-flight step.**
+>
+> The plan above was written before checking the call site. `Chat.tsx:677` filters uploads with
+> `!f.type.startsWith('image/') && canExtract(f)` — images are excluded *before* `canExtract` is
+> ever consulted, so admitting `image/*` there was **dead code**: no image could reach
+> `extractDocument`. Wiring it up (dropping the filter) would have been worse than leaving it dead:
+>
+> 1. Every image upload would bill an OCR call, including the common case — a photo the user simply
+>    wants looked at. Most images hold no text worth transcribing.
+> 2. A text-free photo returns an empty result, which `extractDocument` reports as an error and
+>    `Chat.tsx:691` raises as `toast.error`. A picture of a dog would be announced as an unreadable
+>    file — a failure manufactured by the pipeline, not by the file.
+> 3. It duplicates the vision engine, which already transcribes visible text (`prompts.ts:688`). OCR
+>    earns its cost only when the text is dense, structured, or small.
+>
+> So the image case became **`ocr_image`**, a registered tool (`src/lib/tools/ocr-image.ts`) the model
+> calls when it judges the image to be a document. That matches this codebase's stated architecture —
+> "the classifier that used to run here is gone… everything else the model decides mid-turn by calling
+> a tool" (`Chat.tsx:727-739`) — and gives the model something the vision encoder does not: a verbatim
+> transcription in document reading order (sorted by bbox), rather than a paraphrase. On a dense
+> invoice or a table screenshot that is the difference between the right total and a plausible one.
+>
+> **Reachability, checked rather than assumed:** this needs a model that is both vision- and
+> tool-capable. The default `mistral-large` is (`supportsVision: true, supportsTools: true`), so the
+> common path has it. But a user who picks a *non-vision* model and attaches an image is swapped to
+> `DEFAULT_VISION_MODEL_ID = "nemotron-vision"`, which is `supportsTools: false` — so `useAgent` is
+> false and **no** tools run on that turn. That is pre-existing behaviour and a defensible tradeoff
+> (seeing the image beats reading only its text); noted here so the limit is not mistaken for a bug.
+
+>
+> The dead `extractImage`/`fileToDataUrl`/`canExtract` image code was removed rather than left in
+> place looking wired. **The scanned-PDF fallback in `extractPdf` is unchanged and live** — there the
+> vision engine is never involved, so pre-flight OCR is the only path and it costs nothing on a normal
+> text-layer PDF.
+>
+> Supporting changes: `AttachmentRef` gained an optional `url` (only images set it — documents stay
+> metadata-only, since their text already reached the model via `buildDocumentContext`); `Chat.tsx`
+> passes image attachments into `ToolContext` with that url; `edit_file` now rejects an image
+> `attachment_id` and names `ocr_image` instead, so a `.png` cannot be silently rewritten as a `.txt`.
+
+
 Keep the existing error message as the **fallback when OCR also fails or the key is absent**: a scanned PDF still reports "likely a scan" if the OCR service is down, rather than silently empty. OCR is enhancement, never a silent drop.
 
 ### 4. No catalogue/sidebar change

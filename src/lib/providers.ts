@@ -21,6 +21,11 @@
 // All providers are OpenAI-compatible on the wire, so one request shape and one
 // SSE parser cover all of them.
 
+// The failure-classification sets, defined once in the serverless router that
+// production requests actually go through. Dependency-free by design so this
+// import ships three sets of integers to the browser and nothing else.
+import { FAILOVER_STATUSES } from "../../api/_failover.js";
+
 export type ProviderId = "nvidia" | "mistral" | "pollinations";
 
 export interface ProviderMeta {
@@ -183,10 +188,24 @@ export const MODELS: ModelSpec[] = [
     featured: true,
   },
   {
-    id: "kimi-k2.6",
-    label: "Kimi K2.6",
+    id: "kimi-k3",
+    label: "Kimi K3",
     description: "Moonshot's long-context reasoning model.",
-    routes: [{ provider: "nvidia", modelId: "moonshotai/kimi-k2.6" }],
+    // Was moonshotai/kimi-k2.6 until 3.9. That id is still in NVIDIA's /v1/models
+    // list but POST /v1/chat/completions returned 404 for it — the failure the
+    // catalogue check alone cannot see. K3 is the current generation on the same
+    // endpoint. Re-run scripts/verify-models.mjs after touching this: the probe
+    // there is what separates "the id exists" from "the id answers".
+    //
+    // CAVEAT ADDED IN 3.11: "listed and not deployed" is a weaker conclusion than
+    // it looked at the time. NVIDIA also 404s ids it is temporarily not serving —
+    // nemotron-3-super-120b-a12b returned 404 three times running and then answered
+    // three times running minutes later. So k2.6 may well have been alive and the
+    // move to K3 made on a bad moment. No harm done, since K3 is the newer model
+    // and answers in under a second, but the reasoning was luckier than it was
+    // sound. `node scripts/probe-id.mjs moonshotai/kimi-k2.6 --times 3` settles it
+    // if k2.6 is ever wanted back.
+    routes: [{ provider: "nvidia", modelId: "moonshotai/kimi-k3" }],
     contextWindow: 256_000,
     maxOutputTokens: 8192,
     supportsVision: false,
@@ -201,6 +220,22 @@ export const MODELS: ModelSpec[] = [
     label: "Nemotron 3 Ultra 550B",
     shortLabel: "Nemotron Ultra",
     description: "NVIDIA's 550B flagship for agentic work.",
+    // HISTORY: answered http-503 on a verify-models run in 3.10 — a saturated
+    // capacity pool, which is what a 550B-A55B deployment does under load, not a
+    // bad id (it has answered on every other run). Left featured and selectable
+    // for the same reason glm-5.2 was: one transient status is not evidence.
+    //
+    // It did expose a real bug, though. 503 was treated as transient by both
+    // RETRY_STATUSES and FAILOVER_STATUSES in api/llm.js but as permanent by the
+    // final error classification, so this model — the one with a single route and
+    // therefore no failover at all — surfaced the raw upstream error body in the
+    // chat instead of "busy, try again". See OVERLOAD_STATUSES there.
+    //
+    // nemotron-super-120b below was added partly as the answer to this: same
+    // family, a twelfth of the active parameters, so it should stay available when
+    // this pool does not. Adding it as a *route* here would have been wrong —
+    // different weights answering under this model's name is the one substitution
+    // this catalogue refuses.
     routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3-ultra-550b-a55b" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -231,14 +266,13 @@ export const MODELS: ModelSpec[] = [
     // Hosted by NVIDIA: carries the "Free Endpoint" badge on build.nvidia.com
     // and is present in the live /v1/models catalogue as z-ai/glm-5.2.
     //
-    // NOTE (3.8): the id verifies but did not return a completion during live
-    // probing — 6 POST attempts (50-170s each, non-stream and stream, with and
-    // without the nca-allowed-client header) returned no HTTP response, while
-    // minimaxai/minimax-m3 answered in 13s on the same key. That reads as an
-    // unresponsive capacity pool for this model, not a bad id or a bad key.
-    // The router already treats a stalled provider as a failover case; this
-    // model has a single route, so if users report hangs, mark it `hidden`
-    // until NVIDIA's serving path answers again.
+    // HISTORY: in 3.8 this id verified but would not return a completion — 6 POST
+    // attempts (50-170s each, stream and non-stream, with and without the
+    // nca-allowed-client header) got no HTTP response at all. It answers now: 7.8s
+    // to first byte on the standard probe in 3.9. So that was a cold or saturated
+    // capacity pool, not a bad id, and the model is left selectable. Kept on the
+    // record because it is the precedent for reading a single unresponsive probe
+    // as provisional rather than as grounds for deleting a model.
     routes: [{ provider: "nvidia", modelId: "z-ai/glm-5.2" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -260,7 +294,23 @@ export const MODELS: ModelSpec[] = [
     supportsTools: true,
     emoji: "🐘",
     kind: "Chat",
-    featured: true,
+    // Not `featured` and not selectable: this id is in NVIDIA's catalogue but its
+    // POST never came back — 4 probe attempts across 3.9, two of them with a full
+    // 60s deadline, while nine other NVIDIA routes on the same key answered in
+    // under 2s. Unlike glm-5.2 above (one bad day, fine now) this has never
+    // answered here.
+    //
+    // Hidden rather than deleted, which is the whole reason the flag is worth
+    // having: three LEGACY_MODEL_IDS entries resolve to `llama-70b`
+    // (llama-3.3-70b, llama-4-maverick, qwen-3-next-80b), so deleting it would
+    // strip the byline off every message those ids labelled and make a retry
+    // route as unknown. getModel resolves against the full MODELS list, not
+    // SELECTABLE_MODELS, so hiding keeps every historical message readable while
+    // making it impossible to pick a model that hangs the turn.
+    //
+    // To restore: drop `hidden`, run `node scripts/verify-models.mjs`, and only
+    // keep the change if the probe prints a time for it.
+    hidden: true,
   },
   {
     id: "codestral",
@@ -314,6 +364,78 @@ export const MODELS: ModelSpec[] = [
     kind: "Chat",
   },
   {
+    id: "nemotron-super-120b",
+    label: "Nemotron 3 Super 120B",
+    shortLabel: "Nemotron 120B",
+    description: "NVIDIA's 120B mixture-of-experts. Frontier-class, but only 12B active.",
+    // Added in 3.10 to fill a real gap rather than to lengthen the list. The
+    // catalogue jumped straight from nemotron-super-49b to the 550B ultra, and
+    // ultra is the entry that answered http-503 on a verify-models run — a
+    // featured single-route flagship with no failover available. A 120B-A12B sits
+    // between the two and, with only 12B parameters active per token, should hold
+    // capacity far better than a 550B-A55B pool.
+    routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3-super-120b-a12b" }],
+    // 128k is the nemotron-3 family default used by every other NVIDIA entry
+    // here; it was NOT independently confirmed for this id. It feeds the token
+    // budgeter only, and the family has never shipped a smaller window, so an
+    // over-estimate would show up as an upstream context error rather than a
+    // silently wrong answer.
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    // Hybrid-reasoning family, same as nemotron-ultra above. This flag has no
+    // request-side effect — generateRoutedResponse sends no reasoning parameter —
+    // it only governs whether a `reasoning_content` delta is surfaced, so a wrong
+    // guess costs presentation, never a rejected payload.
+    isReasoning: true,
+    emoji: "🧠",
+    kind: "Chat",
+    // Featured on measured evidence, not on parameter count. First probe: 2090ms
+    // to first byte, against 6257ms for the 550B ultra and 6484ms for the 49B
+    // super on the same run and the same key. Three times quicker than both of
+    // its neighbours in the lineup, which is the behaviour a 12B active slice
+    // predicts and the reason this model earns a slot in the featured row.
+    featured: true,
+  },
+  {
+    id: "nemotron-lightning-30b",
+    label: "Nemotron 3.5 Lightning 30B",
+    shortLabel: "Nemotron Lightning",
+    description: "Built for speed: 30B total, 3B active. Quick answers with tools.",
+    // The speed tier between fast-small (hidden, 9B, internal use) and the
+    // reasoning models, which take 1-8s to first byte. Nothing selectable was
+    // optimised for latency before this.
+    //
+    // Featured on the second measurement, having been withheld on the first.
+    //
+    // Probe 1: 14711ms — the slowest route in the entire catalogue that run, for
+    // the model named "lightning". Probe 2: **752ms**, the quickest NVIDIA route
+    // in the catalogue that run (only Mistral's small models were faster, at
+    // 511-556ms, and they are much smaller). Same id, same key, nothing changed
+    // in between. So the first number was a scale-from-zero cold start on a model
+    // nobody was using yet, and the entry was right to say so rather than to
+    // average the two or to trust the name: at 14.7s the honest move would have
+    // been to drop it, and at 752ms it earns the featured row and the word
+    // "speed" in its description.
+    //
+    // This is the fourth time in three sessions that a second data point was the
+    // difference between a fix and a mistaken deletion (see `nemotron-ultra`'s
+    // 503 and the two cold starts cleared in 3.9). One probe of a route nobody
+    // has warmed measures the scheduler, not the model.
+    routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3.5-lightning-30b-a3b" }],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    // Deliberately not marked as reasoning: "lightning" is a latency-first
+    // variant, and the family ships a separately-named `-reasoning` build for
+    // that role. Costs presentation only if wrong (see the note above).
+    emoji: "💨",
+    kind: "Chat",
+    featured: true,
+  },
+  {
     id: "flyer-free",
     label: "Flyer Free",
     description: "Keyless and always on. Works even without any API key.",
@@ -334,9 +456,71 @@ export const MODELS: ModelSpec[] = [
     id: "nemotron-vision",
     label: "Flyer Vision",
     description: "Reads images, screenshots and diagrams.",
+    // A DELIBERATE EXCEPTION to the same-model rule in ModelSpec.routes above,
+    // documented here so it does not read as an oversight and get "fixed" by
+    // deleting the second route. It is worth deleting on a first read — the second
+    // leg is the flakier model and, because the first leg has never failed, it is
+    // never actually reached. See the insurance argument below before removing it.
+    //
+    // These two ids are genuinely different weights (12B v2 VL and 8B v1 VL), not
+    // one model on two providers. The rule exists so a user who picks a model
+    // cannot be answered by different weights wearing its name; here there is no
+    // such name to misattribute. "Flyer Vision" is a capability, like flyer-free,
+    // and the description names no model — so the promise made to the user is
+    // "this reads images", which both routes keep. Every other entry in this file
+    // names its weights and must obey the rule strictly.
+    //
+    // The exception is load-bearing, because one of the two routes is unusable as a
+    // primary. nemotron-nano-12b-v2-vl over twelve probes in 3.9-3.11:
+    //
+    //   1722ms, timeout, ok, http-500, timeout, 3197ms,
+    //   51473ms, 24981ms, 7718ms, http-500, http-500, 54826ms
+    //
+    // Seven of twelve answered — and three of those seven took longer than the 22s
+    // api/llm.js gives a non-final route, two of them longer than the whole 50s
+    // CHAIN_DEADLINE_MS. So "answers" and "answers in time" are different numbers
+    // here, and the useful one is the second: roughly four of twelve.
+    //
+    // The 8B has answered every probe it has ever been given (5777ms most recently).
+    //
+    // ORDER WAS SWAPPED IN 3.11, and the earlier decision to keep the 12B first was
+    // made against a wrong cost. That comment said "a bad run adds ~2.1s plus the
+    // dead attempts, which is the number to weigh" — true for the http-500 mode
+    // (api/llm.js retries a 500 twice, BACKOFF_MS = 600+1500), and wrong by an order
+    // of magnitude for the timeout mode. callProvider does not retry a timeout at
+    // all: it caps a non-final route at FIRST_BYTE_TIMEOUT_MS and returns, so a
+    // timed-out first leg costs the full **22 seconds** before the second leg is
+    // asked. The decision was weighed against 2.1s when half the observed failures
+    // cost ten times that.
+    //
+    // With the real distribution, 12B-first spends most requests waiting: a third
+    // of them eat 22s of nothing and then the 8B's 5.8s, and a further slice
+    // "succeed" at 25-55s, which is worse than failing over would have been. The
+    // expected dead wait exceeds the entire successful latency of the fallback.
+    // 8B-first is ~5.8s flat with no tail.
+    //
+    // WHAT THIS TRADE ACTUALLY IS, stated honestly: measured reliability bought with
+    // unmeasured quality. Nothing here has compared the two models' vision output;
+    // the 12B is newer and larger and is *presumably* better, and on its good days
+    // it is faster too (1722/3197ms). That is given up. For a *featured* capability
+    // it is still the right trade — a 25s stare at a spinner reads as a broken app,
+    // and both routes keep the promise the description makes — but it is a trade,
+    // not an upgrade.
+    //
+    // The 12B is not dead code in second position, it is insurance, and weak
+    // insurance: meta/llama-3.3-70b-instruct went from working to permanently
+    // unresponsive inside this catalogue's lifetime, so a second leg is worth
+    // having — but if the 8B ever dies, this one answers inside the budget about a
+    // third of the time. Better than a hard failure, not much better.
+    //
+    // FLIP IT BACK only on evidence of a different distribution: five consecutive
+    // clean probes *all under 22s*, which at the current rate is a fluke of about
+    // 1 in 250. `node scripts/probe-id.mjs nvidia/nemotron-nano-12b-v2-vl --times 5`
+    // is that measurement, and it flags any run over 22s explicitly, because a route
+    // that answers at 51s looks green in a probe and fails over in production.
     routes: [
-      { provider: "nvidia", modelId: "nvidia/nemotron-nano-12b-v2-vl" },
       { provider: "nvidia", modelId: "nvidia/llama-3.1-nemotron-nano-vl-8b-v1" },
+      { provider: "nvidia", modelId: "nvidia/nemotron-nano-12b-v2-vl" },
     ],
     contextWindow: 128_000,
     maxOutputTokens: 4096,
@@ -422,7 +606,12 @@ export const MODELS: ModelSpec[] = [
 // Renaming an id without this map would make every historical message resolve to
 // nothing, so the UI would label it "AI" and a retry would route it as unknown.
 // Entries are one-way and cheap to keep; add to this rather than mutating ids.
-const LEGACY_MODEL_IDS: Record<string, string> = {
+//
+// Every *value* must be a live id in MODELS above — never another key in this
+// map. getModel does exactly one alias hop, so a chained entry silently resolves
+// to undefined. Exported (read-only) so src/test/providers.test.ts can enforce
+// both halves of that rule; nothing outside the tests should need it.
+export const LEGACY_MODEL_IDS: Readonly<Record<string, string>> = {
   "Flyer AI": "mistral-large",
   "mistral-large-latest": "mistral-large",
   "mistral-medium-latest": "mistral-medium",
@@ -473,7 +662,12 @@ const LEGACY_MODEL_IDS: Record<string, string> = {
   "gemini-1.5-flash": "mistral-large",
   "gemini-1.5-pro": "mistral-large",
   "deepseek-v4-flash": "mistral-large",
-  "deepseek-v4-pro": "kimi-k2.6",
+  // Repointed with the k2.6 -> k3 rename. Values in this map must be *live
+  // catalogue ids*, never another key: getModel does exactly one alias hop
+  // (LEGACY_MODEL_IDS[id] then MODEL_BY_ID.get), so a value that is itself a
+  // legacy id resolves to undefined and the message loses its byline.
+  "deepseek-v4-pro": "kimi-k3",
+  "kimi-k2.6": "kimi-k3",
 };
 
 
@@ -565,17 +759,32 @@ export function resolveRoutes(
 // Retry classification
 // ---------------------------------------------------------------------------
 
-// Statuses where the *next provider* is worth trying: the request was fine, this
-// provider just cannot serve it right now (quota exhausted, pool saturated,
-// upstream blip). NVIDIA's 529 is its "temporarily overloaded" signal.
-const FAILOVER_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
-
 /**
  * Whether a failed attempt should fall through to the next provider.
  *
- * 401/403 (bad key) and 404 (unknown model) are deliberately excluded: those are
- * configuration faults that failing over would hide, leaving us silently running
- * on backups while the primary stays broken. They should surface loudly.
+ * 400/401/403 are deliberately excluded: a malformed request is ours, and a
+ * rejected key is a configuration fault that failing over would hide, leaving us
+ * silently running on backups while the primary stays broken. Those should surface
+ * loudly.
+ *
+ * 404 used to be in that sentence and is not any more. It is not a configuration
+ * fault on the provider this catalogue mostly runs on — NVIDIA returned 404 three
+ * times running for an id that answered three times minutes later. api/_failover.js
+ * holds the measurements and the argument.
+ *
+ * The set itself is NOT defined here any more. It used to be — a hand-copied
+ * duplicate of the one in api/llm.js, which is the chain every production request
+ * actually walks. The comment here said it "mirrored" the proxy, nothing checked
+ * that, and so every test of this function was exercising a rule no request ever
+ * reaches. A drift test pinned the two together as a stopgap; importing the single
+ * definition removes the need for one.
+ *
+ * The import is from `api/`, not `src/`, because the constraint is one-directional:
+ * api/llm.js is a plain-JS Vercel function with no build step and cannot import a
+ * TypeScript module, while this file can import plain ESM. `_failover.js` is kept
+ * dependency-free precisely so this import cannot pull server code (api/llm.js
+ * itself reaches _meter.js → _auth.js: JWT verification and Redis) into the client
+ * bundle. See that file's header.
  */
 export function shouldFailover(status: number): boolean {
   return FAILOVER_STATUSES.has(status);

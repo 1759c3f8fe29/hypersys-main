@@ -99,8 +99,15 @@ export function parseFacts(raw: string): string[] {
   }
 }
 
-function cleanFacts(obj: any): string[] {
-  const arr = Array.isArray(obj?.facts) ? obj.facts : Array.isArray(obj) ? obj : [];
+// `unknown`, not `any`: both callers hand this the result of JSON.parse on a
+// model-generated string, which is the least trustworthy input in the app. The
+// body already narrows everything it touches (Array.isArray, typeof f ===
+// 'string'); `unknown` is what makes the compiler require that narrowing instead
+// of letting a future edit read `obj.facts.length` and throw on a model that
+// answered with a bare number.
+function cleanFacts(obj: unknown): string[] {
+  const facts = (obj as { facts?: unknown } | null | undefined)?.facts;
+  const arr: unknown[] = Array.isArray(facts) ? facts : Array.isArray(obj) ? obj : [];
   return arr
     .map((f) => (typeof f === 'string' ? f.trim() : ''))
     .filter(Boolean)

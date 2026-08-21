@@ -1,5 +1,10 @@
 import type { Config } from "tailwindcss";
 import plugin from "tailwindcss/plugin";
+// ESM import rather than the `require("tailwindcss-animate")` this replaces. The
+// file already imports `plugin` this way, so mixing the two styles bought
+// nothing, and Tailwind loads this config through its own esbuild/jiti pass which
+// resolves the package's CJS entry either way.
+import tailwindcssAnimate from "tailwindcss-animate";
 
 export default {
   darkMode: ["class"],
@@ -100,7 +105,7 @@ export default {
     },
   },
   plugins: [
-    require("tailwindcss-animate"),
+    tailwindcssAnimate,
     // `max-hover:` — applies only on devices that cannot hover (touch).
     // Tailwind ships `hover:` but no built-in inverse, and several controls in
     // this app are revealed by `group-hover`, which never fires on a phone:

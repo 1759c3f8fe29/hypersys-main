@@ -22,57 +22,24 @@
 // state says so out loud instead of showing a bare spinner.
 //
 // The run itself lives in lib/code-runs.ts, not in this component's state — see
-// that file for why a run has to outlive the row that started it.
+// that file for why a run has to outlive the row that started it. The React
+// adapter for that store — useCodeRunner — and the runnable-language predicate
+// live in ./use-code-runner, so this module exports components only and can be
+// hot-swapped while a conversation is open. Do not add a non-component export
+// back to this file, however convenient: one is enough to disable fast refresh
+// for the whole module.
 
-import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { Play, Loader2, Square, Terminal, Download } from "lucide-react";
 
-import {
-  getRunState,
-  runKeyFor,
-  startRun,
-  stopRun,
-  subscribeRuns,
-  type CodeRunState,
-} from "@/lib/code-runs";
+import type { RunState } from "./use-code-runner";
 
-/**
- * Languages the Pyodide worker can actually execute. Anything else gets no Run
- * button at all — a button that reliably fails is worse than no button, and
- * offering to "run" a JSON blob or a shell snippet is a promise this app cannot
- * keep.
- */
-const RUNNABLE = new Set(["python", "py", "python3"]);
-
-export function isRunnableLanguage(language: string | undefined): boolean {
-  return RUNNABLE.has((language || "").trim().toLowerCase());
-}
-
-export type RunState = CodeRunState;
-
-/**
- * Subscribes one code block to its run. The identity of a run is the code itself,
- * so the same script rendered in two places — or re-rendered after the list
- * recycled the row — is the same run, with the same output already there.
- *
- * Deliberately returns no cleanup that aborts: a run in flight belongs to the
- * user who clicked, not to the DOM node that happened to be showing at the time.
- */
-export function useCodeRunner(code: string) {
-  const key = useMemo(() => runKeyFor(code), [code]);
-  const state = useSyncExternalStore(
-    subscribeRuns,
-    useCallback(() => getRunState(key), [key]),
-    useCallback(() => getRunState(key), [key]),
-  );
-
-  const run = useCallback(() => {
-    void startRun(key, code);
-  }, [key, code]);
-  const stop = useCallback(() => stopRun(key), [key]);
-
-  return { state, run, stop };
-}
+// Only the type crosses back out of here. Re-exporting `useCodeRunner` and
+// `isRunnableLanguage` for the call sites' convenience was tried and reverted: a
+// re-export is still an export, so the fast-refresh rule counted them and the
+// module stayed un-swappable — the extraction bought nothing. `export type`
+// erases entirely and is invisible to the rule, which is why RunState may stay.
+// The three call sites import the hook from ./use-code-runner directly.
+export type { RunState };
 
 /**
  * The Run control. Styled to match the Copy button it sits next to — same pill,
