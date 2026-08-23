@@ -260,10 +260,25 @@ export async function probeChat(chatUrl, modelId, key, { keyless = false } = {})
  *               suspicion to re-test in a *later session*, not a verdict; repeated
  *               404s within one run are one measurement of one bad moment.
  *   "auth"      401/403. The key, not the model. Nothing in providers.ts to change.
+ *   "gone"      410. The one unambiguous verdict on this list. Unlike a 404 it is
+ *               a statement about the future, not the present: the provider is
+ *               saying the id was withdrawn, not that it is busy. Measured on
+ *               z-ai/glm-5.2, which returned 410 *and* vanished from NVIDIA's
+ *               /v1/models in the same window (103 → 102 entries).
+ *
+ *               Before this existed 410 fell to "other", where probe-id.mjs printed
+ *               "Capacity-shaped. Re-run later before benching it" — advice that is
+ *               wrong in the most expensive direction, since re-running it later is
+ *               guaranteed to waste the wait. A "gone" result is actionable on the
+ *               first observation, which is true of nothing else here; it is still
+ *               worth confirming the id has left /v1/models, because that is a
+ *               second independent signal and this catalogue's bar for hiding
+ *               anything is two.
  *
  * The split still earns its keep even with identity demoted to a suspicion, because
  * the runtime treats the two differently: 404 is in FAILOVER_STATUSES and gets its
  * own all-404 message in api/llm.js, neither of which is true of a plain 5xx.
+ * "gone" mirrors that with GONE_STATUSES and its own all-410 message.
  *
  * Exported and used by scripts/probe-id.mjs too. A second copy of this mapping
  * would be a second opinion on when a model should be pulled from the sidebar,
@@ -276,6 +291,7 @@ export function classifyProbeState(state) {
     return "capacity";
   }
   if (state === "http-404") return "identity";
+  if (state === "http-410") return "gone";
   if (/^http-(401|403)$/.test(state)) return "auth";
   return "other";
 }
@@ -457,17 +473,64 @@ async function main() {
     const benched = unresponsive.filter((u) => u.hidden);
 
     if (live.length) {
-      // Split again, by what the failure MEANS. The two kinds want different next
+      // Split again, by what the failure MEANS. The kinds want different next
       // actions, and this block used to print one paragraph for all of them.
       //
-      // Note what the split is NOT: it is not "actionable vs transient". A 404 was
-      // briefly reported here as a hard, act-now finding, and that was wrong — see
-      // the identity block below for the measurement that disproved it. Both kinds
-      // want a re-probe; they differ in what the *runtime* does about them and in
-      // which suspicion a repeat confirms.
+      // Note what the split is NOT: for three of the four buckets it is not
+      // "actionable vs transient". A 404 was briefly reported here as a hard,
+      // act-now finding, and that was wrong — see the identity block below for the
+      // measurement that disproved it. Identity, auth and capacity all want a
+      // re-probe; they differ in what the *runtime* does about them and in which
+      // suspicion a repeat confirms.
+      //
+      // "gone" is the exception, and the only one. 410 is the provider stating that
+      // the id will not come back, so it is the single bucket where re-probing is
+      // guaranteed to waste the wait and where first sight is enough to act on.
       const identity = live.filter((u) => classifyProbeState(u.state) === "identity");
       const auth = live.filter((u) => classifyProbeState(u.state) === "auth");
-      const capacity = live.filter((u) => !identity.includes(u) && !auth.includes(u));
+      const gone = live.filter((u) => classifyProbeState(u.state) === "gone");
+      // By exclusion, not by `=== "capacity"`, on purpose: a state that classifies
+      // as "other" is still a route that did not answer, and dropping it would mean
+      // a failure this script saw never reaches the reader at all. Better to file an
+      // unknown status under the bucket whose advice is "re-run" than to lose it.
+      const capacity = live.filter(
+        (u) => !identity.includes(u) && !auth.includes(u) && !gone.includes(u),
+      );
+
+      // Gone goes first because it is the only verdict here. The other three blocks
+      // all end in "re-probe before acting", and a reader who has learned to skim
+      // them will skim this one too if it is printed underneath.
+      if (gone.length) {
+        console.log(`\n${RED}Retired by the provider (410) — act on this one now:${RESET}`);
+        for (const u of gone) {
+          const solo = u.soloRoute ? ` ${DIM}[single route: no failover]${RESET}` : "";
+          console.log(`   ${u.route} — ${u.state}${solo}`);
+        }
+        console.log(
+          `${DIM}410 Gone is a statement about the future rather than the present: the provider${RESET}`,
+        );
+        console.log(
+          `${DIM}is saying the id was withdrawn, not that it is busy. Re-probing later cannot${RESET}`,
+        );
+        console.log(
+          `${DIM}change the answer, so this is the one failure on this page that is actionable${RESET}`,
+        );
+        console.log(
+          `${DIM}on first sight. Mark it \`hidden\` in providers.ts — keep the entry so old${RESET}`,
+        );
+        console.log(
+          `${DIM}messages still render its byline, just make it unpickable.${RESET}`,
+        );
+        console.log(
+          `${DIM}Confirm it has also left /v1/models before you do: that is a second,${RESET}`,
+        );
+        console.log(
+          `${DIM}independent signal, and two is this catalogue's bar for benching anything.${RESET}`,
+        );
+        console.log(
+          `${DIM}Measured on z-ai/glm-5.2 — 410 plus 103 → 102 entries in the same window.${RESET}`,
+        );
+      }
 
       if (identity.length) {
         console.log(`\n${YELLOW}In the picker and 404ing — re-probe, do not bench yet:${RESET}`);

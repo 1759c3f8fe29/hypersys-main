@@ -1,31 +1,19 @@
-import { motion, type TargetAndTransition } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { Zap, Globe, Shield, Rocket } from 'lucide-react';
 import { LOGO_URL } from '@/lib/assets';
 
-/**
- * An animation target that is also allowed to drive CSS custom properties.
+/* The `CssVarTarget` type and the two hoisted spin targets that used to sit here
+ * are gone, along with the `TargetAndTransition` import they needed.
  *
- * framer-motion animates custom properties perfectly well at runtime, but its
- * `TargetAndTransition` type has no index signature for them, so a `'--angle'`
- * key is unassignable and both conic-gradient spins below were written as
- * `as any`. That cast was wider than the problem: it also switched off checking
- * on the real properties sitting in the same literal, so a mistyped `scale` or a
- * string where a number belongs would have gone through silently.
- *
- * `Record<`--${string}`, …>` becomes a pattern index signature, which constrains
- * only the keys that actually start with `--` and leaves every known
- * TargetAndTransition property checked as before. The intersection is assignable
- * to TargetAndTransition, so the targets below need no cast at all.
+ * They were a real typing fix — a pattern index signature over `--${string}` so
+ * framer-motion could drive a CSS custom property without an `as any` that would
+ * also have switched off checking on the `scale` sitting in the same literal.
+ * Worth recording that they were deleted for the right reason and not because the
+ * problem went away: the only thing that ever needed them was the pair of
+ * infinite conic-gradient spins in the logo block below, and the native-look pass
+ * removed those. If a custom property ever needs animating here again, the type is
+ * in the git history and is still the correct answer — do not reach for `as any`.
  */
-type CssVarTarget = TargetAndTransition & Record<`--${string}`, string | string[]>;
-
-// Hoisted out of the JSX: both are constant, and these animations repeat forever,
-// so there is no reason to rebuild the target object on every render.
-const RING_SPIN_AND_PULSE: CssVarTarget = {
-  '--angle': ['0deg', '360deg'],
-  scale: [1, 1.1, 1],
-};
-const INNER_GRADIENT_SPIN: CssVarTarget = { '--angle': ['0deg', '360deg'] };
 
 interface WelcomeScreenProps {
   modelName?: string;
@@ -71,56 +59,28 @@ export default function WelcomeScreen({ onSuggestionClick ,
       >
         {/* Hero Section */}
         <motion.header variants={itemVariants} className="mb-8 sm:mb-10">
-          {/* Stunning animated logo */}
-          <motion.div 
-            className="relative inline-flex items-center justify-center w-24 h-24 sm:w-28 sm:h-28 md:w-32 md:h-32 mb-6"
-          >
-            {/* Multiple glow rings */}
-            <motion.div
-              className="absolute inset-0 rounded-3xl"
-              style={{
-                background: 'conic-gradient(from var(--angle), hsl(var(--primary) / 0.3), hsl(200 80% 50% / 0.3), hsl(280 70% 50% / 0.3), hsl(var(--primary) / 0.3))',
-              }}
-              animate={RING_SPIN_AND_PULSE}
-              transition={{
-                '--angle': { duration: 4, repeat: Infinity, ease: 'linear' },
-                scale: { duration: 3, repeat: Infinity, ease: 'easeInOut' },
-              }}
-            />
-            
-            <motion.div
-              className="absolute inset-2 rounded-2xl bg-gradient-to-br from-primary/30 to-primary/10 blur-xl"
-              animate={{
-                opacity: [0.5, 0.8, 0.5],
-              }}
-              transition={{
-                duration: 2,
-                repeat: Infinity,
-                ease: "easeInOut"
-              }}
-            />
-            
-            {/* Main icon container */}
-            <motion.div 
-              className="relative w-full h-full rounded-3xl liquid-icon flex items-center justify-center backdrop-blur-xl overflow-hidden"
-              whileHover={{ scale: 1.05, rotate: 5 }}
-              transition={{ type: "spring", stiffness: 300 }}
-              style={{
-                boxShadow: '0 0 60px hsla(172, 66%, 50%, 0.25), inset 0 0 40px hsla(172, 66%, 50%, 0.1)'
-              }}
-            >
-              {/* Inner rotating gradient */}
-              <motion.div
-                className="absolute inset-0"
-                style={{
-                  background: 'conic-gradient(from var(--angle), transparent, hsl(var(--primary) / 0.2), transparent)',
-                }}
-                animate={INNER_GRADIENT_SPIN}
-                transition={{ duration: 3, repeat: Infinity, ease: 'linear' }}
-              />
-              <img src={LOGO_URL} alt="Flyer AI" className="w-full h-full object-cover relative z-10 rounded-2xl" />
-            </motion.div>
-          </motion.div>
+          {/* Static logo tile.
+              Three always-on animations used to live here: a conic-gradient ring
+              spinning `--angle` 0deg→360deg while pulsing `scale` 1→1.1, a
+              blurred layer pulsing opacity 0.5→0.8, and a second conic spin
+              inside the tile — all `repeat: Infinity`, all running before the
+              user had typed anything. Removed in the native-look pass (§14):
+              an app icon in a native application does not breathe, and this one
+              was doing it on three separate compositor loops.
+
+              The one-shot entrance animation on the parent (`itemVariants`) is
+              deliberately kept. That distinction is the whole rule this pass
+              applies: a thing that animates once as a view opens reads as
+              native; a thing that never stops moving reads as a web toy.
+
+              `whileHover` also lost its `rotate: 5` — a tile that tilts under the
+              cursor is not a native affordance. The subtle lift is kept. */}
+          <div className="relative inline-flex items-center justify-center w-24 h-24 sm:w-28 sm:h-28 md:w-32 md:h-32 mb-6">
+            <div aria-hidden className="absolute -inset-1 rounded-[1.75rem] bg-primary/10" />
+            <div className="relative w-full h-full rounded-3xl overflow-hidden ring-1 ring-white/10 shadow-lg">
+              <img src={LOGO_URL} alt="Flyer AI" className="w-full h-full object-cover" />
+            </div>
+          </div>
           
           <motion.h1
             className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-display font-bold mb-3 sm:mb-4 tracking-tight"
@@ -142,7 +102,11 @@ export default function WelcomeScreen({ onSuggestionClick ,
             variants={itemVariants}
           >
             <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-3 py-1 text-xs sm:text-sm text-muted-foreground/80">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              {/* `animate-pulse` removed from this dot for the same reason as the
+                  one in the pill below: it was a status light wired to nothing.
+                  Static, it still does its actual job, which is to sit next to the
+                  model name as a bullet. */}
+              <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               Powered by <span className="text-primary/90 font-semibold">{modelName}</span>
             </span>
           </motion.div>
@@ -217,20 +181,27 @@ export default function WelcomeScreen({ onSuggestionClick ,
           className="mt-6"
           variants={itemVariants}
         >
-          <motion.div
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-primary/20 backdrop-blur-sm liquid-surface"
-            animate={{
-              boxShadow: ['0 0 20px hsla(172, 66%, 50%, 0.05)', '0 0 40px hsla(172, 66%, 50%, 0.15)', '0 0 20px hsla(172, 66%, 50%, 0.05)'],
-            }}
-            transition={{ duration: 2, repeat: Infinity }}
-          >
-            <motion.div
-              className="w-2 h-2 rounded-full bg-primary"
-              animate={{ scale: [1, 1.3, 1], opacity: [0.7, 1, 0.7] }}
-              transition={{ duration: 1.5, repeat: Infinity }}
-            />
-            <span className="text-xs sm:text-sm text-primary font-semibold">Multi-model AI · Online & Ready</span>
-          </motion.div>
+          {/* Two more infinite loops lived here and are gone: the pill breathed a
+              box-shadow between 20px/0.05 and 40px/0.15 on a 2s cycle, and the dot
+              inside it pulsed scale 1→1.3 with opacity 0.7→1 on a 1.5s cycle.
+
+              This was the last always-on motion on the welcome screen, and it is
+              worth naming what it was doing wrong beyond just moving: it looked
+              like a status indicator. A pulsing dot next to the words "Online &
+              Ready" reads as a live health signal — but nothing was reporting
+              anything. It pulsed identically whether every provider was up or every
+              one of them was returning 404s. Motion that implies liveness it cannot
+              actually verify is worse than no motion, because a user learns to
+              trust it and then it lies.
+
+              A real status light is worth building — the failover layer already
+              knows which routes answered. Until it is wired to that, this is a
+              static label that claims only what it can back up: which model is
+              selected, which the header shows anyway. */}
+          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-primary/20 backdrop-blur-sm liquid-surface">
+            <div aria-hidden className="w-1.5 h-1.5 rounded-full bg-primary" />
+            <span className="text-xs sm:text-sm text-primary font-semibold">Multi-model AI</span>
+          </div>
         </motion.div>
       </motion.div>
     </section>

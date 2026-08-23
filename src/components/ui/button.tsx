@@ -16,11 +16,15 @@ const buttonVariants = cva(
         ghost: "hover:bg-accent hover:text-accent-foreground",
         link: "text-primary underline-offset-4 hover:underline",
       },
+      // Heights come from --control-height (src/index.css), which is 40/36/44 under
+      // a coarse pointer and 36/32/40 under a fine one. Arbitrary values rather than
+      // a custom utility class so tailwind-merge still resolves a caller's explicit
+      // `h-8` — see the token comment for why that matters.
       size: {
-        default: "h-10 px-4 py-2",
-        sm: "h-9 rounded-md px-3",
-        lg: "h-11 rounded-md px-8",
-        icon: "h-10 w-10",
+        default: "h-[var(--control-height)] px-4 py-2",
+        sm: "h-[var(--control-height-sm)] rounded-md px-3",
+        lg: "h-[var(--control-height-lg)] rounded-md px-8",
+        icon: "h-[var(--control-height)] w-[var(--control-height)]",
       },
     },
     defaultVariants: {

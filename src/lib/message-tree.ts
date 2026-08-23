@@ -12,6 +12,8 @@
 // linearizeForest below. The active child defaults to the last sibling
 // (newest edit/regenerate wins), and the branch switcher flips it.
 
+import { extractFirstMarkdownImage } from './chat-format';
+
 export interface TreeMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -89,6 +91,46 @@ export interface TreeNode extends TreeMessage {
  * orphaned node is promoted to a root rather than dropped. We never lose a
  * message and never infinite-loop.
  */
+/**
+ * Map stored message rows into the shape `buildMessageForest` expects.
+ *
+ * Extracted from Chat.tsx's load path so the round-trip test can exercise the real
+ * mapping instead of a copy of it. That is not a cosmetic reason: the two defects this
+ * function's body used to contain — `createdAt` omitted entirely, and an `id` drawn
+ * from a different namespace than `parentMessageId` — are exactly the kind that a test
+ * mirroring the mapping cannot see, because the mirror gets written correctly while the
+ * original stays wrong. One definition, one thing to be wrong.
+ *
+ * `createdAt` is the load-bearing field here and the one that was missing. Without it
+ * `nodeTime()` returns 0 for every node, so the sibling tiebreak in buildMessageForest
+ * can never reach its second term.
+ */
+export function toTreeMessages(
+  rows: Array<{
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    createdAt?: string;
+    parentMessageId?: string | null;
+    siblingIndex?: number;
+    // Carried through untouched; this module does not model them.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    [key: string]: any;
+  }>
+): TreeMessage[] {
+  return rows.map((m) => ({
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    imageUrl: m.role === 'assistant' ? extractFirstMarkdownImage(m.content) : undefined,
+    attachments: m.attachments,
+    modelName: m.modelName,
+    parentMessageId: m.parentMessageId ?? null,
+    siblingIndex: m.siblingIndex ?? 0,
+    createdAt: m.createdAt,
+  }));
+}
+
 export function buildMessageForest(flat: TreeMessage[]): TreeNode[] {
   const byId = new Map<string, TreeNode>();
   const nodes: TreeNode[] = flat.map((m) => ({

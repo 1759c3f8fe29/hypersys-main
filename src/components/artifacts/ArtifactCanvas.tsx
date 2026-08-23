@@ -8,14 +8,36 @@
 // width while the canvas is closed).
 
 import { useCallback, useRef } from "react";
+import { toast } from "sonner";
 import { ArtifactPanel } from "./ArtifactPanel";
 import type { Artifact } from "@/lib/artifacts";
 import { useArtifacts, setCanvasWidth } from "./ArtifactProvider";
 import type { MessageFile } from "@/components/chat/types";
 
+/**
+ * A generated file plus the id of the message that produced it.
+ *
+ * The message id is the whole point of this type, and it fixes a wrong-data bug
+ * (§14.2 #18). A file artifact's id is `file:<filename>` — filename alone — so
+ * two turns that both generate `report.xlsx` share one artifact id, and
+ * `mergeArtifacts` deliberately treats the second as a **new version** of the
+ * first (a different producing message is its new-version signal). But both
+ * resolvers below used to look the file up with
+ * `filesForTurn.find(f => f.filename === …)`, and `find` returns the *first*
+ * match — the oldest. So the panel showed "v2", and previewed and downloaded
+ * version 1's bytes.
+ *
+ * Carrying the producing message id makes the lookup answer the question the
+ * artifact is actually asking: not "a file with this name" but "the file this
+ * version came from".
+ */
+export interface TurnFile extends MessageFile {
+  messageId: string;
+}
+
 interface Props {
   /** Triggered when the user holds the edge of the canvas width handle down. */
-  filesForTurn: MessageFile[];
+  filesForTurn: TurnFile[];
   onEdit?: (text: string) => void;
 }
 
@@ -42,13 +64,44 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
     dragging.current = false;
   }, []);
 
-  // There is exactly one download per file in `filesForTurn`. A file artifact's
-  // id is `file:<filename>`, so we resolve the blob url by filename here — the
-  // Artifact itself carries no url.
+  // Resolve the blob url for the version of the artifact the panel is showing.
+  // The Artifact itself carries no url, so this is the only join between the
+  // artifact store and the actual bytes — and getting it wrong is invisible,
+  // because the wrong file downloads exactly as successfully as the right one.
+  const resolveFile = useCallback(
+    (artifact: Artifact): TurnFile | undefined => {
+      const named = filesForTurn.filter((f) => `file:${f.filename}` === artifact.id);
+      if (named.length <= 1) return named[0];
+
+      // More than one file with this name, so the artifact has versions and the
+      // filename alone cannot say which. The panel renders the newest version's
+      // content, so match that version's producing message.
+      const latest = artifact.history[artifact.history.length - 1];
+      const exact = latest && named.find((f) => f.messageId === latest.messageId);
+      // Last rather than first when no version matches: an artifact registered
+      // from a download chip (`openFileArtifact`) carries a synthetic messageId
+      // that no message owns, and for it the newest same-named file is the one
+      // the user was just looking at. `find`'s first-match — the *oldest* — was
+      // the bug.
+      return exact ?? named[named.length - 1];
+    },
+    [filesForTurn],
+  );
+
   const onDownload = useCallback(
     (artifact: Artifact) => {
-      const file = filesForTurn.find((f) => `file:${f.filename}` === artifact.id);
-      if (!file) return;
+      const file = resolveFile(artifact);
+      if (!file) {
+        // Used to `return` silently. `fetchFileText` throws a reported error for
+        // this exact condition two functions down, so the same missing file was
+        // explained on the preview path and not on the download path — and a
+        // Download button that does nothing at all reads as a broken app, so the
+        // user presses it again.
+        toast("That file is no longer available in this session.", {
+          id: "artifact-file-missing",
+        });
+        return;
+      }
       const a = document.createElement("a");
       a.href = file.url;
       a.download = file.filename;
@@ -56,18 +109,18 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
       a.click();
       a.remove();
     },
-    [filesForTurn],
+    [resolveFile],
   );
 
   const fetchFileText = useCallback(
     async (artifact: Artifact): Promise<string> => {
-      const file = filesForTurn.find((f) => `file:${f.filename}` === artifact.id);
+      const file = resolveFile(artifact);
       if (!file) throw new Error("This file is no longer available.");
       const res = await fetch(file.url);
       if (!res.ok) throw new Error("Could not read the generated file.");
       return res.text();
     },
-    [filesForTurn],
+    [resolveFile],
   );
 
   // When the panel opens it uses whatever docked width the store holds; there is

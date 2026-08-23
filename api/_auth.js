@@ -30,6 +30,9 @@ const GOOGLE_JWKS_URL =
 let jwksCache = { keys: null, fetchedAt: 0 };
 const JWKS_TTL_MS = 60 * 60 * 1000;
 
+// Applied to both ends of the token's validity window. See verifyFirebaseToken.
+const CLOCK_SKEW_S = 300;
+
 async function getGooglePublicKeys() {
   const now = Date.now();
   if (jwksCache.keys && now - jwksCache.fetchedAt < JWKS_TTL_MS) {
@@ -51,40 +54,91 @@ function decodeSegment(seg) {
 }
 
 /**
- * Verify a Firebase ID token: RS256 signature against Google's certs, plus the
- * issuer/audience/expiry claims Firebase requires. Returns the uid, or null.
+ * Verify a Firebase ID token without the Admin SDK.
+ *
+ * Returns `{ ok: true, uid, email }` or `{ ok: false, reason }`, where reason is
+ * `"expired"`, `"invalid"` or `"unavailable"`. The split is the whole point of the
+ * return shape and it used to be a bare `null` for all eleven failure paths below.
+ *
+ * The three reasons exist because they need three different things to happen next,
+ * and only one of them is the caller's fault:
+ *
+ * - **expired** is the **normal** state of a long-lived session, not an error.
+ *   Firebase ID tokens last one hour, so any desktop window left open — or any
+ *   laptop suspended and reopened — presents one eventually. The client fixes it
+ *   alone by force-refreshing and retrying, and the user should never learn it
+ *   happened.
+ * - **invalid** is unrecoverable: malformed, wrong audience, bad signature. Sign in
+ *   again, and this one is worth telling someone about.
+ * - **unavailable** is *ours*. Google's JWKS endpoint is unreachable, so the token
+ *   was never judged at all. It is transient and says nothing about the credential,
+ *   so it must not be answered with 401: telling a user to sign in again because our
+ *   dependency is down destroys a working session over a network blip, and they will
+ *   do it, because the message told them to.
+ *
+ * Collapsing these into one answer meant the two recoverable cases were reported to
+ * the user as permanent credential failures, and the client had nothing to branch
+ * on, so it could not recover from either.
  */
 async function verifyFirebaseToken(token, projectId) {
   try {
     const parts = token.split(".");
-    if (parts.length !== 3) return null;
+    if (parts.length !== 3) return { ok: false, reason: "invalid" };
 
     const header = decodeSegment(parts[0]);
     const payload = decodeSegment(parts[1]);
 
-    if (header.alg !== "RS256" || !header.kid) return null;
+    if (header.alg !== "RS256" || !header.kid) return { ok: false, reason: "invalid" };
 
     const now = Math.floor(Date.now() / 1000);
-    if (payload.exp <= now) return null;
-    if (payload.iat > now + 300) return null; // clock skew tolerance
-    if (payload.aud !== projectId) return null;
-    if (payload.iss !== `https://securetoken.google.com/${projectId}`) return null;
-    if (!payload.sub) return null;
+    // Symmetric with the `iat` tolerance below, and for the same reason. It was
+    // `exp <= now` — zero seconds — which rejects a token that expires while the
+    // request is in flight, and rejects a perfectly good token whenever the
+    // *server's* clock runs fast. The asymmetry was the bug: 300s of grace for a
+    // token issued slightly in the future, none at all for one that just aged out.
+    // Small enough that a genuinely stale token is still refused; the security
+    // property here is the signature check, not a stopwatch.
+    if (payload.exp + CLOCK_SKEW_S <= now) return { ok: false, reason: "expired" };
+    if (payload.iat > now + CLOCK_SKEW_S) return { ok: false, reason: "invalid" };
+    if (payload.aud !== projectId) return { ok: false, reason: "invalid" };
+    if (payload.iss !== `https://securetoken.google.com/${projectId}`) return { ok: false, reason: "invalid" };
+    if (!payload.sub) return { ok: false, reason: "invalid" };
 
-    const certs = await getGooglePublicKeys();
+    // Fetched inside its own boundary so a Google outage cannot be reported as a bad
+    // credential. Everything above this line is a fact about the token; everything
+    // this can fail on is a fact about our network, and the outer catch could not
+    // tell them apart — it answered `invalid` for both, which is how an offline
+    // moment came to mean "your sign-in is no longer valid".
+    let certs;
+    try {
+      certs = await getGooglePublicKeys();
+    } catch (err) {
+      console.error("[auth] could not reach Google's JWKS endpoint:", err.message);
+      return { ok: false, reason: "unavailable" };
+    }
+
     const cert = certs[header.kid];
-    if (!cert) return null;
+    // A kid we have no cert for is usually Google having rotated its signing keys
+    // while our JWKS cache is still warm — the token is fine and the *cache* is
+    // stale. Reported as expired so the client refreshes and retries, which comes
+    // back with a kid the next JWKS fetch covers. Calling it invalid stranded the
+    // user on a key rotation they had nothing to do with.
+    if (!cert) return { ok: false, reason: "expired" };
 
     const { createVerify } = await import("node:crypto");
     const verifier = createVerify("RSA-SHA256");
     verifier.update(`${parts[0]}.${parts[1]}`);
     const valid = verifier.verify(cert, b64urlToBuffer(parts[2]));
-    if (!valid) return null;
+    if (!valid) return { ok: false, reason: "invalid" };
 
-    return { uid: payload.sub, email: payload.email || null };
+    return { ok: true, uid: payload.sub, email: payload.email || null };
   } catch (err) {
+    // Reachable only from segment decoding and the signature check now that the JWKS
+    // fetch has its own boundary above — i.e. from a token that is not parseable or a
+    // key that is not usable. Both are facts about the credential, so `invalid` is the
+    // honest answer here rather than a catch-all.
     console.warn("[auth] token verification failed:", err.message);
-    return null;
+    return { ok: false, reason: "invalid" };
   }
 }
 
@@ -113,14 +167,51 @@ export async function verifyRequest(req) {
   const authHeader = req.headers.authorization || "";
   const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
+  // A token was presented but the server has no project id to verify it against.
+  // This used to fall through to the anonymous branch below, which is the exact
+  // silent downgrade the comment further down forbids — and worse than the case it
+  // forbids, because it downgrades a *valid* signed-in user rather than a bad
+  // token: their requests get attributed to a hashed IP and metered against
+  // DAILY_LIMIT_GUEST (10) instead of DAILY_LIMIT_USER (100), so a signed-in
+  // account starts failing after ten messages with a quota message that makes no
+  // sense to someone who is signed in. It is a deployment fault — one missing
+  // environment variable — and it must read as one.
+  if (bearer && !projectId) {
+    console.error(
+      "[auth] a bearer token was presented but FIREBASE_PROJECT_ID is not set; " +
+        "refusing rather than metering a signed-in user as a guest",
+    );
+    return { ok: false, status: 503, error: "auth_not_configured" };
+  }
+
   if (bearer && projectId) {
-    const user = await verifyFirebaseToken(bearer, projectId);
-    if (user) {
-      return { ok: true, identity: { kind: "user", id: user.uid, email: user.email } };
+    const result = await verifyFirebaseToken(bearer, projectId);
+    if (result.ok) {
+      return { ok: true, identity: { kind: "user", id: result.uid, email: result.email } };
     }
+    // Our dependency, not their credential. A 401 here would tell a user with a
+    // perfectly good token to sign in again because Google's JWKS endpoint blipped —
+    // and they would do it, because the message said so, losing a working session to
+    // an outage that fixes itself. 503 says "come back in a moment" to both the client
+    // and whoever is reading the logs, and it is the truth: the token was never judged.
+    if (result.reason === "unavailable") {
+      return { ok: false, status: 503, error: "auth_unavailable" };
+    }
+
     // A token was presented and did not verify. Treating that as a guest would
     // silently downgrade a tampered or expired token into a working request.
-    return { ok: false, status: 401, error: "invalid_token" };
+    //
+    // The two remaining reasons are answered differently because the client can act
+    // on one of them and not the other. `token_expired` says "refresh and send it
+    // again" and is invisible when the client does that; `invalid_token` says "this
+    // credential is not going to start working". Both are 401 — the status is
+    // about the request, and the body is what tells the client which recovery
+    // applies.
+    return {
+      ok: false,
+      status: 401,
+      error: result.reason === "expired" ? "token_expired" : "invalid_token",
+    };
   }
 
   const allowAnonymous = process.env.ALLOW_ANONYMOUS !== "false";

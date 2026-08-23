@@ -55,6 +55,25 @@
          and splash screen have no visible seam when the app paints. -->
     <meta name="theme-color" content="#0a0d14" />
     <meta name="msapplication-TileColor" content="#0a0d14" />
+
+    <!-- Declares the app dark to the *engine*, not just to the stylesheet, and it
+         has to be here rather than only in CSS because it is read before any
+         stylesheet loads. Without it the UA paints its default white canvas for the
+         first frame and the window flashes white on every cold launch — the single
+         most web-page-looking moment in an otherwise native shell.
+
+         It also changes what the platform draws that CSS cannot reach: form-control
+         internals, the caret, the default scrollbar, spell-check underlines, and the
+         `<select>` popup are all rendered by the OS/UA against this value. Those
+         were being drawn light-on-light inside dark controls.
+
+         Only `dark` is listed, deliberately — this is not the OS-following item on
+         the §14 checklist. The palette in index.css has one theme; claiming to
+         support both here would let the UA render light widget internals against
+         tokens that are still dark, which is worse than not following the OS at
+         all. Add `light` to this list at the same time as a light token set, not
+         before. -->
+    <meta name="color-scheme" content="dark" />
     
     <!-- PWA -->
     <link rel="manifest" href="/manifest.json" />
@@ -70,8 +89,22 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     
     <!-- Preconnect / DNS-prefetch for performance -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- Two Google Fonts preconnect hints (to the googleapis and gstatic hosts)
+         were removed here by the native-look pass. They paired with a webfont
+         @import at the top of src/index.css that the same pass deleted, and a
+         leftover preconnect is not inert: it still performs DNS + TCP + TLS to
+         both hosts on every launch, for a font that is never requested. In the
+         installed desktop build that means two handshakes to Google before the
+         app paints, and Google learning about each launch, in exchange for
+         nothing. The CSP in electron/main.cjs dropped the same origin.
+
+         Deliberately described rather than quoted. The first version of this note
+         pasted the two removed link tags verbatim, which made `grep` on the built
+         output useless — a grep for the font host matched the comment and the
+         real tags identically, and I read the result as "the tags are still
+         there". A comment about removed markup must not contain that markup.
+
+         The three below are kept — those hosts are still called. -->
     <link rel="preconnect" href="https://image.pollinations.ai" />
     <link rel="dns-prefetch" href="https://image.pollinations.ai" />
     <link rel="dns-prefetch" href="https://integrate.api.nvidia.com" />

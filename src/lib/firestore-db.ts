@@ -73,6 +73,16 @@ export interface UserSettings {
   updatedAt: string | null;
 }
 
+/**
+ * Ceiling on the base64 data URL stored with an attachment.
+ *
+ * A Firestore document must stay under ~1 MiB across every field, so this is a
+ * fraction of it: the message content, the thread metadata and up to ten
+ * attachments all share that budget. See the note at the write site for what is
+ * lost when the cap trips (the thumbnail) and what is saved (the message).
+ */
+const MAX_PERSISTED_ATTACHMENT_CHARS = 200_000;
+
 export interface FirestoreMessage {
   id: string;
   conversationId: string;
@@ -119,8 +129,23 @@ export const firestoreDb = {
       // Sort client-side to avoid needing a composite index
       return docs.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
     } catch (error) {
+      // Rethrown, and this is the whole point of the two reads below and above
+      // being different from everything else in this file.
+      //
+      // This used to `return []`, which made the caller's own error handling
+      // unreachable. Chat.tsx wraps this call in a try/catch that sets
+      // conversationsStatus('error') so the sidebar can render its failure panel
+      // and Retry — and none of that could ever fire, because a rejected read
+      // arrived as a successful empty one. The sidebar showed "No conversations
+      // yet" to a user with fifty chats, which is the exact bug (§14.2 #6) whose
+      // fix lives one layer up and had been sitting dead ever since.
+      //
+      // A swallowed read is fine for data the app can do without — see getMemories
+      // and getUserSettings, which stay lenient on purpose. It is not fine when
+      // "no data" is also a meaningful, reassuring UI state, because then the two
+      // are indistinguishable and the reassuring one wins by default.
       console.error('Error fetching conversations from Firestore:', error);
-      return [];
+      throw error;
     }
   },
 
@@ -135,7 +160,26 @@ export const firestoreDb = {
       const docs = snapshot.docs.map(d => {
         const data = d.data();
         return {
-          id: d.id,
+          // `clientId` first, and this is the whole of the threading fix.
+          //
+          // `parentMessageId` is written by the client, and the client only knows its
+          // own ids — the UUIDs it minted when it put the message on screen. But the
+          // document id here comes from `addDoc`, which generates its own. So every
+          // parent pointer read back from Firestore referenced an id that did not
+          // exist in the batch, `buildMessageForest` promoted all of them to roots
+          // (its documented orphan behaviour — nothing was lost, but nothing was
+          // *threaded* either), and a reload flattened the tree completely: three
+          // regenerations of one turn came back as three consecutive replies with no
+          // branch switcher, and the next branch created after that reload started
+          // its sibling numbering over from zero.
+          //
+          // Persisting the client's own id and reading it back makes message identity
+          // stable across a reload, which is what the parent pointers assumed all
+          // along. Nothing in the app addresses a message document by its Firestore
+          // id — messages are only ever added and bulk-read by conversationId — so
+          // the doc id was never load-bearing. Documents written before this field
+          // existed have no clientId and fall back to `d.id`, exactly as before.
+          id: data.clientId || d.id,
           conversationId: data.conversationId,
           role: data.role,
           content: data.content || '',
@@ -152,8 +196,22 @@ export const firestoreDb = {
       // Sort client-side to avoid needing a composite index
       return docs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     } catch (error) {
+      // Rethrown for the same reason as getConversations above, except that the
+      // consequence here is not cosmetic. `return []` left `messages` empty, which
+      // the render treats as a brand-new conversation, so the WelcomeScreen
+      // appeared over a thread that has history and the composer stayed live.
+      // Sending from there reaches the model with **no prior turns**, so a
+      // mid-thread follow-up gets answered as if it were the opening line — and
+      // that reply is then persisted into the middle of a thread the model never
+      // saw.
+      //
+      // §14.2 #7 built the fix for exactly that: setMessagesError(true), a Retry
+      // panel, and `disabled` on the composer. All of it was unreachable. The
+      // dangerous half of that bug was still live in production with the fix
+      // shipped, tested and inert — which is a worse position than not having
+      // fixed it, because the tests said it was handled.
       console.error('Error fetching messages from Firestore:', error);
-      return [];
+      throw error;
     }
   },
 
@@ -183,7 +241,11 @@ export const firestoreDb = {
     // message of a conversation, which is a root. For an edit/regenerate, pass
     // the *same* parentMessageId the original branch shared — this creates a
     // new sibling under that parent rather than mutating the original.
-    parentMessageId?: string | null
+    parentMessageId?: string | null,
+    // The id this message already has in the client's own state, persisted so it
+    // survives a reload. See the comment on `id` in getMessages — without it, the
+    // parentMessageId written above pointed at nothing after a refresh.
+    clientId?: string | null
   ): Promise<string> {
     // Compute the sibling index: how many children this parent already has.
     // This is a read-then-write (not transactional), which is fine here —
@@ -218,13 +280,27 @@ export const firestoreDb = {
       attachments: attachments.map(a => ({
         id: a.id,
         name: a.name,
-        url: a.url,
+        // A Firestore document is capped at ~1 MiB across all of its fields, and
+        // `url` here is the whole file base64-encoded. So an attachment much over
+        // a megabyte does not merely fail to store its own preview: it makes the
+        // *message* write fail, and the caller's error path then tells the user
+        // their turn will not survive a reload. A 3 MB phone photo was already
+        // enough to do it; now that the picker accepts any file type, so is an
+        // ordinary spreadsheet.
+        //
+        // Dropping just the url keeps the message. The attachment still renders
+        // with its name and type on reload, only without the thumbnail, and the
+        // reply — which is what the user came for, and which was generated from
+        // the extracted text rather than from this field — is intact. Losing a
+        // preview beats losing the turn.
+        url: (a.url?.length ?? 0) > MAX_PERSISTED_ATTACHMENT_CHARS ? '' : a.url,
         type: a.type,
         mimeType: a.mimeType || null,
         size: a.size || null
       })),
       parentMessageId: parentMessageId ?? null,
       siblingIndex,
+      clientId: clientId ?? null,
       createdAt: serverTimestamp()
     });
 

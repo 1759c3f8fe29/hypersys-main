@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, Terminal } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -9,9 +9,11 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useTextToSpeech } from '@/hooks/useTextToSpeech';
+import { copyText } from '@/lib/clipboard';
+import { toast } from 'sonner';
 import { extractFirstMarkdownImage, sanitizeAssistantText, stripMarkdownImages } from '@/lib/chat-format';
-import { isSubstantialCodeBlock } from '@/lib/artifacts';
-import { openCodeArtifact, openFileArtifact } from '@/components/artifacts/ArtifactProvider';
+import { artifactIdForCode, isSubstantialCodeBlock } from '@/lib/artifacts';
+import { openCodeArtifact, openFileArtifact, useHasArtifact } from '@/components/artifacts/ArtifactProvider';
 import { LOGO_URL } from '@/lib/assets';
 import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource } from './types';
 import { RunButton, RunOutput } from './CodeRunner';
@@ -216,7 +218,9 @@ function StagedRun({ run, index }: { run: MessageCodeRun; index: number }) {
   const runner = useCodeRunner(code);
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    await navigator.clipboard.writeText(code);
+    // The tick only appears if the text actually reached the clipboard — see
+    // src/lib/clipboard.ts for why that is not the same as "the call returned".
+    if (!(await copyText(code))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -373,10 +377,24 @@ function SourceChips({ sources }: { sources: MessageSource[] }) {
   );
 }
 
+/**
+ * The one-line identity of a code block, for the collapsed card: the first line
+ * that says something. Comments, imports and decorators are skipped because the
+ * first line of real model output is usually `// utils/debounce.ts` or `import
+ * React from 'react'`, neither of which tells you which block this is.
+ */
+function codePreviewLine(source: string): string {
+  const lines = source.split('\n');
+  const boring = /^\s*(\/\/|#|\/\*|\*|--|<!--|@|import\b|from\b|using\b|package\b|require\b|"use )/;
+  const meaningful = lines.find((l) => l.trim() && !boring.test(l)) ?? lines.find((l) => l.trim());
+  const flat = (meaningful ?? '').trim().replace(/\s+/g, ' ');
+  return flat.length <= 72 ? flat : flat.slice(0, 71) + '…';
+}
+
 function CodeBlock({ language, children }: { language: string; children: string }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(children);
+    if (!(await copyText(children))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -384,14 +402,47 @@ function CodeBlock({ language, children }: { language: string; children: string 
   // handler exists — a three-line example with a "open in canvas" button is the
   // annoyance the brief names.
   const substantial = isSubstantialCodeBlock(children);
+
+  // Is this exact body already sitting in the side canvas?
+  //
+  // `substantial` alone is the wrong question — it means "qualifies for lifting",
+  // and the reply is rendered long before the turn completes and ingests. Asking
+  // the store instead makes the collapse below true by construction: the body is
+  // hidden here only while a copy of it is genuinely one click away.
+  //
+  // That invariant is why this is a store read and not a reload-dependent guess.
+  // A reload used to leave the store empty, so every block in a reopened
+  // conversation rendered in full; the load path now refills it from the history
+  // (`artifactsFromHistory`), so the same block collapses again — and it should,
+  // because the side-panel copy is back. Neither behaviour is written down here as
+  // a rule about reloads. The question is only ever "does the canvas hold this",
+  // and the answer stays correct however the canvas came to hold it.
+  //
+  // The id comes from `artifactIdForCode` rather than being recomputed inline for
+  // the reason that function's own comment gives: the store hashes the raw
+  // assistant markdown and this hashes what react-markdown handed back, so the
+  // normalisation has to be shared or the two silently disagree.
+  const artifactId = useMemo(
+    () => (substantial ? artifactIdForCode(language, children) : null),
+    [substantial, language, children],
+  );
+  const inCanvas = useHasArtifact(artifactId);
+
+  // Expanding is per-block and defaults to collapsed. It exists so the collapse is
+  // never a one-way door: the panel shows one artifact at a time, so a user reading
+  // two blocks against each other needs to be able to put one back inline.
+  const [expandedInline, setExpandedInline] = useState(false);
+  const collapsed = inCanvas && !expandedInline;
+
   // Any Python block in the conversation is runnable, not just the ones the tool
   // staged — a snippet the model wrote inline is the same thing to the reader, so
   // the button sits in the same place. It never fires on its own.
   const runner = useCodeRunner(children);
   const runnable = isRunnableLanguage(language);
+  const lineTotal = children.split('\n').length;
 
   return (
-    <div className="relative group my-5 rounded-2xl overflow-hidden border border-border/40 bg-card shadow-xl">
+    <div data-code-block className="relative group my-5 rounded-2xl overflow-hidden border border-border/40 bg-card shadow-xl">
       <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-secondary/90 to-secondary/70 border-b border-border/30">
         <div className="flex items-center gap-2">
           <div className="flex gap-1.5">
@@ -402,6 +453,17 @@ function CodeBlock({ language, children }: { language: string; children: string 
           <span className="text-xs text-muted-foreground/70 font-mono ml-2 uppercase tracking-wider">{language || 'code'}</span>
         </div>
         <div className="flex items-center gap-2">
+          {inCanvas && (
+            <button
+              onClick={() => setExpandedInline((v) => !v)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-background/60 hover:bg-background text-xs text-muted-foreground hover:text-foreground transition-all border border-border/20"
+              title={collapsed ? 'Show the code here as well' : 'Hide it here — it stays in the canvas'}
+            >
+              {collapsed
+                ? <><ChevronDown className="w-3.5 h-3.5" /><span>Show</span></>
+                : <><ChevronUp className="w-3.5 h-3.5" /><span>Hide</span></>}
+            </button>
+          )}
           {substantial && (
             <button
               onClick={() => openCodeArtifact(language, children)}
@@ -420,17 +482,39 @@ function CodeBlock({ language, children }: { language: string; children: string 
           )}
         </div>
       </div>
-      <div className="overflow-x-auto">
-        <SyntaxHighlighter
-          language={language || 'text'}
-          style={oneDark}
-          customStyle={{ margin: 0, padding: '1.25rem 1.5rem', background: 'transparent', fontSize: '0.875rem', lineHeight: '1.7' }}
-          showLineNumbers={children.split('\n').length > 3}
-          lineNumberStyle={{ opacity: 0.4, minWidth: '2.5em' }}
+      {collapsed ? (
+        // The body, replaced by a reference to where the body is. Copy and Run stay
+        // in the header above, so nothing you could do with the expanded block got
+        // further away — including Run, which still only ever fires on that click.
+        <button
+          onClick={() => openCodeArtifact(language, children)}
+          data-open-in-canvas
+          className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary/25 transition-colors"
         >
-          {children}
-        </SyntaxHighlighter>
-      </div>
+          <FileCode2 className="w-4 h-4 shrink-0 text-primary/70" />
+          <span className="flex-1 min-w-0">
+            <span className="block truncate font-mono text-xs text-foreground/80">{codePreviewLine(children)}</span>
+            <span className="block mt-0.5 text-[11px] text-muted-foreground">
+              {lineTotal} lines · open in the canvas
+            </span>
+          </span>
+          <ArrowUpRight className="w-3.5 h-3.5 shrink-0 text-muted-foreground/60 group-hover:text-foreground/70" />
+        </button>
+      ) : (
+        <div className="overflow-x-auto">
+          <SyntaxHighlighter
+            language={language || 'text'}
+            style={oneDark}
+            customStyle={{ margin: 0, padding: '1.25rem 1.5rem', background: 'transparent', fontSize: '0.875rem', lineHeight: '1.7' }}
+            showLineNumbers={lineTotal > 3}
+            lineNumberStyle={{ opacity: 0.4, minWidth: '2.5em' }}
+          >
+            {children}
+          </SyntaxHighlighter>
+        </div>
+      )}
+      {/* Outside the collapse: a run's output is the answer to a question the user
+          asked by pressing Run, and folding the source must not fold the result. */}
       {runnable && <RunOutput state={runner.state} />}
     </div>
   );
@@ -613,13 +697,13 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
   const textOnlyContent = renderedContent;
 
   const handleCopyAll = async () => {
-    await navigator.clipboard.writeText(textOnlyContent || displayContent);
+    if (!(await copyText(textOnlyContent || displayContent))) return;
     setCopiedAll(true);
     setTimeout(() => setCopiedAll(false), 2000);
   };
 
   const handleCopyArena = async (idx: number, text: string) => {
-    await navigator.clipboard.writeText(text);
+    if (!(await copyText(text))) return;
     setCopiedArenaIdx(idx);
     setTimeout(() => setCopiedArenaIdx(null), 2000);
   };
@@ -630,6 +714,12 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
       let href = generatedImageUrl;
       if (!href.startsWith('data:')) {
         const res = await fetch(generatedImageUrl);
+        // `fetch` resolves for a 404 as happily as for a 200, and `.blob()` on an
+        // error page succeeds — so without this check a dead image URL used to
+        // save the error body to disk under a `.png` name. A file that will not
+        // open is worse than a message saying the download failed, because the
+        // user has to work out for themselves that it is not an image.
+        if (!res.ok) throw new Error(`the image host answered ${res.status}`);
         const blob = await res.blob();
         href = URL.createObjectURL(blob);
       }
@@ -643,7 +733,12 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
       setDownloaded(true);
       setTimeout(() => setDownloaded(false), 2000);
     } catch (e) {
+      // The success path confirms itself with a tick for two seconds, so a caught
+      // and logged failure left the button looking untouched — indistinguishable
+      // from a click that did not register, which is an invitation to click again.
       console.error('Download failed', e);
+      const why = e instanceof Error ? e.message : 'the download was blocked';
+      toast(`Couldn't save the image — ${why}.`, { id: 'image-download-failed' });
     }
   };
 

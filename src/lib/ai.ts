@@ -9,6 +9,9 @@ import {
   supportsVision as catalogueSupportsVision,
   type ProviderId,
 } from "./providers";
+// `chat-format` imports nothing, so this cannot start a cycle — the same property
+// that lets `api/_failover.js` stay dependency-free (see providers.ts).
+import { stripReasoning } from "./chat-format";
 
 // ---------------------------------------------------------------------------
 // API base — same-origin on the web, absolute on the desktop shell
@@ -220,10 +223,18 @@ export function setUserProviderKey(provider: ProviderId, key: string | null) {
  * Returned rather than thrown on failure: the router answers 401 with a
  * message the UI can show, which is clearer than a client-side exception that
  * would be indistinguishable from a network fault.
+ *
+ * `forceRefresh` bypasses the SDK's cached token and mints a new one. It exists for
+ * the 401 retry in `generateRoutedResponse`: the SDK refreshes a token it believes
+ * is near expiry, but "believes" is doing real work there — a suspended laptop, a
+ * desktop window left open overnight, or a clock that drifted all reach the server
+ * with a token the server rejects and the client still considers current. Asking
+ * the server and then forcing a refresh is the only version that recovers, because
+ * the server's opinion is the one that decides.
  */
-async function getIdToken(): Promise<string | undefined> {
+async function getIdToken(forceRefresh = false): Promise<string | undefined> {
   try {
-    return await auth.currentUser?.getIdToken();
+    return await auth.currentUser?.getIdToken(forceRefresh);
   } catch (err) {
     console.warn("[auth] could not get ID token:", err);
     return undefined;
@@ -343,12 +354,6 @@ export async function generateRoutedResponse(
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
-  // The router requires an authenticated caller so requests can be attributed
-  // and metered; without a token the server answers 401 rather than spending
-  // the shared free-tier pool on an anonymous request.
-  const idToken = await getIdToken();
-  if (idToken) headers["Authorization"] = `Bearer ${idToken}`;
-
   // A user's own key bypasses our shared quota entirely.
   for (const route of spec.routes) {
     const byokHeader = PROVIDERS[route.provider]?.byokHeader;
@@ -356,7 +361,11 @@ export async function generateRoutedResponse(
     if (byokHeader && userKey) headers[byokHeader] = userKey;
   }
 
-  const response = await fetch(apiPath("/api/llm"), {
+  // The router requires an authenticated caller so requests can be attributed and
+  // metered; without a token the server answers 401 rather than spending the shared
+  // free-tier pool on an anonymous request. fetchAsUser attaches the token and
+  // replaces it if the server says it has expired.
+  const { response, errText } = await fetchAsUser(apiPath("/api/llm"), {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -376,12 +385,91 @@ export async function generateRoutedResponse(
   });
 
   if (!response.ok) {
-    const errText = await response.text().catch(() => "");
     console.error("LLM router error:", response.status, errText);
     throw new Error(routerError(response.status, errText));
   }
 
   return pumpOpenAiStream(response, onChunk);
+}
+
+/**
+ * `true` when a router failure is a token the client can replace.
+ *
+ * Deliberately narrow: only the server's own `token_expired`. Retrying an
+ * `invalid_token` would be a retry loop on a credential that will never verify, and
+ * retrying a 429 would spend a second request out of the quota that just ran out.
+ */
+function isRefreshableAuthFailure(status: number, errText: string): boolean {
+  if (status !== 401) return false;
+  try {
+    return JSON.parse(errText)?.error === "token_expired";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * POST to one of our own serverless routes as the signed-in user, recovering from
+ * an expired ID token without the user seeing it.
+ *
+ * Shared by every authenticated call rather than written per call site, because the
+ * two call sites had drifted in opposite directions and each was wrong in its own
+ * way: `/api/llm` sent a token and could not refresh it, and `/api/search` sent no
+ * token at all. Both routes go through `applyMeter`, which meters a tokenless
+ * request against `DAILY_LIMIT_GUEST` (10/day, keyed on a hashed IP) instead of
+ * `DAILY_LIMIT_USER` (100/day) — so search quietly spent a guest allowance on
+ * behalf of signed-in users, and the user tier the quota code implements was
+ * unreachable from that path.
+ *
+ * Returns the response together with its error text, because deciding whether to
+ * retry means reading the body and `Response.text()` can only be called once. The
+ * text is empty on success, where the caller wants the undisturbed stream instead.
+ */
+export async function fetchAsUser(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
+): Promise<{ response: Response; errText: string }> {
+  const base: Record<string, string> = { ...(init.headers ?? {}) };
+
+  // A fresh header object per attempt, rather than one object mutated in place before
+  // the retry. Behaviourally identical — `fetch` reads the headers when it builds the
+  // request — but it keeps each attempt's headers readable *after* the fact, which is
+  // what makes "the retry went out with a different token" observable at all. With a
+  // shared object both attempts point at the same one and it holds only the last value.
+  const send = (token?: string) =>
+    fetch(url, {
+      ...init,
+      headers: token ? { ...base, Authorization: `Bearer ${token}` } : { ...base },
+    });
+
+  const idToken = await getIdToken();
+
+  let response = await send(idToken);
+  let errText = response.ok ? "" : await response.text().catch(() => "");
+
+  // One retry, and only for an expired token.
+  //
+  // This is the reported bug. A Firebase ID token lives an hour, so any session
+  // open longer than that presents a stale one — and the failure was terminal: the
+  // server answered 401, nothing refreshed the token, and `routerError` had no
+  // branch for it, so it fell through to `friendlyHttpError(401)` and told the user
+  // "Authentication failed with the model service. Please check your API key."
+  // There is no API key in this path. The user cannot act on that sentence, and the
+  // app stayed broken until a full reload — the model simply stopped answering.
+  if (isRefreshableAuthFailure(response.status, errText)) {
+    const fresh = await getIdToken(true);
+    // Only when the refresh produced a *different* token. Re-sending the same one
+    // would be a second guaranteed 401, and on a signed-out client `getIdToken`
+    // returns undefined, where the honest answer is the original 401 rather than an
+    // identical unauthenticated retry.
+    if (fresh && fresh !== idToken) {
+      console.info("[auth] server rejected an expired token; retrying with a fresh one");
+      response = await send(fresh);
+      errText = response.ok ? "" : await response.text().catch(() => "");
+    }
+  }
+
+  return { response, errText };
 }
 
 /**
@@ -394,6 +482,32 @@ function routerError(status: number, errText: string): string {
     const parsed = JSON.parse(errText);
     if (parsed.error === "sign_in_required") {
       return "Please sign in to continue.";
+    }
+    // Reached only when the refresh-and-retry above also came back expired, so the
+    // client has done everything it can. Says what happened and what fixes it, and
+    // never mentions an API key: the previous behaviour fell through to
+    // friendlyHttpError(401), whose text is "check your API key" — advice for a
+    // BYOK failure, given to a signed-in user on the shared pool who has no key to
+    // check. Wrong diagnosis, and unactionable.
+    if (parsed.error === "token_expired") {
+      return "Your session expired and could not be renewed. Reload the app, or sign in again.";
+    }
+    if (parsed.error === "invalid_token") {
+      return "Your sign-in is no longer valid. Please sign out and sign in again.";
+    }
+    // Neither of the two above, and the distinction is worth the extra branch: the
+    // token was never actually judged, because the service that judges it was
+    // unreachable. Answering this with the `invalid_token` text would send someone
+    // with a perfectly good session to sign out and back in over a network blip that
+    // fixes itself — and they would, because the message told them to.
+    if (parsed.error === "auth_unavailable") {
+      return "Couldn't verify your sign-in just now — that check is temporarily unreachable. Your session is fine; try again in a moment.";
+    }
+    // A deployment fault, not a user fault. Distinguished because the user can do
+    // nothing at all about this one and should not be sent to re-authenticate:
+    // the server is holding a token it has no project id to verify against.
+    if (parsed.error === "auth_not_configured") {
+      return "The server is not configured for sign-in right now. This is a server-side problem, not yours — try again shortly.";
     }
     if (parsed.error === "quota_exceeded") {
       return parsed.detail || "You've reached today's message limit.";
@@ -410,6 +524,14 @@ function routerError(status: number, errText: string): string {
     // not "that model is gone".
     if (parsed.error === "model_unavailable") {
       return "This model isn't being served right now. That's usually temporary — try again in a moment, or pick another model.";
+    }
+    // Every route answered 410 Gone. The opposite advice to the 404 branch above,
+    // and the pairing is the point: 404 says retry because the id may well answer
+    // in a minute, 410 must not, because it will not. Telling someone to retry a
+    // retired model sends them round a loop that reads as an app bug rather than a
+    // provider decision.
+    if (parsed.error === "model_retired") {
+      return "This model has been retired by its provider. Pick another model — your conversation is unaffected.";
     }
     // Nothing refused the request — every route in the chain went quiet. Worth
     // its own message because the generic one reads as "your request was wrong",
@@ -866,6 +988,12 @@ function friendlyHttpError(status: number, providerLabel: string): string {
   // is the cheaper of the two actions and works about as often.
   if (status === 404)
     return "That model isn't being served by NVIDIA NIM right now. Try again in a moment, or pick a different one.";
+  // 410 sits right next to 404 here on purpose, saying the opposite thing. This is
+  // the direct-provider path (a user's own key going straight to NVIDIA/Mistral),
+  // which has no failover chain and therefore no `model_retired` router code to
+  // lean on — so the distinction has to be drawn again from the bare status.
+  if (status === 410)
+    return `That model has been retired by ${providerLabel} and won't come back. Pick a different one.`;
   if (status === 429) return "Rate limit reached. Please wait a moment and try again.";
   // 529 = NIM's "Service temporarily overloaded". The model exists and works;
   // its capacity pool is just saturated. Say so instead of implying it's broken.
@@ -957,6 +1085,32 @@ const VISION_PROMPT_ENGINEER_SYSTEM = [
   "OUTPUT: the finished prompt text only — no preamble, no mode label, no quotes, no code fences around the whole thing.",
 ].join("\n");
 
+/**
+ * Clean a crafted vision prompt before it is handed to the vision engine.
+ *
+ * This ran as an inline `.replace(/<\s*think\s*>…<\s*\/\s*think\s*>/gi, "")` and was
+ * a third, narrower copy of a rule `stripReasoning` already owns — narrower in the
+ * two ways that matter here:
+ *
+ *   • **It knew one tag.** `chatModelId` is whatever the user selected, and this app
+ *     ships several reasoning models; `REASONING_TAGS` lists five spellings because
+ *     they emit five. `<thinking>` passed straight through.
+ *   • **It required a closing tag.** A model that spends its whole budget thinking,
+ *     or a stream cut off by the 22s first-byte / 50s chain guards, leaves the tag
+ *     open — and a `[\s\S]*?` between two literals matches nothing at all when the
+ *     second literal never arrives. So the *entire* chain-of-thought survived.
+ *
+ * That is not a cosmetic leak. The result is injected into the vision request as
+ * "Analysis guidance" (see Chat.tsx), so the vision model was being instructed with
+ * the chat model's internal deliberation. And the length gate made it *more* likely
+ * to happen, not less: a chain-of-thought blob clears `>= 20` comfortably, where the
+ * empty string this now produces correctly falls back to the user's own words.
+ */
+export function cleanCraftedVisionPrompt(raw: string, fallback: string): string {
+  const cleaned = stripReasoning(raw || "").trim();
+  return cleaned.length >= 20 ? cleaned : fallback;
+}
+
 export async function craftVisionPrompt(
   userPrompt: string,
   attachmentNames: string[],
@@ -979,12 +1133,8 @@ export async function craftVisionPrompt(
       (delta) => { crafted += delta; },
       signal,
     );
-    const cleaned = crafted
-      .replace(/<\s*think\s*>[\s\S]*?<\s*\/\s*think\s*>/gi, "")
-      .trim();
-    return cleaned.length >= 20 ? cleaned : base;
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw err;
+    return cleanCraftedVisionPrompt(crafted, base);
+  } catch (err) {    if (err instanceof Error && err.name === "AbortError") throw err;
     return base;
   }
 }
@@ -1074,6 +1224,74 @@ export async function generateImageResponse(
 }
 
 /**
+ * Turn a title model's raw output into a conversation title, or `null` when it did
+ * not produce one.
+ *
+ * Extracted from `generateSmartChatTitle`, where it was an inline chain with an
+ * ordering bug: `.trim()` came **last**, so `^title:` was tested against text that
+ * still had the model's leading whitespace on it. Measured against the shipped chain,
+ * three of four ordinary inputs kept the label —
+ *
+ *     "Title: Photo Analysis"                    -> "Photo Analysis"
+ *     "\nTitle: Photo Analysis"                  -> "Title: Photo Analysis"
+ *     "  Title: Photo Analysis"                  -> "Title: Photo Analysis"
+ *     "<think>hm</think>\nTitle: Photo Analysis" -> "Title: Photo Analysis"
+ *
+ * — so the conversation appeared in the sidebar as *"Title: Photo Analysis"*, spending
+ * one of its five words on the word "Title". The fourth line is the same defect
+ * reached from the other side: a strip leaves the whitespace that surrounded what it
+ * removed.
+ *
+ * **What actually closes it is `stripReasoning`'s own trailing `.trim()`**, which runs
+ * before anything here does. That was established by mutation rather than assumed —
+ * reverting this function to the shipped order left the leading-newline test green,
+ * because the strip had already eaten the newline. The explicit `.trim()` below is
+ * therefore belt-and-braces, and worth keeping precisely because the alternative is a
+ * correctness property of this function resting on another function's last line: no
+ * input can distinguish the two today, and `stripReasoning` has no contract that says
+ * it trims.
+ *
+ * `\s+` rather than the shipped `\n+` for the interior collapse, which is a real fix
+ * and not tidying: a tab or a double space survived, `split(" ")` counted it as a word
+ * boundary, and the empty string it produced silently cost one of the five words.
+ *
+ * The reasoning strip is `stripReasoning` rather than a local `<think>` regex, for
+ * the reasons in `cleanCraftedVisionPrompt` — less load-bearing here, since this path
+ * is pinned to `ministral-8b`, but a second divergent copy of a rule is how the first
+ * one survived. It runs *inside* this function rather than at the call site so that
+ * the whole cleanup is one owned path with one set of tests; a caller cannot forget
+ * half of it.
+ *
+ * Two behaviours kept deliberately:
+ *
+ *   • **Punctuation is stripped, including `.` and `_`.** "Node.js Setup" becomes
+ *     "Nodejs Setup", which is worse than ideal and better than the alternative it
+ *     was chosen over — models wrap titles in quotes and asterisks constantly, and a
+ *     sidebar full of `**Bold Title**` is the failure this prevents.
+ *   • **A response over 45 characters is rejected outright** rather than sliced to
+ *     five words. Length is the signal that the model answered instead of titling
+ *     ("Sure! Here is a concise title for…"), and the first five words of a preamble
+ *     are a worse title than the caller's own fallback.
+ */
+export function cleanGeneratedTitle(raw: string): string | null {
+  const cleaned = stripReasoning(raw || "")
+    .trim()
+    .replace(/["'`#*._]/g, "")
+    .replace(/^title\s*:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (cleaned.length < 2 || cleaned.length > 45) return null;
+
+  return cleaned
+    .split(" ")
+    .slice(0, 5)
+    .map((w) => (w.length > 0 ? w.charAt(0).toUpperCase() + w.slice(1) : ""))
+    .join(" ")
+    .trim();
+}
+
+/**
  * Smart Short Title Generator for Chat Conversations (ChatGPT-style).
  * Strictly uses Mistral 8B (ministral-8b) via Mistral API to generate a concise 2 to 4 word summary title.
  */
@@ -1103,21 +1321,8 @@ export async function generateSmartChatTitle(
       signal,
     );
 
-    const cleaned = titleText
-      .replace(/<\s*think\s*>[\s\S]*?<\s*\/\s*think\s*>/gi, "")
-      .replace(/["'`#*._]/g, "")
-      .replace(/^title:\s*/i, "")
-      .replace(/\n+/g, " ")
-      .trim();
-
-    if (cleaned.length >= 2 && cleaned.length <= 45) {
-      return cleaned
-        .split(" ")
-        .slice(0, 5)
-        .map((w) => (w.length > 0 ? w.charAt(0).toUpperCase() + w.slice(1) : ""))
-        .join(" ")
-        .trim();
-    }
+    const cleaned = cleanGeneratedTitle(titleText);
+    if (cleaned) return cleaned;
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") throw err;
     console.warn("Mistral 8B title generation fallback:", err);

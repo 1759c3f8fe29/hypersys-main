@@ -3,6 +3,25 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Mic, Square, Loader2, ImagePlus, X, FileText, Atom, Globe, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
+import { cn } from '@/lib/utils';
+
+/**
+ * Per-file attachment ceiling.
+ *
+ * Not a limit on what can be *read* — documents.ts reads from bounded slices and
+ * would happily summarise a 500 MB log. It is a limit on what can be carried: each
+ * attachment becomes a base64 data URL for the preview and the saved transcript,
+ * which is 4/3 of the file in a string, in memory, per attachment, times up to ten.
+ *
+ * 25 MB is above every real document (a 400-page PDF is ~10 MB, a photo from a
+ * phone ~5 MB) and below the sizes that hurt.
+ */
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+const formatSize = (bytes: number) => {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+};
 
 interface ChatInputProps {
   onSend: (message: string, files?: File[]) => void;
@@ -157,7 +176,26 @@ export default function ChatInput({
     const incomingFiles = Array.from(event.target.files || []);
     if (!incomingFiles.length) return;
 
-    setSelectedFiles((prev) => [...prev, ...incomingFiles].slice(0, 10));
+    // The picker no longer filters by extension, so this is the only thing standing
+    // between the composer and a 4 GB disk image. The read path itself is bounded
+    // (documents.ts slices rather than loading whole files), but every attachment is
+    // also base64-encoded into a data URL for the preview and the transcript, and
+    // base64 of a multi-gigabyte file is the tab dying with no message on screen.
+    //
+    // Refused per file rather than in aggregate, and the rest of the selection is
+    // still accepted: dropping four readable files because the fifth was a video is
+    // a worse outcome than reading four and saying why the fifth was skipped.
+    const accepted: File[] = [];
+    for (const file of incomingFiles) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        toast.error(`${file.name} is too large to attach (${formatSize(file.size)}). The limit is ${formatSize(MAX_ATTACHMENT_BYTES)}.`);
+      } else {
+        accepted.push(file);
+      }
+    }
+    if (!accepted.length) return;
+
+    setSelectedFiles((prev) => [...prev, ...accepted].slice(0, 10));
 
     if (event.target) {
       event.target.value = '';
@@ -183,42 +221,54 @@ export default function ChatInput({
   return (
     <div className="px-3 pt-2 sm:px-4 lg:px-6 bg-gradient-to-t from-background via-background/95 to-transparent safe-area-inset-bottom">
       <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
-        {/* Futuristic rotating border container */}
-        <div className="relative">
-          {/* Animated gradient border */}
-          <motion.div
-            className="absolute -inset-[2px] rounded-2xl sm:rounded-3xl opacity-80"
-            style={{
-              background: isFocused || isRecording
-                ? 'conic-gradient(from var(--angle), hsl(var(--primary)), hsl(200 80% 50%), hsl(280 70% 50%), hsl(320 70% 50%), hsl(var(--primary)))'
-                : 'conic-gradient(from var(--angle), hsl(var(--primary) / 0.3), hsl(200 80% 50% / 0.3), hsl(var(--primary) / 0.3))',
-            }}
-            animate={{
-              '--angle': ['0deg', '360deg'],
-            } as never}
-            transition={{
-              duration: isFocused || isRecording ? 3 : 8,
-              repeat: Infinity,
-              ease: 'linear',
-            }}
-          />
-          
-          {/* Blur glow effect */}
-          <motion.div
-            className="absolute -inset-[3px] rounded-2xl sm:rounded-3xl blur-md"
-            style={{
-              background: isRecording 
-                ? 'conic-gradient(from var(--angle), hsl(0 72% 51% / 0.5), hsl(320 70% 50% / 0.5), hsl(0 72% 51% / 0.5))'
-                : 'conic-gradient(from var(--angle), hsl(var(--primary) / 0.4), hsl(200 80% 50% / 0.4), hsl(280 70% 50% / 0.4), hsl(320 70% 50% / 0.4), hsl(var(--primary) / 0.4))',
-            }}
-            animate={{
-              '--angle': ['0deg', '360deg'],
-              opacity: isFocused || isRecording ? [0.5, 0.8, 0.5] : [0.2, 0.3, 0.2],
-            } as never}
-            transition={{
-              '--angle': { duration: 4, repeat: Infinity, ease: 'linear' },
-              opacity: { duration: 2, repeat: Infinity, ease: 'easeInOut' },
-            }}
+        {/* Native focus treatment — see the note below on what this replaced. */}
+        {/* `disabled` used to be honoured only functionally: every control stopped
+            responding and nothing looked any different, so the composer sat there
+            reading "Ask X anything…" and silently swallowed clicks and keystrokes.
+            A dead control that still looks live is the exact failure this pass
+            exists to remove — and the one caller that sets `disabled` is the
+            messages-read-failed state (§14.2 bug 7), i.e. it is showing precisely
+            when the user is already confused about why the app looks empty.
+
+            Dimming rather than `cursor: not-allowed`: the crossed circle is a web
+            convention that #5 deliberately removed app-wide, and greyed-out
+            styling is what communicates unavailability natively. `pointer-events`
+            is left alone — the individual controls carry real `disabled`
+            attributes, which keeps them out of the tab order too, and blocking
+            pointer events on the wrapper would also block text selection inside
+            it. */}
+        <div className={cn('relative transition-opacity duration-150', disabled && 'opacity-50')}>
+          {/* This used to be two stacked motion.div layers painting spinning
+              conic-gradient rainbows: `--angle` animated 0deg→360deg with
+              `repeat: Infinity` on both, plus a blurred outer glow pulsing its
+              opacity on a second infinite loop. Removed in the native-look pass
+              (§14) for two reasons.
+
+              Aesthetic: a perpetually rotating rainbow around the text field is
+              the loudest "web toy" signal in the app, and it is the surface the
+              user looks at most.
+
+              Cost: `--angle` was a registered @property, so each frame
+              regenerated a conic gradient — on two layers, one of them behind a
+              `blur-md`. Two always-on compositor loops on the composer alone,
+              running whether or not the user was typing.
+
+              What a native composer does instead is exactly this: a hairline that
+              picks up the accent colour on focus, and a soft ring outside it. The
+              -inset-px element is the hairline (the inner container paints over
+              all but its outermost pixel); the box-shadow is the ring. The only
+              motion left is a 150ms colour transition, which is a state change
+              rather than decoration — so it also needs no reduced-motion carve-out. */}
+          <div
+            aria-hidden
+            className={cn(
+              'pointer-events-none absolute -inset-px rounded-2xl sm:rounded-3xl transition-all duration-150',
+              isRecording
+                ? 'bg-destructive/60 shadow-[0_0_0_3px_hsl(var(--destructive)/0.15)]'
+                : isFocused
+                  ? 'bg-primary/50 shadow-[0_0_0_3px_hsl(var(--primary)/0.12)]'
+                  : 'bg-border/70',
+            )}
           />
 
           {/* Inner container. NOTE: overflow-hidden must NOT live here — the "+"
@@ -277,10 +327,28 @@ export default function ChatInput({
                 </div>
               )}
 
+              {/* No `accept`, deliberately.
+
+                  It used to carry a closed list of 18 extensions
+                  (image/*,.pdf,.txt,.md,.json,.csv,.doc…), which was wrong in
+                  both directions. It was narrower than the extractor, which
+                  already read ~40 text extensions, so a .yaml or a .go could not
+                  be picked from the dialog even though the pipeline handled it
+                  perfectly — and dragging the same file in worked, because
+                  `accept` filters the picker and nothing else. And it is now
+                  narrower than the truth: src/lib/documents.ts reads any file,
+                  falling back to a byte sniff and then to naming the format, so
+                  there is no extension left to filter out.
+
+                  Removing it rather than widening it to a longer list: an
+                  exhaustive `accept` would be a second copy of the extractor's
+                  format knowledge, kept in sync by hand, in a component that has
+                  no other reason to know any of it. iOS still offers Photo
+                  Library and Take Photo for an unfiltered file input, so the
+                  image affordance survives. */}
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*,.pdf,.txt,.md,.json,.csv,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.js,.ts,.tsx,.jsx,.py,.html,.css"
                 multiple
                 onChange={handleFileChange}
                 className="hidden"
@@ -305,6 +373,17 @@ export default function ChatInput({
                 disabled={disabled || isRecording}
                 rows={1}
                 aria-label="Message input"
+                /* Focus target for the app-wide keyboard layer (Cmd/Ctrl+L, and
+                   type-anywhere-to-focus) — see src/lib/shortcuts.ts. An attribute
+                   rather than a ref threaded down through props: the concern is
+                   "whatever is the composer on this page", the shortcut hook lives
+                   two levels up and does not otherwise know this component exists,
+                   and a data attribute says out loud that something outside is
+                   looking for this node. aria-label would have worked as a selector
+                   too, and is exactly the wrong thing to build on — it is user-
+                   facing copy and will be reworded by someone who has no reason to
+                   suspect a keyboard shortcut depends on the wording. */
+                data-flyer-composer=""
                 /* text-base (16px) on mobile is deliberate, not a style choice:
                    iOS Safari zooms the whole viewport when a focused field's
                    text is under 16px, and never zooms back out. sm: restores
@@ -491,22 +570,49 @@ export default function ChatInput({
                         aria-label="Send message"
                         className={`
                           relative w-9 h-9 rounded-full flex items-center justify-center
-                          transition-all duration-300 overflow-hidden
+                          transition-all duration-150 overflow-hidden
                           ${canSend
-                            ? 'bg-gradient-to-br from-primary via-primary to-accent text-primary-foreground shadow-[0_0_16px_hsla(var(--primary)/0.6)] border border-primary/50'
+                            ? 'bg-gradient-to-br from-primary via-primary to-accent text-primary-foreground shadow-[0_1px_3px_hsl(0_0%_0%/0.3)] border border-primary/50'
                             : 'bg-muted/50 text-muted-foreground/30 cursor-not-allowed'
                           }
                         `}
-                        whileHover={canSend ? { scale: 1.08, y: -1, boxShadow: '0 0 24px hsla(var(--primary)/0.8)' } : {}}
-                        whileTap={canSend ? { scale: 0.9, rotate: -10 } : {}}
+                        /* Toned to native press behaviour. Was:
+                             whileHover={{ scale: 1.08, y: -1, boxShadow: '0 0 24px hsla(var(--primary)/0.8)' }}
+                             whileTap={{ scale: 0.9, rotate: -10 }}
+                           and a resting `shadow-[0_0_16px_hsla(var(--primary)/0.6)]`.
+
+                           Three separate things there read as web rather than app.
+                           The resting state glowed — a 16px coloured halo at 0.6
+                           alpha, which is a neon effect, not a shadow; it is now a
+                           1px contact shadow, the same thing every platform puts
+                           under a raised control. The tap rotated the button 10
+                           degrees, and physical buttons do not twist when pressed.
+                           And `duration-300` made the whole thing feel soft; native
+                           controls respond in roughly 100-150ms, which is why the
+                           transition came down to 150.
+
+                           `scale: 1.03` on hover and `0.94` on press keep the
+                           control feeling live without launching it off the
+                           surface. */
+                        whileHover={canSend ? { scale: 1.03 } : {}}
+                        whileTap={canSend ? { scale: 0.94 } : {}}
                       >
-                        {canSend && (
-                          <motion.div
-                            className="absolute inset-0 bg-white/20"
-                            animate={{ opacity: [0, 0.4, 0] }}
-                            transition={{ duration: 1.5, repeat: Infinity }}
-                          />
-                        )}
+                        {/* A permanent white shimmer used to sweep this button here —
+                            `animate={{ opacity: [0, 0.4, 0] }}` on a 1.5s infinite
+                            loop, mounted whenever `canSend` was true.
+
+                            It is the clearest case in the app of the distinction
+                            this pass turns on. The recording pulse a few lines up
+                            is kept, and so are the streaming dots and the caret,
+                            because each one reports something that is genuinely
+                            happening right now: the mic is live, tokens are
+                            arriving. This one fired because a button was *enabled*.
+                            A native send button that is ready to send simply looks
+                            ready — it does not glimmer to remind you.
+
+                            The button still has plenty of feedback, all of it tied
+                            to real input: `whileHover` lift, `whileTap` press, and
+                            the enabled/disabled colour swap in the className. */}
                         <Send className="w-[17px] h-[17px] relative z-10" />
                       </motion.button>
                     )}

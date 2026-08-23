@@ -72,8 +72,25 @@
  * evidence talking: the three 404s above came within about six seconds of each
  * other, so a 600ms/1500ms backoff against the same route buys nothing. Move on,
  * do not knock again.
+ *
+ * **410 is in here too, and for the opposite reason to 404.** 404 is ambiguous —
+ * a saturated pool and a retired model produce it identically, which is the whole
+ * argument above. 410 Gone is not ambiguous: it means "this was here, it was
+ * deliberately removed, stop asking". Measured on z-ai/glm-5.2, which returned
+ * 410 *and* disappeared from NVIDIA's /v1/models in the same window (103 → 102
+ * entries).
+ *
+ * It fails over because a model retired by one provider may still be served by
+ * another, and every route on a ModelSpec is the same model — so trying the next
+ * leg is not a substitution. It is emphatically NOT in RETRY_STATUSES: retrying a
+ * permanent removal against the same route is the one case where a backoff is
+ * guaranteed to be wasted latency. And unlike 404 it gets its own terminal
+ * classification (GONE_STATUSES), because "this model has been retired" is
+ * actionable in a way that "temporarily unavailable" is not — telling a user to
+ * try again later, when the id will never answer again, is a lie the 404 path can
+ * be forgiven for and this one cannot.
  */
-export const FAILOVER_STATUSES = new Set([404, 408, 409, 425, 429, 500, 502, 503, 504, 529]);
+export const FAILOVER_STATUSES = new Set([404, 408, 409, 410, 425, 429, 500, 502, 503, 504, 529]);
 
 /**
  * Statuses worth retrying against the *same* provider before moving on.
@@ -101,3 +118,28 @@ export const RETRY_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
  * the backup route untried in precisely the situation it exists for.
  */
 export const OVERLOAD_STATUSES = new Set([429, 503, 529]);
+
+/**
+ * "This model is gone, and it is not coming back."
+ *
+ * The mirror image of OVERLOAD_STATUSES. That set exists so a busy pool does not
+ * surface as a fault; this one exists so a *retired* model does not surface as a
+ * busy pool.
+ *
+ * Without it, a chain that ends in 410 falls to the same generic branch 503 used
+ * to, which pastes the raw upstream body into the chat. The near miss is worse
+ * than the generic branch though: 410 is close enough to 404 in shape that the
+ * tempting fix is to fold it in with the transient statuses, and then the user is
+ * told "temporarily unavailable, try again" about an id that will never answer
+ * again. They retry, it fails, they retry tomorrow, it fails. A wrong permanent
+ * answer costs less than a plausible temporary one.
+ *
+ * A single-element set rather than a bare `=== 410` because the call sites read
+ * `X_STATUSES.has(status)` and the symmetry is the documentation; also because 451
+ * (legally unavailable) would belong here if a provider ever returns it.
+ *
+ * Invariant, asserted in src/test/llm-failover.test.ts: every gone status is also
+ * a failover status (another provider may still serve the model) and none is a
+ * retry status (the same route never will).
+ */
+export const GONE_STATUSES = new Set([410]);

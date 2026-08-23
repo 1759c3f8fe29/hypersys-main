@@ -263,7 +263,7 @@ Phase 6 is done, so the "do not delete the classifier before the loop is verifie
 
 ---
 
-## 14. Native look-and-feel pass — IN PROGRESS
+## 14. Native look-and-feel pass — DONE
 
 The Electron shell (§10) is done: a real window runs the real app. What is *not* done is the thing the window is supposed to deliver — the app still reads as a web page hosted in a frame rather than a native application. This phase is about that gap only. It is a **UI/interaction** phase, not a features phase; nothing here adds a capability.
 
@@ -282,13 +282,909 @@ The Electron shell (§10) is done: a real window runs the real app. What is *not
 9. **State fidelity.** Window-focus-aware chrome (inactive title bar dims, as native windows do), correct dark/light following the OS, no flash-of-wrong-theme on boot.
 10. **Empty, loading and error states** that look designed rather than defaulted.
 
-**Gate:** every item above either implemented or explicitly deferred with a reason recorded; `tsc 0`, `eslint 0`, and the suite still at **21 files / 325 tests** or better with no regression; and the desktop build (`desktop:build`, base `"./"` — see the trap below) still mounts and runs.
+**Gate:** every item above either implemented or explicitly deferred with a reason recorded; `tsc 0`, `eslint 0`, and the suite still at **30 files / 452 tests** or better with no regression; and the desktop build (`desktop:build`, base `"./"` — see the trap below) still mounts and runs.
+
+**Gate status — met.** Measured 2026-08-22: `npm run lint` clean, `npm run build` clean (both `tsc -p` passes plus `vite build`), suite at **35 files / 544 tests, 0 failures** — against a floor of 30/452. The desktop-launch clause is satisfied: `desktop:build` mounts and runs under Electron, evidence `/tmp/flyer-shot.png` (1280×737). All ten checklist items are done, none deferred.
+
+**One correction to how this gate is checked.** `npx tsc --noEmit` is **not a typecheck in this repo** — the root `tsconfig.json` is a solution file (`"files": []` plus references), so it exits 0 having examined zero files. The gate is `npm run typecheck`, which is the two `-p` passes (`tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.node.json --noEmit`) that `npm run build` also runs — and they have *different* strictness: `tsconfig.app.json` is `strict: false` / `noImplicitAny: false` over `src`, while `tsconfig.node.json` is `strict: true` over `vite.config.ts`. Two live type errors sat in the tree while `npx tsc --noEmit` reported clean, and both surfaced on the first `npm run build`: an unused `@ts-expect-error` in `search-providers.test.ts` (TS2578 — under `noImplicitAny: false` an untyped `.js` import is silently `any`, so the directive suppressed nothing and being unused is itself the error) and an implicitly-typed callback parameter in `vite.config.ts` (TS7006 — the same untyped `.js` import gives the callback no contextual type, and that project *is* strict). This belongs with §14.2 #8's note that `tsc` is the gate most often skipped: the correct command existed in `package.json` the whole time and the one being run by hand could not fail.
+
+### 14.1 Progress against the checklist
+
+Recorded as it lands, with measured numbers only.
+
+**#1 Chrome — done.** `TITLE_BAR_OPTIONS` in `electron/main.cjs` resolves per platform: `hiddenInset` on macOS (OS traffic lights kept), `hidden` + `titleBarOverlay` on Windows (real caption buttons, so Snap Layouts still attaches to maximize), `hidden` alone on Linux where `titleBarOverlay` is not implemented and the app must draw its own. `WINDOW_CONTROLS_SIDE` resolves `left`/`right`/`none` once in main and is passed to the renderer via `additionalArguments`, so the platform decision exists in exactly one place. `src/components/desktop/TitleBar.tsx` draws a 32px bar; it renders `null` in a browser, keyed off the presence of the preload bridge rather than a build flag — `desktop:dev` loads the same `http://localhost:8080` a browser would, so no compile-time check can tell the two apart.
+
+The preload gained its first privileged surface (three no-argument verbs, one read, one subscription). Every main-side handler resolves its target from `event.sender`, never from a renderer-supplied id, so a renderer can only act on its own window; there is deliberately no generic `invoke(channel, …)` passthrough. `onWindowStateChange` returns an unsubscribe function because the alternative leaks a listener per remount on a channel that fires on every focus change.
+
+**#2 Typography — done.** Webfont removed from **four** paths, not one. The `@import` in `src/index.css` was the obvious one; the built output then still reported font-host matches, which surfaced two `preconnect` hints in `index.html` performing DNS+TCP+TLS to Google on every launch for a font no longer requested. `tailwind.config.ts` `sans`/`display` now carry the platform stack (`display` is deliberately the *same* stack — the platform picks its own display cut from `system-ui` by optical size, so naming a second family overrides that with a guess), and a `mono` stack was added because it had been falling through to Tailwind's default. The `style-src` in `installCsp` dropped `https://fonts.googleapis.com` and `font-src` narrowed from `https:` to `'self' file: data:`.
+
+**#4 Motion — done.** Fourteen always-on animations removed: seven CSS keyframe loops in the `ADDICTIVE UI ENHANCEMENTS` block, the registered `@property --angle` driving two `conic-gradient` layers in `ChatInput` (one behind a `blur-md`, so every frame regenerated a gradient under a `backdrop-filter`), three in the WelcomeScreen logo, two on its status pill, one `animate-pulse` on a fake status light, and a permanent shimmer sweeping the send button whenever it was merely *enabled*.
+
+**Five infinite animations were deliberately kept** and the distinction is the rule this phase runs on: a loading indicator *should* move, because it reports that work is happening. The "Loading messages" dots, the two "Generating response" clusters, the streaming caret, and the hot-mic pulse all survive. What went was motion applied to decoration — and, worse, two things that *looked* like status indicators while being wired to nothing: a pulsing dot beside the words "Online & Ready" that pulsed identically whether every provider was up or every one was returning 404s. Motion implying liveness it cannot verify is worse than no motion, because the user learns to trust it.
+
+Also removed: three tilting logos (`whileHover={{ rotate: 5 }}` in `Chat`'s header, `WelcomeScreen`, `Auth`) — none of the three was interactive, so each offered hover feedback for a click that does nothing.
+
+**#3 Density — done.** Two halves, radius and height.
+
+`--radius` went 0.75rem → 0.5rem, which moves every shadcn control (it feeds Tailwind's `rounded-lg`/`md`/`sm`); 8px rather than 6 because the app sets `rounded-2xl`/`3xl` literally on its own surfaces and dropping to 6 would have opened a visible gap between controls and the surfaces holding them. The send button lost a 16px coloured halo for a 1px contact shadow and came from `duration-300` to `150`.
+
+Heights are now tokens — `--control-height`/`-sm`/`-lg` in `src/index.css`, consumed by `Button`, `Input` and `SelectTrigger` — because this build ships to two form factors that want different numbers. **The tightening is keyed on `@media (pointer: fine)`, not on a breakpoint**, and that is the whole design: a phone in landscape is wide and still a finger, an Electron window dragged narrow is small and still a mouse, so a width query is wrong in both directions. Under a fine pointer the scale is 32/36/40; under a coarse one — or a UA that reports nothing — it stays at today's 36/40/44, so a control is never *smaller* than a tap target by accident. 40px is right for a finger and consistently too airy for a mouse; the platforms being impersonated land at 32 (Fluent) and 28-32 (AppKit), and that gap shows on every button and field at once.
+
+The heights are arbitrary values (`h-[var(--control-height)]`) rather than a tidier `.h-control` utility, and the reason is `cn()`: it is `twMerge`, which recognises an arbitrary `h-` utility and **drops it** when a caller passes an explicit `h-8` — while a custom class name is invisible to tailwind-merge, so both would survive and stylesheet emission order would silently decide the height. Roughly forty call sites pass their own `h-*` to a `Button`. That is asserted rather than assumed: `src/test/control-metrics.test.ts` (6 tests) pins the merge behaviour, both dimensions of the icon variant, the absence of literal heights in the variants, and that the override query is on pointer type.
+
+**#9 State fidelity — done.** The title bar dims when the window loses focus, driven by `focus`/`blur` forwarded from main.
+
+The dark/light clause is **implemented as "declare, don't follow", and the deferral is the honest part.** The app has one palette: `:root` in `index.css` is the dark token set, `.dark` is a two-token stub the app never toggles, and there is no light theme to switch to. So "following the OS" here means telling the platform what the app *is*, in the three places that were not being told:
+
+- `<meta name="color-scheme" content="dark">` in `index.html`, which is read **before any stylesheet loads**. Without it the UA paints its default white canvas for the first frame — a white flash on every cold launch, the most web-page-looking moment in the whole shell.
+- `color-scheme: dark` on `:root`, the same declaration for everything after first paint. Both are needed; neither substitutes for the other. This is also what fixes the surfaces CSS cannot reach: form-control internals, the caret, the default scrollbar, spellcheck underlines and the `<select>` popup were all being drawn light inside dark controls.
+- `nativeTheme.themeSource = "dark"` in `main.cjs`, before anything draws. Electron puts native surfaces on screen that no stylesheet touches — the auto-hidden menu bar, the context menus from `installContextMenu`, every `dialog.showMessageBox` including the "Flyer could not start" box, and the real Windows caption buttons from `titleBarOverlay`. Left at the default they follow the OS, so a user on a light desktop got light menus hanging off a dark window. The tell is not that the menus were light; it is that the app-drawn and OS-drawn chrome **disagreed**, which no real native app does.
+
+All three say "dark" rather than "system" deliberately. Claiming to support both while only one token set exists would let the UA render light widget internals against dark tokens, which is worse than not following the OS at all. The note at each site says to change it in the same commit that adds a light palette, not before.
+
+Also fixed here, and it is the same class of bug as the flash: the Electron window's `backgroundColor` was `#0b0b0f` while `--background` is `hsl(224 32% 6%)` = `#0a0d14`. Close enough to look deliberate, and not the same colour — the app's dark is blue-tinted, that one is neutral. Chromium paints `backgroundColor` into newly-exposed area during a **live window resize**, so dragging a window edge revealed a strip of the wrong dark before the renderer caught up.
+
+
+**#6 Scrolling — done.** `.scrollbar-thin` thumb is now transparent at rest and fades in on hover of the scrolling element, with `background-clip: content-box` drawing a 4px thumb inside an 8px hit area. The larger win is `scrollbar-gutter: stable`: Chromium's classic scrollbars take real layout width, so the message list reflowed by 6px the moment content first overflowed — mid-stream, as the first answer grew past the viewport, shifting every bubble while the user was reading.
+
+**#10 Empty/loading/error states — done.** `NotFound` rewritten (it was the shadcn scaffold: `bg-muted` and a bare underlined link), and then the two states that mattered far more, because both of them made the app *state something false* rather than merely look undesigned.
+
+The pattern in both cases was the same: one condition was carrying three meanings.
+
+- **The sidebar's history list.** `conversations.length === 0` rendered "No conversations yet" — full stop. `loadConversations` had no loading flag and no `try/catch`, so that one sentence served as the loading state (a returning user with fifty chats was told they had none for the duration of the Firestore read), as the error state (a failed read was indistinguishable from a brand-new account, plus an unhandled rejection), and as the actual empty state, which is the only case where it was true. Now a `conversationsStatus` of `'loading' | 'ready' | 'error'` threads into `ChatSidebar`: staggered skeleton rows while loading, an amber failure panel with Retry on error, the existing empty state only when the list is really empty.
+- **The message list.** Worse, and not on the original checklist. `loadMessages`' `catch` logged and returned, leaving `messages` empty — so the render fell through to `WelcomeScreen` and an existing conversation whose read had failed greeted the user with "how can I help you today?". Not just a false empty state: it *invites* the user to type into what looks like a fresh chat, and the outgoing request would carry none of the history still sitting in Firestore. The model would answer a mid-thread follow-up as if it were the first thing ever said, and that answer would then be persisted into the middle of a thread it never saw. Silent context loss, presented as a normal screen. Fixed with a `messagesError` flag rendering a Retry panel — and `disabled={messagesError}` on `ChatInput`, which is the half that matters: the panel stops the app claiming the conversation is empty, the disabled composer stops it *acting* as if it were.
+
+Two details that are easy to get backwards:
+
+- **Both new branches are additionally gated on the list being empty.** `loadConversations` re-runs after every turn to pick up the new title, so a slow or failing *refresh* must not replace content the user is already reading with skeletons or with an error panel. Stale rows beat a spinner over data that is already on screen — that is the whole difference between a refresh and a load.
+- **`conversationsStatus` defaults to `'ready'`, never `'loading'`.** A caller that forgets the prop then gets today's behaviour; the other default would render placeholder rows forever, and the symptom (a permanently loading sidebar) reads as a hung fetch rather than as a missing prop.
+
+Skeletons are the one place in this whole pass with perpetual motion, and that is the stated exception to the native-motion rule rather than a lapse: the pulse is what distinguishes "waiting for data" from "three grey boxes shipped by mistake". Their geometry matches a real row so the list does not jump when the data lands, and the three rows pulse 140ms out of phase — in phase they read as the whole panel flashing.
+
+8 tests in `src/test/conversation-list-states.test.tsx`, behavioural rather than snapshot, because collapsing the ternary back to `length === 0` passes every other gate in this repo.
+
+**#10 continued — the history got a search field, and it added a *fifth* state for the same reason.** Any app with a scrolling list of saved documents can filter it; this one could not, and past thirty conversations the date groups stop being enough. `historyQuery` in `ChatSidebar` filters on a case-insensitive substring of the title, with **mod+K** to jump to the field (`find-conversation` in the shortcut table).
+
+Three decisions in it that are not obvious:
+
+- **Filter, then group** — not group, then filter. The other order leaves date headings standing over periods the query matched nothing in, and a "Yesterday" label with no rows under it reads as a rendering fault rather than as a filter working.
+- **A distinct no-match state, because otherwise this becomes bug 6 again by a different route.** A list filtered down to nothing has `groupedConversations.length === 0`; fall through and the user is told "No conversations yet — start a new chat to see it here". That is the false empty state from #10 reappearing, and it is *worse* here than in the loading case, because the user's own keystrokes caused it and the obvious reading is that their history was just deleted. The branch echoes the query back and offers to clear it.
+- **Substring, not fuzzy.** Titles are model-written summaries of the first message, so the user is recalling a phrase they saw rather than guessing at one. Fuzzy matching would surface "Trip to Rome" for `tor`, and its ranking would fight the date grouping, which is the organising principle people actually navigate by.
+
+The search also forced a motion decision that had been sitting there unnoticed: the conversation rows were wrapped in `AnimatePresence` with `initial={{ x: -20 }}` / `exit={{ x: -20 }}`. Two problems, and both are #4's rule applied to a case #4 missed. The whole history swept in from the left on every sidebar mount — a web-page entrance. And an exit animation turns a filter into a *wobble*: type four characters quickly and `AnimatePresence` is holding four overlapping sets of fading rows, which reads as lag. No native list filter animates rows out; Finder, Mail and every editor's file switcher update on the keystroke. `AnimatePresence` and the enter/exit props are gone; **`layout` stays**, because a row travelling from "Yesterday" to "Today" after a new turn is motion that *explains* a change rather than decorating one.
+
+22 more tests in `conversation-list-states.test.tsx` (30 total, measured), including that the field is absent when there is nothing to filter, that the badge reads `1/3` while filtering rather than continuing to claim `3`, and that the `data-flyer-history-search` attribute the mod+K handler queries for is actually present — a `querySelector` that matches nothing throws nothing, so renaming that attribute would break the accelerator silently.
+
+**The field also has to answer the arrow keys, or it is only half a filter.** Typing narrows the list and then the hands have to leave the keyboard to click a row — which is the point at which a filter field stops feeling like part of the app. ArrowDown/ArrowUp now walk the matches and Enter opens the highlighted one; Enter with nothing highlighted takes the first match, which is the type-two-characters-and-go path.
+
+Four decisions in it:
+
+- **Focus stays in the field.** The rows are already focusable and already answer Enter, so ArrowDown could simply have moved real focus into the list — and that is the wrong trade. Once focus is on a row, the next character typed goes to the row instead of refining the query, and *type, look, refine* is the actual loop. So the position is a highlight the field owns, the way Spotlight and every editor's quick-open work. The cost is the ARIA: a screen reader is not told the highlight moved, and the honest fix — `combobox` + `listbox` + `option` — is not available here, because an option's children are meant to be presentational and these rows contain a real delete button. Declaring the roles would break row semantics that already work, so screen-reader users keep reaching the rows by Tab, where each announces its own label and `aria-current`. Recorded as a trade-off, not an oversight.
+- **It walks the flattened *displayed* order, not `matchingConversations`.** That array is in Firestore's order; the rows on screen are grouped under Today / Yesterday / date headings. Walking the ungrouped array would step between headings in a sequence unrelated to what the user is looking at. There is a test for exactly this: with the query `bridge`, index 1 of the displayed list is `c3`, while index 1 of the full list is `c2` — which is filtered out.
+- **The position is an index, clamped at the point of use, and abandoned on every edit to the query.** An id would keep pointing at a row that has just been filtered out, and ArrowDown from there has no defined meaning. Clamping in an effect rather than at use would render the out-of-range state first. And keeping the index across a keystroke would leave the highlight on whatever row happens to land in that slot in the new results — an arbitrary row the user never chose, one Enter away.
+- **The highlight is the same ring as `focus-visible`.** It is the keyboard's position in the list either way, whether it arrived by Tab or by ArrowDown, and a second treatment for the same idea is how a list ends up with two rows that both look selected. It layers *over* the active-conversation styling rather than replacing it, because "the chat you are in" and "the row you are about to open" are different facts that can be true of different rows at once.
+
+Both wrap, and asymmetrically on the first press: down from nowhere is the first row, up from nowhere is the last. That is Spotlight's behaviour and it is right because "up from the top of nothing" has no other sensible answer. Two smaller things fell out of building it: `autoComplete="off"` on the field, because ArrowDown in a search input otherwise opens the browser's own saved-values dropdown over the list; and the highlighted row is scrolled into view with `block: 'nearest'`, because `'center'` would scroll on every step even when the row is already comfortably visible, turning a walk down the list into a lurch. The effect finds the row by a `data-flyer-conv-id` attribute rather than a ref, since the node is a `motion.div` rendered through `ContextMenuTrigger asChild` and a ref would have to survive two forwarding layers to reach the DOM.
+
+**`Element.prototype.scrollIntoView` does not exist in jsdom** — it has no layout engine, so it implements no scrolling API at all — and its absence throws from inside a commit, which presents as a component crash rather than as a missing polyfill. Stubbed as a no-op in `src/test/setup.ts` alongside the Blob readers, and deliberately *not* guarded at the call site: an optional call in the component would be dead defence in production existing purely to accommodate the test environment, which is the wrong direction for a shim to point.
+
+**#8 Keyboard — done.** `src/lib/shortcuts.ts` is the single table of chords; `src/hooks/useKeyboardShortcuts.ts` is one document-level listener; `src/components/chat/ShortcutsDialog.tsx` renders *from* the table, so the help sheet cannot advertise a chord that does not exist. 26 tests in `src/test/shortcuts.test.ts`.
+
+Seven chords: new chat, toggle sidebar, toggle the file/code canvas, jump to the composer, **mod+K to search the history**, the help sheet, and Escape. The table carries its own invariants as tests — no duplicate chord, no duplicate action, nothing bound to a key Chrome reserves, and no modifier-less binding except Escape — so an eighth entry cannot quietly shadow an existing one.
+
+Three findings worth keeping, none of which is obvious from the outside:
+
+- **Some chords cannot be bound at all.** Chrome reserves Ctrl/Cmd+N, +T, +W and their Shift variants above the page: the keydown either never reaches the document or `preventDefault()` is ignored. That is why every web app converged on the same handful — Ctrl+K, Ctrl+B, Ctrl+/, Ctrl+Shift+O are all preventable. So new-chat is **Ctrl/Cmd+Shift+O** in both builds, and **Ctrl+N exists only as an Electron menu accelerator**, where the shell owns the chord and the browser rule does not apply.
+- **Exactly one owner per chord.** A menu accelerator fires before, and instead of, a renderer keydown for the same combination, so binding both leaves the renderer's copy as dead code that reads as live. Desktop chords therefore arrive as IPC (`flyer:menu-command`) and web chords as keydown, both dispatching through the same handler map — so the two paths cannot drift in what they do, only in how they are triggered.
+- **`mod` is matched on `metaKey` *or* `ctrlKey` per platform, never either.** Cmd on macOS, Ctrl elsewhere, and the *other* primary modifier is explicitly rejected: Ctrl+B on macOS is "move backward one character" in every Cocoa text field, so accepting it would break text editing to add a shortcut. Rejecting the other modifier also fixes a bug nobody would have looked for — AltGr is reported as Ctrl+Alt, so on a layout where accented characters need AltGr, a plain Ctrl match would fire app chords while the user types.
+
+Also here: **type-anywhere-to-focus**, which is what Slack, Discord and Messages do and whose absence is a signature web-app feel. Implemented by focusing the composer during keydown *without* `preventDefault`, so the browser delivers the character to the newly-focused field itself; appending it manually types everything twice. It bails on any modifier, on any key whose name is longer than one character, on Space, and on a non-collapsed selection.
+
+The Electron side replaced an `executeJavaScript` hash-poke with real IPC. Injecting a string into the renderer's main world defeats `contextIsolation` and couples main to the router implementation — and the injected line (`window.location.hash = "#/chat"`) was a no-op under `HashRouter` when already on `/chat`, which is bug 3 below. The bridge went `version: 1` → `2`; `onMenuCommand` is typed **optional** with `SUPPORTED_BRIDGE_VERSION` still at 1, because a newer shell should be tolerated and an older one should cost the menu integration rather than the whole title bar.
+
+**#7 Menus and context menus — done.** Right-clicking a conversation in the sidebar now opens app actions — Rename (with its F2 hint), Copy title, and a destructive Delete — rather than Electron's generic text menu. Rename is inline and optimistic with rollback on a Firestore failure, and Escape clears `renamingId` *before* the blur so it cancels rather than commits.
+
+The row is `role="button"` + `tabIndex` rather than a real `<button>`, because the row *contains* the delete button and button-in-button is invalid HTML that browsers silently reparent. It was also, until this pass, unreachable by keyboard entirely: no tab stop and inert to Enter/Space, while its own delete button carried `focus-visible` styling — so the focus ring was visible on the one control inside a row you could not focus.
+
+**Still an assumption, not a measurement:** whether `preventDefault()` on the DOM `contextmenu` event suppresses Electron's `webContents` `context-menu` event. Radix and `installContextMenu` both want that gesture; the interaction is documented in `main.cjs` as reasoning rather than as an observation, and it needs a launch to settle.
+
+**#5 Focus and cursors — done.** Prior sessions had already done real work here (`user-select: none` on chrome only, `prefers-reduced-motion`, `overscroll-behavior`, touch-action, safe-area insets), so this was an audit pass, and the audit found two things.
+
+**Cursors.** Preflight ships `button, [role="button"] { cursor: pointer }`, and a hand cursor over a button is a web idiom no desktop platform uses. Overridden under `[data-flyer-desktop]` only — removing it inside a browser tab would read as a broken page rather than as a native app. The mechanism is worth keeping: `cursor: default` is set on the **root** and works by inheritance, so any descendant carrying its own `cursor-ew-resize` (the canvas splitter) wins automatically — an element's own declaration beats an inherited value regardless of specificity, so only the elements preflight targets *directly* need explicit rules. Text surfaces get `cursor: auto` back, including `.prose`: an arrow over a reply would hide that it is selectable. `:disabled` gets `default` too, deliberately overriding eleven `disabled:cursor-not-allowed` utilities — the crossed circle is a web convention, and greyed-out styling is what communicates the state natively.
+
+**Focus, which was the real finding, and it was quantitative.** ChatInput has 14 hand-rolled `<button>`s and zero `focus-visible` styles. ChatMessage: 19 and zero. ArtifactPanel: 8 and zero. Chat, Auth, MemoriesPanel, WelcomeScreen, CodeRunner: zero each. Only shadcn's `Button`, `TitleBar` and three spots in `ChatSidebar` had ever been given a ring. Tabbing through the composer moved nothing visible — focus was real and invisible, which is worse than no keyboard support at all, because Enter then activates a control the user cannot see.
+
+Fixed with one zero-specificity floor in `@layer base` rather than at ~55 call sites:
+
+```css
+:where(button, [role="button"], a[href], summary, [role="menuitem"], …):focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+```
+
+`:where()` contributes no specificity, so the rule weighs only the (0,1,0) of `:focus-visible`, while every Tailwind focus utility is a class *plus* a pseudo-class at (0,2,0). So anything that already styles its own focus keeps it, and anything that deliberately *suppresses* focus — the composer textarea, which shows focus through its container — stays suppressed, without either needing to know this rule exists. It is a floor, not an override; same construction as the inherited cursor above, and for the same reason: make the global rule the weakest thing in the cascade and local intent survives automatically.
+
+One genuine miscue found by grep alongside it: `ModelSelector`'s trigger used `focus:ring-2`, not `focus-visible:`, so the ring appeared after an ordinary mouse click and stayed until something else took focus. The distinction is only about elements you click — the search inputs in the same file keep plain `focus:` on purpose, because a text field should show its focus state however it was reached.
+
+### 14.2 Live bugs found by using the app, not by the gates
+
+**Bugs 1 and 2 are the same defect.** `<a href="/auth">` in `Chat.tsx` and `<a href="/">` in `NotFound.tsx` are absolute-path anchors, so they perform a **full document navigation**. Under `file://` that resolves to `file:///auth` and `file:///` — which do not exist, which fails the main frame, which `did-fail-load` turns into a modal *"Flyer could not start"* box. So in the packaged build a guest clicking "Sign in to save chats" got an error dialog and a dead window, and the only escape link on the 404 page was itself the thing most likely to kill the app. Both are now `<Link>`, which routes in place and is correct under `HashRouter` and `BrowserRouter` alike. They were also already wrong on the web, where a full navigation discards the React tree and re-runs the Firebase auth bootstrap to reach a route the router could have rendered in place.
+
+Found by launching Electron against `dist/` and reading its stderr — not by any gate. `tsc`, `eslint` and the suite were all clean across both bugs, which is worth recording as a limit of this project's gates rather than a one-off.
+
+**Bug 3: Ctrl+N had never worked.** File → New Chat in the Electron menu ran `window.location.hash = "#/chat"`, which under `HashRouter` is a no-op when the hash is already `#/chat` — i.e. always, since the menu item is only reachable from inside the app. The accelerator had been inert since the day it was written, and nothing about it looked wrong. It now sends `flyer:menu-command` and the renderer runs the same `new-chat` handler the keyboard path uses.
+
+**Bug 4: "New chat" leaked the previous conversation's artefacts.** The early return in `loadMessages` for a null `activeConversationId` cleared `messages` and revoked object URLs but never called `resetArtifacts()`, so the right-docked files-and-code canvas stayed populated with the *previous* chat's output while the message list was empty. A new conversation that arrives showing someone else's files reads as data leaking between chats even though nothing was shared.
+
+**Bug 5: a function declared `: boolean` returned `undefined`.** `isTypingTarget` ended in `return target.isContentEditable`, which is `undefined` under jsdom for a plain element. `lib.dom` types the property as `boolean`, so `tsc` never objected. Harmless at the one truthy call site and a latent trap for any future `=== false` comparison; fixed at the source (`Boolean(...)`) rather than by relaxing the test that caught it.
+
+**Bugs 6 and 7: two false empty states, one of them dangerous.** Both found by reading the two load paths rather than by any gate — an unhandled rejection and a swallowed `catch` are invisible to `tsc`, to `eslint` and to the suite, and both failure modes render a screen that looks entirely normal.
+
+`loadConversations` had no `try/catch` and no loading flag, so "No conversations yet" was shown while the read was in flight and again if it failed. `loadMessages` did have a `catch`, which logged and returned — leaving `messages` empty, which the render treats as "new conversation" and answers with the `WelcomeScreen`. The second one is the dangerous half, and its danger is not the wrong screen: with `messages` empty, sending would reach the model with no prior turns, so it would answer a mid-thread follow-up as if it were the opening line, and that reply would be persisted into the middle of a thread it never saw. The fix is therefore a Retry panel *and* `disabled={messagesError}` on the composer — the panel stops the false claim, the disabled composer stops the app acting on it. Full write-up under #10 above.
+
+The general shape is worth naming, because this project has now hit it three times (`loadConversations`, `loadMessages`, and `resetArtifacts` in bug 4): **when a read fails and the failure is only logged, whatever the UI renders for "no data" becomes the error state by default** — and "no data" states are written to be reassuring. A caught-and-logged exception is not a handled one.
+
+**Bug 8: the fix for bug 7 would have crashed the page.** The `messagesError` Retry panel added above uses `<Button>`, and `Chat.tsx` did not import it — the component had reached ~2000 lines without ever needing one directly. `tsc` reported it the moment it could be run again (`Cannot find name 'Button'`, twice), and nothing else would have: esbuild treats an unresolved identifier as a global and emits it unchanged, so `vite build` passed; the suite never renders `Chat.tsx`; and the only code path that touches the line is the one where a Firestore read has already failed. The user-visible result would have been a `ReferenceError` inside render — i.e. the error boundary, a blank screen — reached **only** when the app was already handling an error. A fix that is inert until the failure it handles occurs, and then makes that failure worse.
+
+Two things follow from it. First, the practical one: **`tsc` is not optional here, and it is the gate most often skipped**, because the suite and the build both run and both pass. It has now been unavailable for stretches of five sessions; every stretch is a window in which exactly this class of defect can land unseen. Second, the structural one: this is the same lesson as bug 5 (`isTypingTarget` typed `boolean`, returning `undefined`) from the other direction. Bug 5 was a type `tsc` could not check; bug 8 was one it could, and neither the suite nor the build is a substitute for asking it.
+
+
+**Bug 9: the composer was disabled and looked live.** Bug 7's fix put `disabled={messagesError}` on `ChatInput`, and that prop had only ever been honoured *functionally*: every control inside stopped responding and nothing about the composer changed appearance, while the placeholder went on reading "Ask X anything…". So the state the fix depends on presented as an unresponsive app rather than as a blocked one — click the textarea, nothing; click send, nothing; no explanation anywhere near the thing you are clicking. The Retry panel above says what happened, but a control that is dead and looks alive is its own bug regardless of what else is on screen.
+
+Now `opacity-50` with a 150ms transition on the composer's outer wrapper. Two things deliberately not done: no `cursor: not-allowed`, because §14 item #5 removed the crossed circle app-wide and a disabled control on macOS or Windows shows the ordinary arrow; and no `pointer-events: none`, because the controls carry real `disabled` attributes — which is also what keeps them out of the tab order — and killing pointer events would additionally kill text selection inside the panel.
+
+**Bug 10: the collapsed sidebar stayed in the tab order.** Collapsing animates the `motion.aside` to `width: 0` and slides its 280px contents off the left edge under `overflow-hidden`. That is a purely *visual* hide. Everything inside stayed focusable and stayed in the accessibility tree, so tabbing out of the chat header walked into **sixteen invisible controls** — new-chat, the model picker and its search field, the history filter, every conversation row and its delete button, settings, sign out — with the focus ring being painted 280px off the left edge of the window. No native app has a closed drawer you can tab into.
+
+Three things about the fix are not obvious:
+
+- **`visibility: hidden` is the only one of the candidates that works.** `aria-hidden` removes the controls from the screen reader and leaves them in the tab order; `tabIndex={-1}` does not cascade to children; `inert` would be the single-attribute answer but React 18 does not support it as a boolean prop and `@types/react` 18 does not declare it (checked — `grep inert node_modules/@types/react/index.d.ts` returns nothing).
+- **It has to be applied on a timer, not immediately.** Hiding at the moment `isCollapsed` flips would empty the drawer before it has finished shrinking, so the panel would appear to pop blank and *then* close. The timer shares one constant with the motion transition (`COLLAPSE_DURATION_S`) precisely because the two have to agree.
+- **Lifting it cannot be left to the effect alone.** Clearing the state from `useEffect` lands one commit *after* the render that already has `isCollapsed: false`, so `offscreen`-only would leave the drawer opening and still unfocusable for a frame — and mod+K would expand the sidebar without landing the cursor. The guard reads the prop directly (`isCollapsed && offscreen`) so the hide lifts in the same render, and `focusHistorySearch` still defers with `requestAnimationFrame`, because `.focus()` on a `visibility: hidden` element silently does nothing.
+
+`ArtifactCanvas` was checked for the same pattern and is clean — `if (!open) return null;`, so a closed canvas is unmounted rather than hidden. So are both `AnimatePresence` blocks in `ChatInput`: the "+" menu is `{plusOpen && …}` (genuinely unmounted, 150ms exit) and the send/stop swap is `mode="wait"`, which keeps exactly one of the two mounted.
+
+Three tests in `conversation-list-states.test.tsx` cover it, and the third is the one worth having: it renders collapsed, asserts not-visible, rerenders open, and asserts visible — which fails if the `isCollapsed &&` half of the guard is ever dropped. The assertions are split deliberately: `queryByRole(...)` returning `null` is the screen-reader half (ByRole excludes anything hidden from the accessibility tree), `not.toBeVisible()` is the tab-order half. The hide is written as an inline `style={{ visibility }}` rather than Tailwind's `invisible` for one reason — jsdom loads no stylesheet, so a class name has no computed effect and `toBeVisible()` cannot see it. Same reasoning as `control-metrics.test.ts` asserting against CSS source text.
+
+
+**Bugs 11, 12 and 13 are the caught-and-logged shape again, three more times, all in `Chat.tsx`.** The pattern named after bug 7 — *when a read or write fails and the failure is only logged, whatever the code does next becomes the error handling by default* — now accounts for nine of the twenty-one bugs in this section. These three were found by reading every `catch` in the file in one pass, which is a cheap audit and should probably be a recurring one.
+
+**Bug 11: a model preference that silently did not stick.** `handleSelectModel` sets `selectedModel` and *then* writes it to the conversation document. If the write threw, the failure was logged and the local state kept — so the picker read correctly all session while Firestore still held the old id. Reopening the chat restores from `activeConv.modelId`, so tomorrow the thread is quietly back on the previous model and the next reply in a long conversation comes from somewhere else with nothing on screen having changed.
+
+Deliberately **not** reverted, and that is what the message says: `setSelectedModel` already succeeded, so this turn genuinely will use the model the user picked. What failed is only remembering it, and reverting the picker would contradict the model the next reply is actually coming from — a worse lie than the one being reported. So: keep the selection, say the preference did not save.
+
+**Bug 12: a failed message write looked exactly like a successful one.** `saveMessage` logged and returned, so every caller carried on. The message is already in React state and on screen, so the turn completed and looked entirely normal. Both halves corrupt the thread and neither is visible:
+
+- the **user's** turn fails to save → the reply saves against a `parentMessageId` that no longer resolves, so the reload shows an answer with no question;
+- the **reply** fails to save → the reload shows a question with no answer, and the next turn sends the model a history in which its own previous answer is missing.
+
+Now returns a boolean and reports once. Once, not once per call: sonner treats a repeated `id` as an update to the existing toast, so a turn where both writes fail produces one message rather than two. The wording names the consequence rather than the cause — *"it may be missing when you reopen this chat"* is the part the user can act on, by copying the reply out.
+
+**Bug 13: a thrown web search told the model nothing at all.** The `else` branch on the search path exists specifically to stop the model inventing headlines when a search comes back empty — it splices in *"search returned no usable results, say so rather than guessing"*. But **both** splices live inside the `try`, after the `await`, and the `catch` did nothing except re-throw `AbortError`. So a search that *threw* added no note whatsoever: the user saw the Search toggle lit, the model was told nothing, and the answer came out of training data reading exactly like a grounded one. Worse than the empty-result case it was written beside, not better — that one at least left a trail in the console; this swallowed the error without even logging it.
+
+Now logged and spliced with the **same sentence** the empty-result branch sends. The model does not need to distinguish "returned nothing" from "threw" — the instruction is identical either way — and two wordings for one situation is two behaviours to keep in step.
+
+Honest note on reachability: `webSearch` catches its own failures and returns `null`, so the empty-result branch covers the common cases and this `catch` is hard to reach today. The path that does reach it is a proxy answering a shape the guards do not anticipate — `if (search?.results?.length)` is satisfied by any truthy `.length`, so `{results: "some error string"}` gets as far as `.filter` and throws — and `buildSearchContext`'s own docblock already records that a hard-failed proxy can answer `{error}` with no `results` key. So: a latent gap closed by reasoning, not an observed failure, and recorded as such.
+**Bug 14: the fixes for bugs 6 and 7 were unreachable dead code, and the tests said otherwise.** This is the worst one in the section, and it was one layer below everything above it. Both primary Firestore reads in `firestore-db.ts` ended in `catch { console.error(...); return []; }`. A rejected read therefore arrived at the caller as a **successful empty one** — so `Chat.tsx`'s `catch` blocks could not run, `setMessagesError(true)` could not fire, the Retry panel could not render, and `disabled={messagesError}` could not engage. Everything bug 7 built was shipped, tested, and inert.
+
+Which means the dangerous half of bug 7 was still live in production *with the fix in the codebase*: a failed `getMessages` still produced an empty `messages`, still rendered the `WelcomeScreen` over a thread with history, still left the composer live, and still sent a mid-thread follow-up to the model with no prior turns — whose reply was then persisted into the middle of a thread the model never saw. Bug 6's half is only cosmetic by comparison (a false "No conversations yet" instead of the failure panel), but it was equally unreachable.
+
+**The reason this survived a test suite that covers exactly this behaviour is worth more than the fix.** `conversation-list-states.test.tsx` has seven tests asserting the sidebar's error panel, its Retry button, and that a failed read does not claim the account is empty — all passing throughout. They pass because they drive `conversationsStatus` as a **prop**. Nothing anywhere checked that the prop could ever *become* `'error'`, and the layer that decided it could not was two files away. So the tests were not wrong, they were scoped one level above the defect, and the effect of that is worse than no coverage: the suite actively asserted the state was handled.
+
+The general rule this yields, which is the one to carry forward: **a test that injects a state proves the rendering of that state, not its reachability.** Anywhere a component takes a status prop, something must also test the thing that computes it.
+
+Both reads now `throw error` after logging — the log stays, because it is the only place the underlying Firestore message survives, the caller having reduced it to a flag. `src/test/firestore-reads.test.ts` pins it at that layer, and pins the other direction too: `{docs: []}` must still resolve to `[]`, or "rejects on failure" would be satisfiable by a function that always rejects, and the genuine empty state is a real case the sidebar and the `WelcomeScreen` exist for.
+
+**The asymmetry is the design, not an oversight.** `getMemories` (→ `[]`), `getUserSettings` (→ `null`), `addMemory` (→ `null`) and the `siblingIndex` probe all still swallow, deliberately. A swallowed read is fine when there is no UI state that "no data" could be mistaken for — nothing claims "you have no memories" as a fact the user would act on, and settings have defaults. It is wrong only where a *reassuring empty state exists to be shown by mistake*. That is the discriminator, and it is now written at each call site.
+
+Proven not green by construction: reverting both `catch` blocks to `return []` gives **3 failed / 3 passed**; restoring the rethrow gives **6 passed**.
+
+**Bug 15: read-aloud, and a `try/catch` that was not on the failure path.** Three defects in one hook, and the first is the reason the other two survived: **SpeechSynthesis reports engine failures asynchronously on `utterance.onerror`, not by throwing.** `new SpeechSynthesisUtterance()` and `.speak()` are synchronous and essentially never fail, so the `try/catch` a reader inspects — and which logged and reset the button — was never where failures arrived. `onerror` set `isSpeaking(false)` and did nothing else, not even a `console.error`.
+
+The user-visible result: on any machine without speech voices installed — a bare Linux box with no speech-dispatcher, which is most of them — clicking read-aloud flashed the spinner and returned the button to its idle speaker icon. Identical to *finished reading*. The reasonable inference is "my volume must be down", so the user goes and debugs their own machine.
+
+**The second defect made a working feature inconsistent, which is its own kind of broken.** `getVoices()` returns `[]` on the first call of a session in Chromium — voices load asynchronously and only appear after `voiceschanged`. So the entire voice-preference list was **dead on the first click** and live on every one after it. First read-aloud in the platform default voice, every subsequent one in Samantha. A feature that sounds different the first time reads as flaky rather than as a cold start. Now awaited, with a 1s deadline after which it speaks in the default voice anyway — because the degradation must not be a hang, and a spinner that never resolves is worse than the wrong voice.
+
+**The third is the trap in fixing the first.** `cancel()` fires `onerror` on the live utterance with `interrupted` or `canceled`, and `cancel()` is called by `stop()` and at the top of `speak()`. So "report every `onerror`" puts an error toast on every press of the stop button. Those two codes are filtered, and a `runId` ref makes a superseded utterance's handlers no-ops for state as well — necessary once the voice load is awaited, because a second click can now land while the first is still waiting.
+
+Also fixed in passing: `window.speechSynthesis.cancel()` ran *before* the `try` block, so a platform without the API threw out of the click handler rather than degrading; and text that strips to nothing (a code-only or emoji-only reply) now says so instead of flicking the button and staying silent.
+
+`src/test/text-to-speech.test.ts` — 11 tests, and each of the three fixes has its own failing test when reverted: removing the awaited voice load gives **3 failed**, removing the `onerror` reporting gives **2 failed**, removing the deliberate-cancellation filter gives **2 failed**. jsdom implements no speech API at all, so the fake is a fake rather than a spy.
+
+**Bug 16: the copy button could leave the old clipboard contents in place and still look like it worked.** Five call sites — the code-block copy, the markdown code-fence copy, copy-whole-reply, the arena per-column copy, and the canvas code copy — all did this:
+
+```
+await navigator.clipboard.writeText(text);
+setCopied(true);
+```
+
+No catch. A rejected write is an unhandled promise rejection, so `setCopied(true)` never runs and the button does not even flicker — but the clipboard still holds **whatever was in it before**. The user pastes that, believing it is the thing they just copied. This is the worst instance of the shape in the whole section, not because the failure is dramatic but because **the fallback behaviour is silently wrong data**, out of the single most-used affordance in a chat app, with the only symptom being a button that appears not to have registered the click. Every other bug here shows the user *nothing*; this one hands them something plausible and incorrect.
+
+`writeText` rejects for reasons that are all reachable: `NotAllowedError: Document is not focused` (the click lands while devtools or another window holds focus), a denied permission, or a gated platform. And in a non-secure context `navigator.clipboard` is `undefined` outright — a TypeError, not a rejection, so the guard has to be a presence check and not just a catch.
+
+`src/lib/clipboard.ts` now owns the one copy path: try the async API, fall back to the `execCommand` textarea trick — which handles the unfocused-document case the async API rejects on — and **return a boolean**. Callers show their tick only on `true`, so the confirmation is evidence rather than an assumption. Two details in the fallback are load-bearing and commented: the textarea cannot be `display: none` (an unrendered element has no selection to copy) so it is offscreen at zero opacity instead; and the user's existing selection is captured and restored around the call, because copying a code block must not silently deselect the sentence they had highlighted above it. The sidebar's "Copy title" item already handled both outcomes correctly with `.then(ok, err)` and was still routed through the helper — one clipboard path with one fallback beats two that drift.
+
+**And a second defect in the same reading pass, in the image download beside it: `res.ok` was never checked.** `fetch` resolves for a 404 exactly as happily as for a 200, and `.blob()` on an error page succeeds — so a dead image URL **saved the error body to disk under a `.png` name**. The same shape as every false-empty-state above, in the write direction: a failure that produced a plausible-looking artifact instead of a message. A file that will not open is worse than "the download failed", because the user has to work out for themselves that it is not an image. Now `if (!res.ok) throw` with the status in the message, and the catch reports rather than only logging — the success path confirms itself with a two-second tick, so a silent failure left the button looking untouched, which is an invitation to click again.
+
+`src/test/clipboard.test.ts` — 9 tests. Reverting the helper to "assume it worked" (`return true` in place of the fallback and the report) gives **5 failed / 4 passed**.
+
+
+**Bug 17: the front door reported the wrong cause, in internal jargon.** Three defects, on the one screen every user meets before they meet anything else.
+
+**The headline: a mistyped password said "There's already an account with that email."** `shouldAutoCreateAccount` matches `wrong-password` and `invalid-credential`, not just `user-not-found` — so an existing user who fat-fingers their password fell into the auto-create branch, `createUserWithEmailAndPassword` rejected with `email-already-in-use`, and *that* was the message returned. This is not merely unhelpful, it points at the opposite problem: it is their own account, they were signing in to it, not creating it. The two next actions it invites — assume someone else has taken their address, or try a different address — are both wrong, and the one actionable fact (the password) was destroyed on the way out. `email-already-in-use` arriving *here* is proof the account exists and the credential did not work, so it now reports as a credential failure.
+
+**The second is a migration leftover that made every auth error unreadable.** `Auth.tsx` picked its friendly text with `error.message.includes('Invalid login')` and `.includes('already registered')`. Those are **Supabase** message strings. This app was migrated to Firebase, whose messages read `Firebase: Error (auth/invalid-credential).` — the code is *in* the message — so neither check had matched since the migration, and the fallback branch toasts `error.message` verbatim. **Every auth error any user has ever seen was a raw SDK string with an error code in it**, on the app's most common failure. A dead string comparison is invisible to `tsc`, to `eslint`, and to any test that does not assert on the actual text, which is why this outlived a migration.
+
+Codes now map to sentences in `AUTH_MESSAGES` in `AuthProvider` rather than in the page — there are three entry points (`signIn`, `signUp`, `signInWithGoogle`) and two callers, so a table in the page would have to be duplicated or exported back out of it. The fallback for an unmapped code is deliberately generic text and **not** the SDK message: a user can act on neither, and only one of the two looks like the app is working.
+
+**The third: closing the Google popup was reported as an error.** `popup-closed-by-user`, `cancelled-popup-request` and `user-cancelled` are the user changing their mind. No native sign-in sheet shows an error because you closed a window, so these now return `{ error: null }` and log at `info`. Same judgement as the `interrupted`/`canceled` filter in bug 15 — a deliberate cancellation is not a failure, and treating it as one makes an app feel like it is arguing with you.
+
+**A recorded trade-off, not a fix.** Auto-creating an account on `auth/invalid-credential` is an account-existence oracle: Firebase collapses "no such account" and "wrong password" into that single code *specifically* to prevent email enumeration, and auto-signup re-derives the distinction from whether the create succeeds. The three credential codes therefore all map to one sentence, so the UI does not rebuild the distinction Firebase removed — but the underlying behaviour is product design, not a defect, and changing it unilaterally is out of scope here. Written down rather than left implicit.
+
+`src/test/auth-errors.test.tsx` — 12 tests. The last describe block is the pairing that makes the fix correct rather than merely different: the same Firebase code must produce **different** sentences depending on the path it arrived by — on the sign-up form `email-already-in-use` means what it says; inside the sign-in fallback it means the password was wrong. Proven not green by construction, and the two halves pin independently: reverting the `email-already-in-use` special case gives **2 failed** (both headline tests, including the `not.toMatch(/already/i)` assertion that encodes the old behaviour); reverting `describeAuthError` to the SDK message gives **5 failed** — and notably *not* the sign-in-fallback test, which reads `AUTH_MESSAGES` directly. One more test covers the `undefined` rejection that `authErrorInfo` exists for, where reading `err.code` used to throw *inside the catch* and escape as an unhandled rejection, so the caller never received its `{ error }` object and the button spun forever.
+
+**Bug 18: the canvas said "v2" and served version 1's bytes.** Found by asking where else bug 16's shape lived — *a failure that produces a plausible artifact* — and the answer was the file download beside it, for a completely different reason.
+
+A file artifact's id is `file:<filename>`, the filename and nothing else. So two turns that both generate `report.xlsx` share one artifact id, and `mergeArtifacts` handles that deliberately: for files, content equality is useless (a file artifact's per-version `content` is `""` until the panel fetches its object URL), so **a different producing message is the new-version signal** and turn 2's file becomes version 1 of the same artifact. The header then renders `v2`. That much works.
+
+Both resolvers in `ArtifactCanvas` then did this:
+
+```
+filesForTurn.find((f) => `file:${f.filename}` === artifact.id)
+```
+
+`find` returns the **first** match, and `filesForTurn` is `messages.flatMap(m => m.files)` — conversation order. So the first match is the *oldest* file with that name. The user asks the model to fix the spreadsheet, watches the version badge tick to v2, clicks Download, and gets a file that opens perfectly and contains the unfixed data. Nothing fails, nothing is empty, no error appears anywhere. And it is not an edge case: models name generated files predictably — `report.xlsx`, `data.csv`, `chart.png` — so two "make me a spreadsheet" turns in one conversation collide by default.
+
+The fix threads the producing message id through to the canvas (`TurnFile extends MessageFile`) and resolves the *version the panel is showing* rather than a file with a matching name. The single-file case still resolves by name, and an artifact opened from a download chip — whose `messageId` no message owns — falls back to the **newest** same-named file rather than `find`'s oldest, because that is the one the user was just looking at.
+
+**Two more defects in the same area, both of the "offering something the data cannot support" kind.**
+
+The **Diff tab** was shown for any artifact with `history.length > 1`, files included. But file history content is `""` on every version by design, so a two-version file diffed `""` against `""` and rendered an empty diff — **reporting no changes between two genuinely different spreadsheets**. Now gated on `kind !== "file"`. Hiding a comparison is better than showing one that always says "identical", because a user reads an empty diff as a fact about their files rather than a fact about the data model.
+
+And **Download returned silently** when no file matched, while `fetchFileText` — the identical condition, two functions down the same file — threw an error the panel displays. So a missing file was explained on the preview path and not on the download path, and a Download button that does *nothing at all* reads as a broken app: the user presses it again. Now reported.
+
+`src/test/artifact-file-versions.test.tsx` — 7 tests, driving the real component against the real store, because the defect lived in the **join** between them: the artifact knew its version, the file list knew its order, and nothing put the two together. A unit test of either half alone would have passed — §14.2 #14's lesson applied before the fact rather than after. Reverting both fixes gives **3 failed / 4 passed**, with all four control tests (single file, versioned *code* artifact keeps its diff, missing file reports) staying green.
+
+**One of these tests caught itself being useless, which is the part worth keeping.** The Diff-tab test first passed against the *unfixed* code, because a file artifact renders `Loading…` with **no tabs at all** until its object URL resolves — so asserting "no Diff tab" on the first frame is satisfied by there being no tabs yet. It only surfaced because the test also asserted the Code tab *was* present, and that half failed. That control assertion is the entire reason the test is not another §14.2 #14: **an absence assertion needs a matching presence assertion in the same test, or it cannot distinguish "the thing is gone" from "nothing has rendered".**
+
+**Bug 19: a ranked list the code did not rank.** Found by generalising bug 18's shape one step further — *a data structure whose form implies semantics nothing implements* — and it was sitting in code written earlier the same session, in the read-aloud hook fixed as bug 15.
+
+`VOICE_PREFERENCES` is an ordered list: Google UK English Female, Google US English, Samantha, Microsoft Zira, Karen. An array rather than a `Set` precisely because the order is a priority ranking. The selection read:
+
+```
+voices.find((v) => VOICE_PREFERENCES.some((pref) => v.name.includes(pref)))
+```
+
+The loops are nested the wrong way round. The *voices* array is the outer loop, so the winner is whichever voice **the platform** happens to list first that matches anything at all — the ranking never participates. On a machine with both Karen and Google UK English Female installed, the platform's array order decides. It is a different function that looks identical at the call site, and it is invisible in use because it always picks *a* preferred voice: read-aloud works, sounds fine, and simply never honours the preference the list exists to express. Now an outer loop over the preferences (`pickVoice`), with the any-English fallback unchanged.
+
+Worth noting what this cost to find versus what it cost to fix: five lines, no failure mode, no error path — the sort of defect that survives indefinitely because nothing about the running app is wrong enough to investigate. It only became visible by *asking of a known bug what class it belonged to* and then looking for other members of that class, which is the same move that produced bug 18 from bug 16.
+
+Four tests added to `src/test/text-to-speech.test.ts` (11 → 15). All four deliver voice lists whose platform order **contradicts** the ranking, which is the only arrangement that can distinguish the two implementations — with the platform order agreeing with the ranking, both forms return the same voice, which is why the existing eleven tests all passed against the defect. Reverting `pickVoice` to the `some()` form gives **4 failed / 11 passed**, and every one of the four failures reports the same wrong answer (`expected 'Karen' to be …`): the last-ranked voice, chosen because it was listed first. One of the four is a substring case (`Google UK English Female (Natural)`, which is how the name arrives on some platforms) so that rewriting the loops cannot quietly tighten `includes` into `===`.
+
+**Also fixed while in `App.tsx`:** `import { Analytics } from "@vercel/analytics/react"` was never rendered anywhere in the tree, and a bare named import is a side-effecting module import to Rollup, so it pulled the package into the bundle to do nothing. `eslint` did not catch it because unused-import checking is not enabled in this config.
+
+**Layout note.** The title bar means the app is no longer the full viewport, so `.app-shell-height` became `calc(100dvh - var(--titlebar-height))` with the variable defaulting to `0px` in `@layer base` and set to `32px` by `TitleBar` on mount. A custom property rather than `height: 100%`, because `ChatSidebar` uses that class while `fixed` below the `lg` breakpoint and a fixed element resolves percentages against the viewport, not its flex parent — and an Electron window between the 900px `minWidth` and the 1024px `lg` breakpoint hits exactly that case. `min-h-screen` on `Auth`, `NotFound` and the two `App.tsx` loading states became `.app-shell-min-height` for the same reason.
+
+**Bug 20: a shortcut the app's own help sheet advertised did nothing.** Ctrl+B is listed in `SHORTCUTS` as *"Show or hide conversations"*, and its handler was `() => setSidebarCollapsed((v) => !v)`. `ChatSidebar` is rendered behind `isAuthenticated &&` (`Chat.tsx`), so for a **guest** the keystroke flipped a boolean with no reader. Nothing moved and nothing was said, while the shortcut sheet two keystrokes away insisted the key worked.
+
+Found by pressing the key in the running desktop app. It is worth separating from the caught-and-logged family above because it is the opposite shape: there was no failure to swallow. No exception, no rejected promise, no empty array standing in for an error — just a state update that nothing consumed. Nothing in `tsc`, `eslint` or the suite can see that, and no reading pass looking for `catch` blocks would have found it either.
+
+What made it visible was **sitting next to its siblings**. Ctrl+K (find conversation) and Ctrl+Shift+E (toggle canvas) face the identical "target might be absent" problem, and both already explained themselves. Three shortcuts with the same precondition, two of which spoke — the third's silence was only obvious in the comparison.
+
+So the fix is at the level of the class, not the instance: `CONDITIONAL_ACTIONS` names the three shortcuts whose target can be absent, `UNAVAILABLE_REASONS` gives each one a sentence, and `src/test/shortcut-availability.test.ts` (9 tests) asserts the two stay in agreement and that **every** conditional action has a `UNAVAILABLE_REASONS[...]` reference in its handler in `Chat.tsx`. A fourth conditional shortcut added with a silent handler now fails a test instead of shipping.
+
+The three sentences are deliberately different, and that is the substance rather than the polish: *"Sign in to keep a history of your chats"* / *"No chats to search yet"* / *"Nothing to show yet — files and code from replies appear here."* **"Not available to you" and "empty" are different facts with different next actions** — signing in versus using the app — and a user who cannot tell them apart keeps pressing the key. Specifically not "no chats yet" for the sidebar: a guest's history is not empty, it is *not kept*, and telling someone who has just had a long conversation that they have no chats reads as data loss.
+
+Two notes on the test's shape. It reads `Chat.tsx` as **text** rather than rendering it — mounting the whole chat page against Firebase, the artifact store and eight hooks to observe one toast is a test that gets deleted the first time it goes flaky. And it scrapes for `UNAVAILABLE_REASONS['x']` rather than for `toast(` inside a handler body, because handlers are not all inline (`find-conversation` is a bare reference to a `useCallback` 30 lines up) — so a body-scoped search would need to follow indirection and would break on the next refactor. Looking for the shared constant is indirection-proof *and* enforces a second real property: the sentences live in one auditable place instead of drifting as three inline literals.
+
+**Measured live, both directions** (CDP `Input.dispatchKeyEvent` into the running Electron window, 2026-08-22). Ctrl+Shift+E against an empty artefact canvas produced exactly one toast reading `Nothing to show yet — files and code from replies appear here.` — the `UNAVAILABLE_REASONS` sentence, character for character, delivered by a real keystroke rather than by a test that reads the constant it is asserting against. Then Ctrl+B in the same window took the sidebar `<aside>` from **1px to 280px** and added **no** toast.
+
+The second half is the one worth having. A fix of this shape fails just as easily by speaking *too much* — an inverted condition, or a reason attached unconditionally, gives every user a toast where the shortcut works perfectly well, and that is a more annoying bug than the silence it replaced. The text-scraping test cannot see that at all: it proves the sentence is referenced, not that it is reached only when it should be. A working toggle with an empty toast list is the measurement that rules it out.
+
+**What this did not measure.** The guest Ctrl+B path — the actual reported bug — was *not* exercised, because the live profile is signed in and reaching guest state means signing out of a real session with four saved conversations in it. What was measured is a sibling member of the same class (`toggle-artifact-canvas`, whose target is absent for a different reason) travelling the same `CONDITIONAL_ACTIONS` → `UNAVAILABLE_REASONS` → `toast` path. That is good evidence for the mechanism and no evidence at all for the `isAuthenticated` branch specifically, which remains covered only by the static assertion that the handler references its reason. Recorded rather than glossed, because "I tested the fix" and "I tested one of the three things the fix covers" are different claims.
+
+**Bug 21: the OS text-selection highlight, painted across a decorative badge.** A screenshot of the running desktop app showed a selection highlight over the words "Lightning Fast" — one of four ornamental badges on the welcome screen. Double-clicking selected the word. In a frameless, chromeless window that is the plainest remaining "this is a web page" tell, and it is the kind of thing a user registers without being able to name.
+
+The reset rule that was supposed to prevent it:
+
+```
+button, a, [role="button"], [role="menuitem"] { user-select: none }
+```
+
+— with the comment *"Native apps don't let you text-select chrome"*. The selector covers chrome you can **click**, and most chrome is not clickable: feature badges, the "Powered by" pill, section headings, helper text under fields. **The comment described an invariant the selector could not express**, because "decorative label" is not something CSS can match. Extending the selector means enumerating every non-interactive element in the app and keeping that list current forever.
+
+So the scope is inverted instead: `[data-flyer-desktop]` defaults to `user-select: none`, and content surfaces opt back in — inputs, `textarea`, `contenteditable`, `.prose`, `pre`, `code`, `.liquid-message-user`, plus `.prose a` / `.liquid-message-user a`. `user-select` inherits, so `none` on the root reaches every descendant and each surface re-establishes `text` for its own subtree. The audit surface becomes a short allowlist rather than an open-ended denylist.
+
+**Scoped to `[data-flyer-desktop]`, not global.** In a browser tab, selecting any text on the page is expected and removing it would read as a broken page. Only the app window claims to be an app.
+
+**The allowlist is deliberately the same set as the `cursor: text` allowlist,** and that shared identity is the design rather than a coincidence: the I-beam is the affordance that *advertises* the selection. An I-beam over unselectable text is a lie; selectable text under an arrow hides that it can be selected. `src/test/native-selection.test.ts` (10 tests) therefore asserts the **divergence** between the two lists — they must differ by exactly the documented anchor rule and nothing else — because that is the assertion that fails when someone edits one list and not the other. Code blocks were in fact missing from the cursor list, and are the clearest case for it: `pre`/`code` is the syntax-highlighted output people select by hand when they want three lines out of forty rather than the whole block the Copy button gives them.
+
+**The risk of an inversion like this is entirely one-sided,** which is what the tests are shaped around: a selectable badge is cosmetic, and breaking the ability to select and copy a reply would be far worse than the bug being fixed. Hence the anchor carve-out, and hence measuring rather than assuming what it costs. A markdown link inside a reply is content, but the reset catches it *by tag name*, and a direct match beats inheritance from `.prose` no matter how specific the ancestor. Measured live: selecting a paragraph spanning a link still copies the link text (`getSelection().toString()` returned `"before LINKTEXT after"` with the anchor computing to `none`), so replies were never copied lossily. The real loss was narrower — you could not start a selection inside a link or double-click a word in it, making a link *label* the one part of a reply you could not pick out alone. Small, but it is content, so it opts back in.
+
+**Honest limit on the verification.** This is a stylesheet test, not a rendering test: jsdom does not implement `user-select` and does not cascade it, so `getComputedStyle` under Vitest cannot answer the question at all. Same reasoning as `control-metrics.test.ts` asserting against CSS source text. What the text assertion can do, and the live probe cannot, is fail on the *next* edit.
+
+**So the cascade was measured in the running Electron app instead** (CDP, 2026-08-22), against the app's own rendered elements rather than injected ones — computed value in one column, what a real double-click actually selects in the other:
+
+| element | computed `user-select` | double-click selects |
+| --- | --- | --- |
+| `<html>` (the `[data-flyer-desktop]` host) | `none` | — |
+| `<body>` (inherited) | `none` | — |
+| assistant reply `<p>` inside `.prose` | `text` | `"something"` |
+| `.liquid-message-user` `<p>` | `text` | `"latest"` |
+| composer `<textarea>` | `text` | — |
+| sidebar "History" label | `none` | `""` |
+| a plain `<div>` of chrome | `none` | `""` |
+
+Both directions, in the engine that ships. `none` inherits from the root through `<body>` to arbitrary chrome, `text` re-establishes itself inside the two message surfaces and the composer, and the behaviour follows the computed value rather than merely agreeing with it — the two selection reads returning a word and returning nothing is the part no stylesheet assertion can reach. Click coordinates came from a `Range` around a real word (`getBoundingClientRect` on the text node), not from an element centre, so the pointer landed on glyphs rather than on padding; `document.elementFromPoint` was read at each point first to confirm which element the hit test resolved to.
+
+The "History" label is the load-bearing negative: it is inert, so an empty selection there cannot be explained away by a click that navigated and re-rendered the selection out of existence. The badge from the original screenshot was no longer in the DOM by the time of this pass — the welcome screen had been replaced by an open conversation — so the negative control moved to other non-interactive chrome, which tests the same rule in the same way.
+
+### 14.3 Verification mistakes worth keeping
+
+After removing the `preconnect` hints I grepped `dist/index.html` for the font host, got matches, and concluded the tags were still being emitted. They were not — I had written the removed tags *verbatim into the explanatory comment*, and `grep` does not know an HTML comment from live markup. The comment now describes the removed hints instead of quoting them, because a note about deleted markup that contains that markup breaks every future grep-based audit of the file. The correct check is to strip comments first: `perl -0pe 's/<!--.*?-->//gs' dist/index.html | grep -o '<link[^>]*preconnect[^>]*>'`, which returns only the three intended hosts.
+
+**The second one produced a false negative against a fix that was working.** Measuring bug 21's cascade needed two elements to double-click — one that should select, one that should not — so I built them in the page and appended each to `document.querySelector('[data-flyer-desktop]')`, that being the scope the rule is written against. Both double-clicks then returned `"\n"`. Read literally: the opt-in was broken and content had become unselectable, which is precisely the one-sided risk the whole design is shaped around.
+
+Nothing was broken. `[data-flyer-desktop]` is on `<html>`, so appending to it made the probes **siblings of `<body>`** — in the tree, styled, and answering `getComputedStyle` correctly (`text` and `none`, the right answers), but never laid out and never painted. So they occupied no coordinates, the clicks passed through to empty space, and the selection was empty for a reason that had nothing to do with the rule under test. Moving both probes to `document.body` gave `"CHARLIE"` and `""` on the next run.
+
+Two things to keep from it, neither about CSS:
+
+- **Two identical results in opposite directions mean neither was measured.** A probe designed so that a positive and a negative case are distinguishable has, in that outcome, told you it did not run. `"\n"` and `"\n"` was the tell, and it read as a finding rather than as an instrument failure. The fix is to make the instrument report on itself: `document.elementFromPoint(x, y)` at every click point, before clicking, so the log says which element the hit test resolved to and a miss is visible as a miss.
+- **A verification whose own check cannot fail is not a check.** The first attempt did count the probes — but *after* removing them, so the number was structurally always `0` and could not have caught this. Same defect as `npx tsc --noEmit` in the §14 gate note, and in the same session: a command that reports success unconditionally is worse than no command, because it consumes the attention that would otherwise go to checking.
+
+There is a third, smaller one. Those stray clicks were not inert: they landed at x=200, which by then was inside the sidebar Ctrl+B had just expanded, and opened a saved conversation. Harmless here — it is what put real message prose on screen for the table above — but a probe that mutates the app it is measuring can invalidate every coordinate taken before it, and it did: the "Lightning Fast" badge from the original screenshot was gone from the DOM by the next call. Read the DOM again after any click that might navigate, rather than reusing rects across a state change.
+
+**A fourth is written up in §16.9,** and it is the same defect as the second — a check that could not fail — but reached by a completely different route and caught deliberately rather than by accident. A test asserting a real property, against real code, through the real read path, passed identically with the line it was testing deleted. What made the difference there was process: every fix in §16 was mutation-checked before being believed. That is now the rule, and it is the one entry in this section that generalizes to everything else in the brief.
+
+**And a fifth in §17.6,** which is the same defect a fourth time and the second one the mutation check caught. A test written specifically to cover a one-line guard used an input that could not reach it, and said so in a comment. Read together, the four could-not-fail checks say something the individual write-ups do not: every one of them was written by someone who believed it was real, so "look at it again" has never been what catches this. The mechanical step is. Running the tests is not the check — deleting the line and watching the test go red is.
+
+---
+
+## 15. The five reported defects — DONE
+
+One report, five clauses, verbatim: *"bro make custum prompt better,it is giving long boring paragraph and make it donot show file content generated by ai when it is shown in side panel and fix its fucked custum prompt for cision and make it capablle to read any types of files and fix websearch"*.
+
+They are recorded together because four of the five turn out to share one shape, and the shape is worth more than any of the fixes: **an instruction or a capability that was written down, looked correct on inspection, and was not reachable by the code path that mattered.** The verbosity rules existed and lost to a rule beside them; the vision prompt did not compose them at all; the file extractor supported formats the caller had already dropped; the search taxonomy was accurate and was fed a lie by an HTTP status check. Only the canvas duplication was a plain missing feature.
+
+### 15.1 "it is giving long boring paragraph" — the response spec
+
+`responseSpecBlock` in `src/lib/prompts.ts`, rewritten. The defect was structural rather than a wording problem: relative guidance (*"default to short, smart answers"*) sat next to an emphatic, **absolute** prose-first directive, and lost to it. *"Do not use incomplete sentences or abbreviations that make writing dense and cramped"* read, in practice, as an instruction to pad.
+
+What replaced it, and why each piece is load-bearing:
+
+- **A number, not an adjective.** *"Default to a SHORT reply: under 120 words"* plus *"Length is not effort"*. A ceiling is something a model can comply with; "concise" is not.
+- **Named exceptions**, because long answers are correct for real work and a ceiling without them trades verbosity for truncated code: *"Write long only when the work is genuinely large … do NOT compress it into bullets that lose the substance."*
+- **Answer-first**: *"The FIRST sentence must contain the answer"*, with the hedge that survives every be-concise instruction ever written called out by name (*"It depends" is allowed only if…*).
+- **The boring half enumerated rather than advised.** The existing verbal-tic section (banning "Certainly!", "In summary") demonstrably worked, so the *structural* tics are written in the same enumerated style: `## Boring patterns to avoid` — the essay reflex, the register of documentation.
+- **Prose kept as the default but qualified in the same sentence**: *"Prose by default, but SHORT prose"*, *"a one-line answer beats both a list and a paragraph"*. Three paragraphs of distance is what let the unqualified version win.
+
+**This was measured, not asserted.** `prompts.test.ts` can only prove the instruction was *written* — a test that greps prompt text says nothing about whether a model obeys it, and those are different claims with only one of them being the complaint. So `scripts/measure-verbosity.mjs` runs the same five questions against the same model at the same temperature under both prompts and prints the word counts side by side. Result: **mean 231 → 88 words, median 161 → 50.**
+
+**Read the control row first, and it is the reason the script has one.** The fifth question is a genuinely large request that is *supposed* to produce a long answer. If it shrank with the rest, the fix would have made the model unhelpful rather than concise — a worse outcome than the bug. It went **600 → 277 words while gaining a usage example the old prompt omitted.** Shorter *and* more complete is the result that makes the other four numbers trustworthy.
+
+The script deliberately does not pass or fail. Reply length is not deterministic, one pair of numbers proves nothing, so it reports median alongside mean over five questions and a human reads it. The suite assertions are the regression guard on the wording, nothing more.
+
+**Two rules came out of reading the measured replies rather than from reasoning about the prompt** — both cases where a correct-looking rule survived the rewrite and still produced the defect:
+
+- **The code preamble.** Observed verbatim under the *new* spec: *"Here's a TypeScript `useDebounce` hook with `cancel` and `flush` functionality:"*. The existing ban on restating the question had two examples, both conversational, so a preamble in front of a code block did not read as the same move. Now explicit: *"The code block is self-describing."*
+- **The table directive**, which was the pre-rewrite bug in miniature: an absolute shape directive (*"Use tables when comparing"*) outranking the length ceiling. Now subordinated to it.
+
+**A prompt-wide consistency fix found in passing.** The spec bans em dashes, and the prompt's own prose used them — so the instruction was contradicted by the text delivering it, in the one document where the model reads *everything* as an example. Swept across all three prompt builders.
+
+`src/test/prompts.test.ts`: 23 → 29 tests, including a test that the rules the rewrite was *not* about survived it. That one matters most for the language rule: this app's users write in Hindi and Nepali, and losing *"If Nepali, respond in Nepali"* would be a far worse regression than a verbose answer.
+
+### 15.2 "donot show file content generated by ai when it is shown in side panel"
+
+Both halves were true by construction. `extractArtifacts` lifts every code block of **16+ lines** (`MIN_CODE_LINES`) into the artifact store for the right-docked canvas, and `CodeBlock` rendered the full body through Prism regardless. So the reply to *"write me a component"* was the component **twice**, and the chat became unscrollable.
+
+The collapse is conditional on the artifact actually being safely elsewhere, and that condition is a **coincidence between two modules**: the block collapses only when the store holds the id that `artifactIdForCode` derives, and the store gets its ids from the extractor walking raw markdown. Those two agreeing is the entire safety property, and nothing in either file's types would notice them drifting apart. `artifact-id-agreement.test.ts` pins the ids; `src/test/canvas-collapse.test.tsx` (9 tests) pins that the UI acts on them.
+
+The six invariants, in the order they matter:
+
+1. **Nothing is hidden before it is safely elsewhere.** `ingestArtifacts` runs at turn completion, so while the turn streams the store is empty and the body renders in full.
+2. Once ingested, the body is replaced by a reference to it.
+3. **Copy and Run do not move.** *"donot run codes until use click run btn located in side of copy btn"* is a standing requirement, so the collapse must neither push that button further away **nor fire it**. The test mocks the Pyodide bridge and asserts it is never called — which also keeps the suite from downloading ~10 MB of WASM.
+4. **The collapse is reversible.** The canvas shows one artifact at a time, so reading two blocks against each other has to stay possible.
+5. Short blocks never collapse — a six-line example is not a document.
+6. **Clearing the store un-collapses.** After a reload there is no side-panel copy to defer to, so deferring to one would hide the code entirely.
+
+### 15.3 "fix its fucked custum prompt for cision" — the vision prompt
+
+"cision" is vision: `buildVisionSystemPrompt`. The cause was structural and is the clearest instance of this section's shape — **it did not compose `responseSpecBlock()` at all.** Every length and shape rule written for the text paths simply did not exist on a turn that carried an image. So 15.1's fix, measured and green, had no effect whatsoever the moment a photo was attached.
+
+What it carried instead was a six-section template with **the condition that unlocks it two lines away, under a different heading** — the identical absolute-shape-under-a-conditional bug the response spec itself had. That is why *"what colour is the car"* came back as a document.
+
+Three fixes, and each has a test asserting the *old* text is gone as well as the new text present:
+
+- **Inherits the spec.** The 120-word ceiling, answer-first, `## Boring patterns to avoid`, the language rule and `NOTHING ELSE RENDERS` all now reach the vision path. The duplicated, already-drifted restatements it carried instead (`RESPONSE RULES:`, `FORMATTING:`) are gone — two copies of one rule is two behaviours to keep in step.
+- **The structured breakdown is gated on being asked for one**, with the trigger *inside* the section it unlocks: `## The full breakdown\n\nONLY when the user asks for one`, plus *"A specific question NEVER earns it"* and *"include ONLY the ones this image actually gives you something for."*
+- **It stops requiring a sentence about text that is not there.** The old prompt instructed: *If no text is visible, state "No visible text detected."* — on **every** image, including a photo of a dog. Now: *"Do not announce the absence of text."* OCR is conditional rather than shouted at every turn.
+
+Four tests added to `prompts.test.ts`.
+
+### 15.4 "make it capablle to read any types of files"
+
+**The report was not a missing-parser problem, and diagnosing that was the whole job.** `documents.ts` already read ~40 text extensions. The defect was at three layers, and the middle one is what produced the symptom:
+
+`Chat.tsx` filtered attachments with `files.filter((f) => !f.type.startsWith('image/') && canExtract(f))`. A file failing `canExtract` was **dropped with no toast and no context block** — while `pendingAttachments` still held it, so the attachment rendered in the composer and the *filename* still reached the model. **A model given a filename and no content does not report a problem; it answers.** That is indistinguishable from working, which is why "cannot read this file" was never the complaint — a confident answer about a file nothing had opened was.
+
+**A silent drop is worse than a visible rejection.** That is the sentence the whole change is organised around.
+
+The second layer: the picker's `accept` attribute listed 18 extensions against the extractor's ~40, and **`accept` filters the picker and nothing else** — drag-and-drop bypasses it entirely. Hence the observable absurdity that the same `.yaml` worked if dragged and could not be selected from the dialog.
+
+**Extraction is total now.** `extractDocument` has three tiers and **no "unsupported file type" branch**: a dedicated parser keyed on extension; then a name that says text; then the bytes. `canExtract` is `return !isImageFile(file);` and `Chat.tsx` is `files.filter(canExtract)`. The `accept` attribute is removed, with a comment saying why an exhaustive one would be a hand-synced second copy of the extractor's format knowledge.
+
+New parsers: **OpenDocument** (odt/ods/odp and the template variants), **epub**, **RTF**, **Jupyter notebooks**, **legacy Office scavenging**, and **archive listing**. Plus a byte-level layer: `decodeText`, `looksLikeText`, `identifyBinary`, `scavengeText`.
+
+Seven findings worth keeping, each of which changed the design:
+
+- **`extensionOf("Dockerfile") === ""`.** Listing `"dockerfile"` and `"makefile"` among the *extensions* only ever matched `something.dockerfile`. The files every repository actually contains — `Dockerfile`, `Makefile`, `LICENSE`, `README`, `CODEOWNERS` — fell through to `Cannot read . files.` They need a **basename** list, which is now `TEXT_LIKE_BASENAMES`.
+- **Magic bytes over extensions, precisely because the extension is what is missing.** `zipKind()` identifies docx/xlsx/pptx/odf/epub from zip entry names, so a `.pptx` that arrived named `attachment` still parses. That is the common case, not an exotic one: downloads lose extensions, chat apps rename files, plenty of systems never set one.
+- **UTF-16 read as UTF-8 is not merely mangled — every second byte is NUL**, so a NUL-based binary sniff calls an ordinary Windows text export "binary" and reports it unreadable. Both `decodeText` and `looksLikeText` handle BOMs first, and a BOM is treated as proof of text rather than as a hint.
+- **A binary is a fact, not an error.** `error` gets toasted at the user and tells the model something failed; `binary: true` with `detail: "MP4 video, 12.4 MB"` tells it what the file *is*. Collapsing the two produces either an invented summary or an apology for a non-problem. `buildDocumentContext` grew a third block shape that says so explicitly and ends *"Do NOT guess at, summarise, or describe its contents."* `identifyBinary` returns `null` for an honest unknown rather than guessing.
+- **An epub's reading order is the OPF spine, not the filenames.** `chap10` sorts before `chap2`, and publishers routinely name files by internal id. The extractor follows `META-INF/container.xml` → the OPF manifest → the spine, falling back to filename order in a `try/catch`.
+- **A Jupyter `outputs` array holds rendered charts as multi-megabyte base64 PNGs.** One chart can exceed the entire context budget, which is the reason `.ipynb` needs a real extractor rather than the text fallback. Image outputs are named (`Output: [image/png]`), `text/plain` is capped at 2000 chars, and **error outputs are kept in full — usually the reason the notebook was attached at all.**
+- **RTF is ASCII, so the text fallback "worked"** — and handed the model a font table ahead of every sentence, which it then quoted back as if the control words were the user's words.
+
+**Two hazards that removing the picker filter would otherwise have opened, both closed:**
+
+- Every attachment becomes a **base64 data URL** for the preview and the saved transcript, which is 4/3 of the file as a string, in memory, per attachment, times up to ten — regardless of whether extraction reads it from a bounded slice. `MAX_ATTACHMENT_BYTES = 25 MB` in `ChatInput`, above every real document (a 400-page PDF is ~10 MB, a phone photo ~5 MB) and below the sizes that hurt. **Refused per file, not in aggregate**: dropping four readable files because the fifth was a video is a worse outcome than reading four and saying why the fifth was skipped.
+- **A Firestore document is capped at ~1 MiB across all fields**, and that `url` is the whole file base64-encoded — so an oversized attachment did not merely fail to store its own preview, it made the **message** write fail. A 3 MB phone photo already did this. `MAX_PERSISTED_ATTACHMENT_CHARS = 200_000` now drops the `url` and keeps the message: losing a preview beats losing the turn.
+
+**Deliberate non-goals, each with the reason recorded in place:** archive entry *contents* are listed but not concatenated (a repository zip would be the whole context window, and the user who wants a file read can attach that file); images stay outside `canExtract` (OCR would bill every image upload — that belongs to the `ocr_image` tool); `OPAQUE_ARCHIVE_EXTENSIONS` (rar/7z/xz/dmg/deb…) are *named* rather than attempted, since no decompressor is shipped; a zip over 64 MB is described rather than opened, because jszip needs the whole file in memory.
+
+`src/test/documents.test.ts`: **26 → 48 tests.** Two old tests were **deleted rather than updated** — `"names an unsupported extension instead of throwing"` and `"survives a file with no extension at all"` — because both pinned the behaviour that *was* the bug. `"claims the formats it has extractors for"` became `"attempts every non-image file, because dropping one is invisible"`.
+
+**The suite caught a real bug in the new code**, which is the one to keep: `extractOpenDocument` returned `'a\n\tb'` where `'a\tb'` was expected for a one-row table. **An ODF table cell wraps its contents in `<text:p>`**, so the paragraph→newline rule fired inside every cell and produced a table with one column per row. Fixed by dropping the paragraph break only where it is the last thing in a cell, so genuinely multi-paragraph cells keep their internal breaks.
+
+`src/test/attachment-picker.test.tsx` (5 tests) pins the UI layer, because both halves are the kind of thing a later tidy-up reverts in good faith: **`accept` looks like a missing attribute rather than a deliberate absence**, and a size ceiling in a UI component looks like it belongs in the read path — which is exactly where it does not belong. It also asserts the `.yaml`/`Dockerfile`/`.go`/never-heard-of-it cases the old list excluded, and that an oversized file is refused *while the rest of the selection survives*.
+
+This needed one addition to `src/test/setup.ts`: jsdom has no blob store, so `URL.createObjectURL` is absent and any component showing a local preview is unrenderable — the composer builds one object URL per pending attachment inside a `useMemo`, so the throw lands during render and reads as `TypeError` from deep inside react-dom, several frames from the cause. Stubbed with a counter so two attachments get two distinct URLs, since the previews are keyed and revoked individually and a shared URL would let a test pass that should not.
+
+### 15.5 "fix websearch"
+
+Not one bug. Three, and the first is another instance of an accurate mechanism being fed a lie:
+
+1. **HTTP 202 passes `res.ok`**, which is true for anything 200–299. So the DuckDuckGo fallback accepted the **anti-bot challenge page**, parsed zero results out of it, and reported that as *"the web returned nothing."* Those two need opposite responses from the model — *"I could not check"* versus *"there is nothing to find"* — and the entire error-code taxonomy in `api/_search-providers.js` exists to keep them apart. This bug made the taxonomy lie.
+2. **`answerBox` could be `{title: null, answer: null}`** — truthy, and empty. Any caller writing `if (search.answerBox)` gets the wrong answer. Verified live against the deployment, which returned exactly that for a sports query where SerpApi sent a `sports_results` block containing none of the fields we read.
+3. **When SerpApi has no key or no quota, the only remaining provider was a scraper rate-limited by IP** — permanently so on Vercel, where the outbound address is shared with every other tenant. So "no key" meant "no search", which is **the state every fresh clone of this repo starts in.** Wikipedia and StackExchange are now keyless tiers, so the chain degrades instead of dying.
+
+`src/test/search-providers.test.ts` (21 tests) drives each provider against a **captured** response, so the suite runs offline and deterministically. That is a deliberate limit, stated in the file: it cannot tell you whether DuckDuckGo is up today. `scripts/probe-search.mjs` and `scripts/probe-search-backends.mjs` answer that live, and the fixtures are recordings of what those probes actually returned on 2026-08-22.
+
+The provider chain, result shaping and failure taxonomy are now **shared** with `vite.config.ts`'s dev-server route. That used to be a second hand-synced copy — about 170 lines whose own comments said *"mirrors api/search.js"* and which had already drifted. A search fix applied in one place now lands in both by construction.
+
+**Security constraint on that sharing, and it is load-bearing:** `api/_search-providers.js` must **never** be imported from anything under `src/`. It is imported only by `api/search.js` (serverless Node) and `vite.config.ts` (build-time Node). Same rule as `api/_failover.js`, which *is* in the browser bundle and must therefore stay dependency-free — importing `api/llm.js` from it would drag `_meter.js` → `_auth.js`, i.e. JWT verification and Redis quota, into the client.
+
+---
+
+## 16. "auth failed with models err coming and ai models response not showing" — DONE
+
+One report, and every word of it turned out to be literal. The message the user saw was
+**"Authentication failed with the model service. Please check your API key."** — shown to
+a signed-in user on the shared pool, who has no API key. And then the model stopped
+answering, permanently, until a full reload.
+
+It was not one bug. It was one true fact — *a Firebase ID token expires after an hour* —
+passing through four places that each handled it wrong, and the four failures compounded
+into a dead app rather than a retry.
+
+### 16.1 The chain
+
+A Firebase ID token lives **one hour**. So this is not an edge case: it is the eventual
+state of *every* session left open — a desktop window overnight, a laptop suspended and
+reopened, a tab from this morning.
+
+1. **`verifyFirebaseToken` returned a bare `null` from all eleven of its failure paths.**
+   Malformed, forged, wrong project, wrong issuer, bad signature, and *expired* were one
+   answer. Everything downstream inherited that flattening, because the information had
+   already been destroyed at the bottom of the stack.
+2. **So `verifyRequest` answered 401 `invalid_token`** for a token whose only problem was
+   its age. The status was defensible; the body was not, and the body is what a client
+   branches on.
+3. **Nothing on the client refreshed.** `getIdToken()` without `true` returns the SDK's
+   *cached* token — the same expired string, every time. There was no force-refresh
+   anywhere in the app, so once the hour was up, every request for the rest of the
+   session failed identically. This is the "response not showing" half, and why a reload
+   fixed it: a reload is the only thing that got a new token.
+4. **`routerError` had no branch for it,** so it fell through to
+   `friendlyHttpError(401)` — *"check your API key."* Wrong diagnosis, aimed at a thing
+   that does not exist in this code path, and unactionable. The one correct action
+   (refresh the token) was the app's job, not the user's, and the app wasn't doing it.
+
+Any one of the four would have been survivable. Together they turned a routine,
+self-healing condition into a terminal one and then misattributed it.
+
+### 16.2 Three reasons, because three different things must happen next
+
+`verifyFirebaseToken` now returns `{ok: false, reason}` where reason is one of three, and
+the split is the whole point of the return shape:
+
+| reason | server answers | who is at fault | what happens next |
+| --- | --- | --- | --- |
+| `expired` | 401 `token_expired` | nobody — this is normal | client force-refreshes and retries; **the user never learns it happened** |
+| `invalid` | 401 `invalid_token` | the credential | sign out and back in; worth telling someone |
+| `unavailable` | **503** `auth_unavailable` | **us** | wait; the session is fine and must not be thrown away |
+
+The third one is the least obvious and the one most worth having. `getGooglePublicKeys()`
+throws when Google's JWKS endpoint is unreachable — meaning **the token was never judged
+at all**. The old catch-all returned `invalid` for that, so a DNS hiccup or a Google blip
+told a user their sign-in was permanently invalid and instructed them to sign in again.
+They would, too, because the message said so — destroying a working session over an
+outage that fixes itself in seconds. A 401 is a claim about the credential, and we were
+in no position to make one. It must be a 503.
+
+A related case: a `kid` with no matching cert is reported as **`expired`**, not
+`invalid`. That is almost always Google having rotated its signing keys while our
+hour-long JWKS cache is still warm — the token is fine and the *cache* is stale — so the
+useful response is the one that makes the client fetch a fresh token whose `kid` the next
+JWKS fetch covers. Calling it invalid stranded users on a key rotation they had no part
+in.
+
+### 16.3 The clock-skew asymmetry
+
+The expiry check was `payload.exp <= now` — **zero** seconds of tolerance — sitting three
+lines above `payload.iat > now + 300`, which grants five minutes. That asymmetry was
+itself a bug: five minutes of grace for a token issued slightly in the *future*, none at
+all for one that just aged out, so a token expiring while its own request was in flight
+was refused, and so was a perfectly good token whenever the **server's** clock ran fast.
+Both ends now use `CLOCK_SKEW_S = 300`. The security property here is the RS256 signature
+check, not a stopwatch.
+
+### 16.4 Two more of the same class, found while in there
+
+Neither was reported. Both are the §15 shape again — a correct mechanism that the code
+path in question could not reach.
+
+**A valid signed-in user was silently metered as a guest.** The guard was
+`if (bearer && projectId)`, so when `FIREBASE_PROJECT_ID` was unset the branch was simply
+skipped and execution fell through to the anonymous path — which is the exact silent
+downgrade the comment eight lines below it forbids, and *worse* than the case it forbids,
+because it downgrades a **valid** user rather than a bad token. Their requests were
+attributed to a hashed IP and counted against `DAILY_LIMIT_GUEST` (10/day) instead of
+`DAILY_LIMIT_USER` (100/day), so a signed-in account started failing on its eleventh
+message with a quota message that makes no sense to someone who is signed in, and nothing
+anywhere said why. It is a deployment fault — one missing environment variable — and it
+now reads as one: 503 `auth_not_configured`, logged at `console.error`.
+
+**`/api/search` sent no token at all.** It goes through the same `applyMeter` as
+`/api/llm`, so *every* search from *every* signed-in user was metered as a guest. The
+`user` tier the quota code implements was unreachable from that path entirely. After ten
+searches in a day, every search 429'd — and because search runs mid-turn inside the agent
+loop, that failure never surfaced as a quota message. It surfaced as the model answering
+without the web results it had just asked for, with nothing on screen to explain the
+difference.
+
+The two call sites had drifted in opposite directions and each was wrong in its own way:
+`/api/llm` sent a token and could not refresh it, `/api/search` refreshed nothing because
+it sent nothing. They now share one exported `fetchAsUser`, which attaches the token and
+owns the retry. It returns `{response, errText}` rather than just the response, because
+deciding whether to retry means reading the body and `Response.text()` can only be called
+once.
+
+### 16.5 The retry is deliberately narrow
+
+One retry, only on 401, and only when the body says `token_expired`:
+
+- Retrying `invalid_token` is a loop on a credential that will never verify.
+- Retrying a 429 spends a second request out of the allowance that just ran out.
+- Retrying when the refresh returned the *same* string is a guaranteed second 401 — which
+  is what a signed-out-but-not-cleaned-up client produces.
+
+`fetchAsUser` also builds a **fresh header object per attempt** rather than mutating one
+in place. Behaviourally identical, since `fetch` reads the headers when it builds the
+request — but with a shared object both attempts point at the same one, which holds only
+the last value written. That made "the retry went out with a *different* token"
+unobservable after the fact, and it was found by the assertion that tried to observe it
+failing with `expected 'Bearer tok-new' to be 'Bearer tok-stale'`. The behaviour was
+already right; the fix is that it is now checkable.
+
+### 16.6 What was measured, and how the tests were checked
+
+**`src/test/auth-verify.test.ts` (17 tests)** — the server's decision. No signature is
+ever verified, and that is deliberate rather than a gap: the cheap structural checks
+(segments, alg, exp, iat, aud, iss, sub) all run *before* the JWKS fetch, so every
+assertion is reachable with an unsigned token and no network. Faking the RS256 leg would
+prove that `createVerify` works, which is Node's job. What is this module's job is
+deciding what each failure *means*.
+
+Two tests deserve their shape called out:
+
+- The clock-skew test pairs a 60-seconds-expired token with a **wrong audience** and
+  asserts `invalid_token`. Reaching the `aud` check *at all* proves the `exp` gate let it
+  through, because a beyond-tolerance `exp` returns before `aud` is ever read — so the
+  assertion needs no network and cannot pass for the wrong reason.
+- The three JWKS tests each load a **fresh copy** of the module via `vi.resetModules()`
+  plus a dynamic import, because `jwksCache` is module-level with a one-hour TTL: the
+  first test to populate it would otherwise satisfy the rest from cache, and they would
+  pass without exercising the branch they name. The stale-cache test additionally asserts
+  `calls.length === 1` — it is the only test that reaches the fetch, so without that
+  line a refactor that short-circuited the JWKS leg would leave it green while measuring
+  nothing.
+
+**`src/test/auth-token-recovery.test.ts` (13 tests)** — the client's recovery, driven
+through `generateRoutedResponse` rather than against `routerError`, which is not exported.
+That is the right level, because the thing worth protecting is the *pairing*: a refresh
+happens **and** the retried request carries the new token **and** the resulting message is
+the right one. A unit test on the message alone would have passed on the old code the
+moment somebody added the string.
+
+The fetch **counts** carry as much weight as the messages. `toBe(2)` proves a retry
+happened; `toBe(1)` proves one did *not* — and the second is the load-bearing half,
+because a retry-on-any-401 fix would satisfy every message assertion in the file while
+turning a dead credential into an infinite loop. Four messages are additionally asserted
+**not** to match `/API key/i`: that string is the reported bug verbatim, and asserting its
+absence is what catches a future branch being deleted and falling back through to
+`friendlyHttpError` again — which is precisely how this happened the first time.
+
+**The suite was then checked in the negative direction,** per §14.3. Making
+`isRefreshableAuthFailure` return `false` unconditionally failed **exactly three** tests
+— the three that claim to measure the retry — and left the other ten green. That is the
+result a working harness gives: the retry tests are not inert, and the ten that stayed
+green are not secretly depending on the retry. Note which ones stayed green:
+`explains token_expired without mentioning an API key` still passed with the retry
+disabled, which is correct and useful — the `routerError` branch and the retry are
+independent fixes, and neither test is masking the other's absence.
+
+Gates after the change: `npm run lint`, `npm run typecheck`, `npm run build` clean;
+`npx vitest run` → **38 files / 580 tests, 0 failures** (up from 35 / 544). And the
+security rule from §15.5 was checked empirically rather than by reasoning: the JWKS URL
+string does not appear anywhere in `dist/`, so importing `api/_auth.js` from a test file
+under `src/` did not pull JWT verification into the browser bundle.
+
+### 16.7 The honest limit
+
+Everything above is measured against the code, not against Google. No test in this repo
+presents a **real** expired Firebase ID token to a **real** deployment and watches the
+refresh succeed, because doing that needs a live project, a real signed-in user, and an
+hour of waiting. What is verified is the decision table and the client's response to each
+entry in it — which is where all four defects lived. The RS256 leg itself is unchanged and
+untested here, as it was before.
+
+### 16.8 "…while resuming history" — threading did not survive a reload
+
+The second half of the report pointed at the history path, so that got read too. The auth
+chain above accounts for the reported symptom directly — resume a conversation in a window
+that has been open over an hour, send, and nothing comes back. But a separate, real defect
+was sitting in the resume path, and it is the §15 shape again.
+
+**`parentMessageId` and `id` were drawn from different namespaces.** The client writes
+`parentMessageId` from its own state, so the value is the UUID it minted when it put the
+message on screen. The document, however, gets its id from `addDoc`, and `getMessages`
+returned `id: d.id`. So **every parent pointer read back from Firestore named an id that
+did not exist in the batch.**
+
+Nothing crashed, and that is why it lasted. `buildMessageForest` promotes an unresolvable
+parent to a root by design — its comment says *"we never lose a message"* — and a forest
+of roots linearizes back into `createdAt` order. History looked right. What was gone was
+the **tree**:
+
+- three regenerations of one turn came back as **three consecutive replies** with no
+  branch switcher, because three siblings had become three roots;
+- and the next branch created after that reload started its sibling numbering **from
+  zero**, because `saveMessage` counts existing children by querying
+  `where('parentMessageId','==',…)` and the stored ids no longer matched the one it was
+  now writing. So a conversation could hold several `siblingIndex: 0` siblings whose
+  relative order was then undefined.
+
+**Fix:** persist the client's own id as `clientId` and read it back as `id`. Message
+identity is then stable across a reload, which is what the parent pointers assumed all
+along. This is safe because **nothing in the app addresses a message document by its
+Firestore id** — messages are only ever `addDoc`'d and bulk-read by `conversationId`, so
+the auto-id was never load-bearing. Documents written before the field existed have no
+`clientId` and fall back to `d.id`, exactly as before, and read back as all-roots — the
+legacy behaviour `buildMessageForest` already documents.
+
+**Also fixed: the sibling tiebreak was dead code.** Chat.tsx's row mapping omitted
+`createdAt`, so `nodeTime()` returned 0 for every node and
+`(a.siblingIndex - b.siblingIndex) || nodeTime(a) - nodeTime(b)` could never reach its
+second term. `saveMessage`'s own comment promises that a colliding index is "tiebroken by
+createdAt"; nothing was making that true.
+
+**The mapping now lives in one place.** It was inline in Chat.tsx's load path, and the
+round-trip test below would have carried its own copy — written correctly, staying green,
+while the app's copy stayed wrong. That is the failure mode this whole section is about, so
+the mapping was extracted to `toTreeMessages` in `message-tree.ts` and both callers use it.
+One definition, one thing to be wrong.
+
+**`src/test/message-threading-roundtrip.test.ts` (6 tests)** fakes enough of Firestore to
+run the whole cycle — save, read back, build the tree — because **the round trip is the
+unit**. No single-layer test could have caught this: `message-tree.test.ts` builds forests
+from hand-written ids that resolve by construction, `firestore-reads.test.ts` asserts on
+reads in isolation, and the defect was in the seam, correct on both sides of it. The fake
+honours `where(...)` equality filters rather than returning everything, because
+`saveMessage`'s sibling-index query is real and the numbering restart was half the bug.
+
+Removing the fix fails **5 of the 6**. The one that stays green is the legacy-fallback test,
+which must pass either way by design.
+
+### 16.9 A third verification mistake, caught by the mutation check
+
+The `createdAt` tiebreak test passed **with `createdAt` deleted from the mapping**. It was
+measuring nothing.
+
+The reason is worth keeping: `getMessages` sorts its rows by `createdAt` before returning
+them, and `Array.prototype.sort` is stable. So when every sibling shares an index, the sort
+is a no-op over input that is *already* in the right order — the tiebreak has nothing left
+to decide, and its presence or absence is unobservable through the read path. The test
+drove the read path, so it could not fail.
+
+It now feeds `toTreeMessages` deliberately out-of-order rows instead, which is legitimate —
+nothing in `buildMessageForest`'s contract requires sorted input, and the tiebreak exists
+for callers that do not pre-sort. In that shape, deleting `createdAt` fails it.
+
+This is the third entry in the §14.3 family and the first one caught *by process rather
+than by luck*: every fix in §16 was mutation-checked, not just eyeballed. The two auth
+files were checked the same way — disabling `isRefreshableAuthFailure` failed exactly the
+three retry tests and left the other ten green, which is the result a working harness
+gives. Without that step, a test asserting a real property, against real code, through the
+real read path, would have shipped as a passing check on a line it never touched.
+
+**The general lesson, now stated four times because it keeps recurring in a new
+disguise** (the fourth is §17.6, found the same way this one was): confirm a test can fail
+before trusting that it passed.
+
+---
+
+## 17. "…while resuming history", part two: the canvas — DONE
+
+### 17.1 The canvas was write-only
+
+The artifact canvas was built as a listener. `ingestArtifacts` ran when a turn
+completed — `Chat.tsx:1542` and `1571`, both inside the streaming path — so the store
+filled up as you talked, and `loadMessages` called `resetArtifacts()` and left it empty.
+
+Reopening a conversation therefore showed the whole transcript beside a canvas that had
+never heard of any of it. Everything that reads the store went with it:
+
+- the "open in canvas" button on a code block was absent, because `CodeBlock` only shows
+  it for a block the store holds;
+- the toggle shortcut reported *"the canvas fills up as replies produce files or code"* over
+  a conversation that was nothing but code, because `readArtifactState().artifacts.length`
+  was 0;
+- and the collapse inverted, so reopened history rendered every block full-height inline
+  while a live session showed the same block as a card.
+
+Nothing was lost — the code was still in the message text and still rendered — which is
+why this sat unnoticed. It was the *canvas* that was gone, and only until some later reply
+happened to regenerate the same block.
+
+Fixed with `artifactsFromHistory` in `src/lib/artifacts.ts`, called once from
+`loadMessages` after the forest is built.
+
+### 17.2 Restoring faithfully, not generously
+
+The restore is not "scan the conversation and lift whatever qualifies". It is "produce what
+the live path would have produced for these messages", and three of the decisions are about
+what it therefore has to *refuse*:
+
+| Decision | Why |
+|---|---|
+| Assistant turns only | `ingestArtifacts` is only ever called on assistant text, so a user pasting thirty lines has never produced an artifact. Lifting it would make a refresh *add* a canvas entry that talking never did — a difference visible only after a reload, which is the shape of a bug. |
+| No file artifacts (`[]`, never `m.files`) | A `MessageFile` is a blob URL scoped to the tab that made it, which is why firestore-db never persisted them. A restored `file:` chip would name a file whose content can never load. A chip that fails when clicked is worse than one that is honestly absent. |
+| The flat list, not the visible branch | The store "accumulates artifacts across a whole conversation" (its own header comment) and live it does — every regeneration ingested as it completed, so an older sibling's block stays listed after a regenerate replaces it on screen. Restoring one branch would also make the collapse *inconsistent between siblings*: switch to a sibling and its code renders full-height inline while its neighbour shows a card. |
+
+The panel does **not** open on load. `ingestArtifacts` never touches `openId`, and that is
+deliberate: reopening a conversation must not seize 520px of window for a panel nobody asked
+for. Restoring the canvas means making it available, not making it appear.
+
+`src/test/artifact-history-restore.test.ts` (13 tests) pins all of it, including the branch
+decision — composed out of the same `toTreeMessages → buildMessageForest → linearizeForest`
+chain `loadMessages` uses, so "the visible branch really is smaller than the restored set" is
+measured rather than assumed.
+
+This also depends on §16.8: the artifact's `messageId` is the id of the turn that produced
+it, and before `clientId` was persisted that id changed on every reload.
+
+### 17.3 A comment that had become false
+
+`CodeBlock`'s collapse was documented as *"after a reload (which clears the store) the same
+block renders in full again, because then there is no side-panel copy to defer to."* True
+when written, and now not. The same sentence appeared as invariant 6 in
+`canvas-collapse.test.tsx`.
+
+Both are rewritten to state the narrower property they actually rest on — an empty store
+means no copy to defer to, whatever emptied it — because the invariant is unchanged and it
+is only the claim about reloads that was load-bearing prose. The assertions did not move.
+
+### 17.4 What the same investigation turned up: an image inside a fence
+
+Chasing whether the restored ids could disagree with the rendered ones surfaced a separate,
+live bug with nothing to do with the canvas.
+
+`sanitizeAssistantText` has been fence-aware since the equivalent mistake bit it three times
+(see the header of `chat-format.ts`). `extractFirstMarkdownImage` and `stripMarkdownImages`
+were plain regexes over the whole string. Ask for a README:
+
+```markdown
+# my-lib
+![build](https://img.shields.io/badge/build-passing-green)
+```
+
+That badge is *content of a code block* — text the user asked to be shown as text. Measured,
+not reasoned about:
+
+- `extractFirstMarkdownImage` returned the badge URL, so `ChatMessage` hoisted it and
+  rendered it full-size at the top of the reply under a download button, as though the
+  assistant had generated a picture;
+- `stripMarkdownImages` deleted the line from the code block the user was about to copy. A
+  silently missing line is the worst kind of wrong answer, because the code looks complete.
+
+Two more consequences of the same root cause:
+
+- `withPersistedImage`'s skip guard asks `extractFirstMarkdownImage`, so a reply whose code
+  block happened to contain an image URL looked like "there is already an image here" — and
+  the actual generated image was never persisted, disappearing on reload. That is precisely
+  the failure `withPersistedImage` was written to prevent.
+- The blank-line collapse (`\n{3,}` → `\n\n`) ran over code bodies. A body the renderer has
+  rewritten no longer hashes to the id `extractArtifacts` put in the store, which is enough
+  to make a card open nothing (§7's `artifactIdForCode`).
+
+Both helpers are now prose-only via the existing `mapProse`, and the global pattern is
+derived from the non-global one (`new RegExp(MARKDOWN_IMAGE_PATTERN.source, "gi")`) so the
+two cannot drift.
+
+### 17.5 The knock-on: closing a fence nobody closed
+
+Making extraction fence-aware creates a new way to lose an image: append it to a reply that
+was cut off mid-code-block, and the fence swallows it where the reader can no longer look.
+So `closeUnterminatedFence` terminates a dangling fence before anything is appended.
+
+That is not a patch for a self-inflicted problem — it fixes an existing one. The stall path
+appends *"The stream stalled partway through"* to a partial reply, and a stream that dies
+does it wherever it happens to be. Inside a long code block is a likely place. The one
+sentence explaining why the answer stops mid-line was being rendered in monospace as the
+last line of the script, which is where a reader is least likely to read it as an
+explanation of anything. `Chat.tsx` now closes the fence first.
+
+### 17.6 A fourth check that could not fail
+
+`closeUnterminatedFence` guards its close-detection with `lines.length > 1`, because a
+segment of one line is the opening fence and testing it against the closing pattern says it
+closes itself. The test written for that guard used ```` ```py ```` — which does not match a
+closing fence, so removing the guard left the test green. It was measuring nothing, and its
+comment claimed otherwise.
+
+Only a **bare** ```` ``` ```` exercises it. Rewritten with that input, and with the
+language-tagged case kept as its own separate test, the mutation fails it correctly.
+
+That makes **four** checks in this repo that could not fail — `npx tsc --noEmit` (§14 gate
+note), the probe count taken *after* the probes were removed (§14.3), the `createdAt`
+tiebreak driven through a pre-sorted read path (§16.9), and this one — and the **second**
+caught by the mutation check rather than by luck. The pattern across all four is worth more
+than any of them: three were written by someone who believed the check was real, and the two
+that were caught were caught by the same mechanical step, not by rereading the test.
+
+Every fix in this section was mutation-checked: the restore lifting nothing failed 8 of 13
+tests and left exactly the three "must refuse" tests green; allowing user turns failed
+exactly 1; passing `m.files` through failed exactly 1; stopping after the first assistant
+turn failed 3; reversing the order failed 3; each of the two fence-aware helpers reverted to
+its naive form failed exactly the 3 and 2 tests that name it.
+
+### 17.7 The honest limits
+
+- **The wiring is not covered.** `artifactsFromHistory` has 13 tests; the one line in
+  `loadMessages` that calls it has none, because nothing in the suite renders `Chat.tsx`
+  (1900 lines, no harness for it). A future edit changing `artifactsFromHistory(data)` to
+  `(linear)` would pass every gate. The same gap covers "the panel does not open on load":
+  what is tested is that the *store* does not open itself.
+- **File chips still do not come back.** By design (§17.2), and it is a real remaining
+  limitation, not a fixed one: a reloaded conversation shows the reply without its
+  downloads. Recovering those needs the file bytes persisted somewhere a reload can reach,
+  which is a storage decision, not a canvas one.
+- **No live measurement.** Everything here was verified in the test suite and by reading; the
+  README case was reproduced through `stripMarkdownImages`/`extractFirstMarkdownImage`
+  directly rather than by watching a browser render it.
+
+### 17.8 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **39 files / 606 tests,
+0 failures** (up from 38 / 580) · `npm run build` clean.
 
 ---
 
 ## 12. Definition of done (still the gate)
 
-- `npm run typecheck`, `npm run test`, `npm run build` all pass.
+- `npm run typecheck`, `npm run test`, `npm run build` all pass. **Note:** `npx tsc --noEmit` is *not* a typecheck here — the root `tsconfig.json` is `"files": []` plus project references, so it examines zero files. The real typecheck is the two `tsc -p` passes inside `npm run build`. See the §14 gate note.
 - `npm run verify:models` passes, including image ids.
 - A model that supports tools searches without being told to, and cites sources.
 - A model that does not support tools still answers.
@@ -310,11 +1206,14 @@ The Electron shell (§10) is done: a real window runs the real app. What is *not
 4. **Telling the model about UI it does not have.** It will emit literal `【...】` markup and the user sees garbage.
 5. **Base64-ing generated files into Firestore.** 1 MB document cap.
 6. **Forgetting `URL.revokeObjectURL`.** Blob leak.
-7. **Failing over on 401/403/404.** Hides configuration bugs behind a silent backup path.
+7. **Failing over on 401/403.** Hides configuration bugs behind a silent backup path: a rejected key that quietly works via the backup is a fault you never learn about. **404 and 410 used to be on this list and are now deliberately off it**, for opposite reasons. NVIDIA 404s a route it is merely not serving *at that moment* — measured, 404×3 then answering×3 on the same id and key minutes apart — so excluding 404 turned a transient blip into a hard user-facing error while a 503 from the same pool degraded gracefully. 410 Gone is the unambiguous case, so it fails over (another provider may still serve the model) while getting its own terminal "retired" classification instead of a "try again". What the old exclusion protected — a wrong id quietly working via a backup — is caught by `scripts/verify-models.mjs`, which probes over time and can therefore tell identity from capacity; a single request cannot, and should stop pretending it can. Full evidence in `api/_failover.js`.
 8. **Not propagating abort into tool execution.** Stop stops the stream but the tool keeps running.
 9. **jsPDF without page breaks.** Text runs off the page.
 10. **Assuming an NVIDIA model you can see is a model you can call.** build.nvidia.com lists Downloadable (self-hosted container) and Free Endpoint (NVIDIA-hosted) models side by side; only the latter resolve on `integrate.api.nvidia.com`. Every text-to-image and OCR-v2 model is Downloadable-only, which is why `/v1/genai/*` 404s. `verify-models.mjs` probes image ids live, so treat a "dead" row as "not hosted", and re-add a genai route only with that probe still in place.
 11. **Trusting a provider's `model` param without a fixed-seed diff.** Pollinations accepts any image model name and returns the same bytes for all of them — a per-model entry there would silently render default weights.
+12. **Describing a permanent failure as a temporary one.** Worse than the generic error it replaces. A 410 folded in with the transient statuses tells the user to try again about an id that will never answer: they retry, it fails, they retry tomorrow, it fails, and the app looks broken rather than the model looking retired. The same rule holds in the diagnostic scripts, where "re-run later before benching it" is advice that costs a session.
+13. **Binding one chord in two places, or binding one the browser owns.** An Electron menu accelerator fires *instead of* the renderer's keydown for the same combination, so registering both leaves dead renderer code that reads as live. And Chrome reserves Ctrl/Cmd+N, +T, +W and their Shift variants above the page — the keydown either never arrives or `preventDefault()` is ignored — so a chord that looks bound in the source can simply never fire. One owner per chord; reserved chords only via the shell menu.
+14. **Letting a "no data" state double as the error state.** Catch a failed read, log it, return — and the UI renders whatever it renders for an empty result, which is written to be reassuring. This app shipped it twice: an empty history list said "No conversations yet" to a user who had fifty, and an errored message read showed the welcome screen for a conversation with history. The second is not just cosmetic, because the app then *acts* on the empty array: a send would carry no prior turns, so the model answers a mid-thread follow-up as an opening line and that reply is persisted into a thread it never saw. Every async read needs three renderable outcomes, and a caught-and-logged exception is not a handled one. The corollary is that the fix is rarely only a panel — it is a panel **plus** blocking whatever action the empty state made available.
 
 ---
 
@@ -517,3 +1416,79 @@ A fourth was found only by testing the *teardown*, not the launch: closing the w
     **Two script verifications also came in.** `node scripts/probe-id.mjs` with no arguments printed its usage line and exited 2, which proves three things at once: the five named imports from `verify-models.mjs` all resolve (an ESM link-time failure invisible to tsc *and* eslint), the `invokedDirectly` guard stops the catalogue sweep from firing on import, and it does not `process.exit` out from under its caller.
 
     **One honest note on the numbers, because this session was entirely about hand-derived figures being wrong.** This entry originally predicted **327 tests** and entries 20–24 each recorded an expected **324**. The measured total is **325**. Neither number was ever run — 315 was the last one anybody actually observed, and every figure after it was arithmetic on top of arithmetic. The prediction was off by two in the same session whose whole subject is that a comment claiming a thing is not evidence of the thing. **Only measured totals go in this log from here.**
+
+26. **The history got a search field, and finishing it turned up three native-feel defects that had nothing to do with searching.** The feature is the small part of this entry; the three bugs found while reading around it are the part worth keeping.
+
+    **The feature.** A filter field above the conversation list, `mod+K` to reach it from anywhere, ArrowDown/ArrowUp to walk the matches, Enter to open one, Escape to clear, and a badge that reads `1/3` while filtering instead of continuing to claim `3`. Three decisions in it are not obvious:
+
+    - **Filter, then group.** Grouping first leaves date headings above nothing — a "Yesterday" label with no rows under it reads as a rendering fault, not as a filter working.
+    - **A no-match state, distinct from the empty state.** Without it this is §14.2 bug 6 arriving by a different route, and a worse version of it: the app would tell a user with fifty chats that they have none, at the exact moment they are typing to find one, with their own keystrokes as the apparent cause. The obvious reading of that screen is *"my history was just deleted."* The branch echoes the query back and offers a Clear search button.
+    - **Substring, case-insensitive, no fuzzy ranking.** These titles are model-written summaries of a first message, so the user is *recalling* a phrase they saw rather than guessing at one. A matcher that surfaces "Trip to Rome" for `tor` makes a short list feel unpredictable, and ranking would fight the date grouping, which is the organising principle people actually navigate by.
+
+    **`AnimatePresence` came off the conversation list, and that was a product fix, not a test accommodation.** Two tests failed because filtered-out rows were still in the DOM: `AnimatePresence` keeps removed children mounted until their exit animation finishes, so typing four characters quickly holds four overlapping sets of fading rows sliding left. That is a filter behaving like a wobble. No native list filter animates rows out — Finder, Mail, and every editor's file switcher update on the keystroke. `layout` stayed, because it is different in kind: a row travelling from "Yesterday" to "Today" is motion that *explains* a change rather than decorating one.
+
+    **Arrow-key navigation is the half that makes it feel native, and it is the half with the real design decisions in it** — all four written up in §14.1. The one worth repeating here is that focus deliberately does *not* move into the list, even though the rows are focusable and already answer Enter: once focus is on a row, the next character typed goes to the row instead of refining the query, and *type, look, refine* is the actual loop. The position is therefore a highlight the search field owns, which is what Spotlight and every editor's quick-open do. The cost of that choice is honest ARIA — the highlight is not announced, and the correct `combobox`/`listbox`/`option` roles are unavailable because these rows contain a real delete button — so that is written down as a trade-off rather than left looking like an omission.
+
+    **Bug 8 — a missing `Button` import in `Chat.tsx` — is written up in §14.2 and is the reason this entry exists in the shape it does.** `tsc` ran for the first time in three sessions and reported it immediately: last session's Retry panel used `<Button>` in a file that had never imported one. Nothing else could have caught it. esbuild emits an unresolved identifier as a global, so `vite build` passed; the suite never renders `Chat.tsx`; and the only code path touching the line is the one where a Firestore read has already failed. It would have turned "couldn't load this conversation" into a blank screen — inert until the failure it handles occurs, and then making that failure worse.
+
+    **Bugs 9 through 13 were found by reading, not by any gate** (all in §14.2). Three of them — 11, 12 and 13 — came out of reading every `catch` in `Chat.tsx` in one pass, which took about ten minutes and turned up a model preference that silently did not persist, a failed message write indistinguishable from a successful one, and a thrown web search that told the model nothing while the user watched a lit Search toggle. That shape now accounts for **nine of the twenty-one bugs in §14.2**, so the audit is worth repeating rather than treating as done. Note that bugs **20 and 21 are the counter-example**, and the reason the audit is not sufficient on its own: both were found by *using the running desktop app* — a shortcut that flipped a boolean nothing read, and a text-selection highlight on a decorative badge — and neither involves a failure to swallow, so no amount of `catch`-reading reaches them. The other two: The composer honoured `disabled` functionally and not visually, so the state bug 7's fix depends on presented as an unresponsive app rather than a blocked one. And the collapsed sidebar was a purely visual hide: sixteen invisible controls still in the tab order and still in the accessibility tree, with the focus ring painted 280px off the left edge of the window. The second one needed three things to be right — `visibility: hidden` (the only candidate that removes descendants from the tab order; `aria-hidden` covers only the screen reader, `tabIndex` does not cascade, and `inert` is not typed by `@types/react` 18), applied on a timer sharing one constant with the slide, and *lifted* by reading the prop directly rather than the effect-set state, because state cleared in `useEffect` lands one commit too late to focus through.
+
+    **Bug 14 is the one that matters, and it is a lesson about this suite rather than about a `catch`.** Both primary Firestore reads swallowed their failures — `catch { return [] }` — so a rejected read reached the caller as a *successful empty one*. That made the entire fix for §14.2 bugs 6 and 7 unreachable: the error panel, the Retry, the `disabled` composer, all shipped, all tested, all inert. So the dangerous half of bug 7 was still live in production with its fix in the codebase — a failed history read still rendered the WelcomeScreen over a thread with history, still left the composer live, and still sent a mid-thread follow-up to the model with no prior turns.
+
+    **Seven tests were passing on exactly this behaviour the whole time.** They drive `conversationsStatus` as a *prop*, so they proved the rendering of the error state and never once asked whether the state was reachable — the layer that decided it was not sat two files away. That is worse than no coverage, because the suite was actively asserting the thing was handled. The rule to carry: **a test that injects a state proves the rendering of that state, not its reachability**; anywhere a component takes a status prop, something must also test the code that computes it. `src/test/firestore-reads.test.ts` is that something, and it pins both directions — rejects on failure, *and* still resolves to `[]` for a genuinely empty account, or "rejects" would be satisfiable by a function that always rejects. Reverting the two `catch` blocks gives 3 failed / 3 passed; restoring gives 6 passed.
+
+    Also worth keeping: the leniency elsewhere in that file is deliberate and now says so at each site. `getMemories`, `getUserSettings`, `addMemory` and the `siblingIndex` probe still swallow, because **the discriminator is not "is this read important" but "is there a reassuring empty state that could be shown by mistake"** — nothing in the app claims "you have no memories" as a fact a user would act on, and settings have defaults.
+
+    **Then the audit was widened, on the strength of that, and it paid twice more (§14.2 #15 and #16).** Four sites an earlier grep had surfaced but nobody had read turned out to be three clean-by-design and one bug: `code-runs.ts` sets a visible error status, `documents.ts` returns an `error` field it deliberately shows the model, `ai.ts` returns `undefined` so the router can answer 401 — all three already carrying their reasoning in a comment. The fourth was `useTextToSpeech`, which had **three** defects, and the first one generalises past this codebase: **the `try/catch` was not on the failure path at all.** SpeechSynthesis reports engine trouble asynchronously on `utterance.onerror`; construction and `.speak()` do not throw. So the catch a reader inspects, and which looked like handling, could not fire — while `onerror` set a flag and stayed silent. On any machine without speech voices installed, read-aloud flashed and returned to idle, identical to *finished reading*.
+
+    The second defect there is the one worth remembering for its shape rather than its severity: `getVoices()` returns `[]` on the first call of a session, so the voice-preference block was **dead on the first click and live on every one after**. Not a failure — an inconsistency, which reads as flakiness. The third is the trap in fixing the first: `cancel()` fires `onerror('interrupted')`, so reporting every error puts a toast on every press of stop.
+
+    **Bug 16 is the worst one in the section, and not because the failure is dramatic.** Five copy call sites did `await navigator.clipboard.writeText(x); setCopied(true)` with no catch — so a rejected write skipped the tick *and left the previous clipboard contents in place*. The user pastes that, believing it is what they just copied. **Every other bug in §14.2 shows the user nothing; this one hands them something plausible and wrong**, out of the most-used button in the app, with no symptom beyond a click that seems not to have registered. `src/lib/clipboard.ts` now owns one copy path with an `execCommand` fallback and returns a boolean, so the tick is evidence rather than an assumption. The same reading pass found `res.ok` unchecked in the image download beside it — `fetch` resolves for a 404 and `.blob()` on an error page succeeds, so a dead URL **saved the error body to disk as a `.png`**. That is the same defect shape in the write direction: a failure that produces a plausible artifact instead of a message.
+
+    **Bug 17 was found on the app's front door, and it had been there since the Firebase migration.** A mistyped password reported **"There's already an account with that email."** — `shouldAutoCreateAccount` matches `wrong-password` and `invalid-credential`, so an existing user's typo fell into the auto-create branch, which then failed with `email-already-in-use`, and that was the message shown. It points at the opposite problem, on the user's own account, and destroys the one actionable fact on the way out. Underneath it, `Auth.tsx` was choosing friendly text with `error.message.includes('Invalid login')` — a **Supabase** string, in a Firebase app whose messages read `Firebase: Error (auth/invalid-credential).` Neither check had matched since the migration, and the fallback toasts `error.message` verbatim, so **every auth error any user has ever seen was a raw SDK string with a code in it**. A dead string comparison is invisible to `tsc`, to `eslint`, and to any test that does not assert the actual text — which is exactly how it outlived a migration and eleven months of use.
+
+    Also from that file: closing the Google popup was reported as an error, and now returns `{ error: null }` — the same judgement as bug 15's `interrupted` filter, that a deliberate cancellation is not a failure. And one thing deliberately *not* changed, recorded in §14.2 as a trade-off rather than fixed: auto-creating on `auth/invalid-credential` is an account-existence oracle, since Firebase collapses "no such account" and "wrong password" into that one code specifically to prevent email enumeration. The three credential codes map to a single sentence so the UI does not rebuild the distinction, but the auto-signup behaviour is product design and out of scope to change unilaterally.
+
+    Both fixes are pinned per-defect rather than in aggregate, which is the practice bug 14 forced. Reverting the awaited voice load gives 3 failed; the `onerror` reporting, 2; the cancellation filter, 2; and reverting the clipboard helper to "assume it worked" gives 5 failed / 4 passed.
+
+    **Bug 18 came from asking where else bug 16's shape lived, and the answer was next door.** The canvas rendered "v2" on a file artifact and served version 1's bytes. A file artifact's id is its filename alone, so two turns generating `report.xlsx` are two *versions* of one artifact by design — but both resolvers looked the file up with `find(f => f.filename === …)`, and `find` returns the first match in conversation order, which is the **oldest**. Ask the model to fix the spreadsheet, watch the badge tick to v2, download, get the unfixed data in a file that opens perfectly. Models name generated files predictably, so the collision is the default and not an edge case. Fixed by threading the producing message id to the canvas and resolving the version the panel is actually showing. Two smaller defects came with it: the Diff tab was offered for files, whose per-version content is `""`, so it **reported no changes between two different spreadsheets**; and Download returned silently for a missing file while the preview path threw a reported error for the identical condition two functions away.
+
+    **The most useful thing in that work was a test catching itself being useless.** The Diff-tab test passed against the *unfixed* code, because a file artifact renders `Loading…` with no tabs at all until its object URL resolves — so "no Diff tab" is trivially true on the first frame. It only surfaced because the same test also asserted the Code tab *was* present, and that half failed. The rule: **an absence assertion needs a matching presence assertion in the same test**, or it cannot tell "the thing is gone" from "nothing has rendered yet". That is §14.2 #14's lesson caught before the fact instead of a session later.
+
+    **The `Chat.tsx` catch audit is now closed out, and the last two items are both about honesty rather than behaviour.** A `.catch` on `saveMessage` was dead — `saveMessage` catches internally and returns a boolean, so it cannot reject, and a handler attached to it claimed to cover a failure that could never arrive there: §14.2 #15's shape in miniature, a handler sitting off the actual failure path. And the automatic-title write had a completely empty `.catch(() => {})`. That one is *correctly* silent and now says why: its two neighbours both report (a manual rename rolls back and toasts, a model-preference write keeps the value and toasts) because the user **asked for** those changes, whereas nobody asked for an auto-generated title, and its degradation — the truncated first-50-characters title staying in Firestore — still names the same conversation, so no false information is carried. It logs now regardless, because leaving no trail anywhere is the one thing a deliberate swallow in this codebase is not allowed to do.
+
+    **Bug 19 is bug 18's shape one step more abstract, and it was in code from earlier the same session.** `VOICE_PREFERENCES` in the read-aloud hook is a priority *ranking* — an array rather than a Set precisely because the order means something — and the selection was `voices.find(v => PREFS.some(p => v.name.includes(p)))`, which nests the loops the wrong way round. The voices array is the outer loop, so the winner is whichever voice **the platform** lists first that matches anything, and the ranking never participates. A different function that looks identical at the call site, with no failure mode at all: read-aloud works, sounds fine, and silently never honours the preference. The generalisation that found it — *a data structure whose form implies semantics nothing implements* — is the reusable part, and it is the same move that produced 18 from 16: take a fixed bug, name the class it belongs to, look for other members. Four tests, all delivering voice lists whose platform order **contradicts** the ranking, because that is the only arrangement the two implementations disagree on — which is exactly why the existing eleven passed against the defect. Reverting gives 4 failed / 11 passed, all four reporting the same wrong voice: the last-ranked one, chosen for being listed first.
+
+    **Gates, measured.** `npx vitest run` → **30 files, 452 tests, 0 failures** (was 21/325 at entry 25; 73 of the 127 new tests are this session's — 11 for filtering, 3 for the collapsed drawer, 8 for walking the results, 6 for the firestore reads, 11 for read-aloud plus 4 for its voice ranking, 9 for the clipboard, 12 for the auth messages, 7 for the artifact file versions, and 2 earlier in the session). Measured at each stage rather than predicted and reconciled later: entry 25's rule. `npx tsc -p tsconfig.app.json --noEmit` and `npx tsc -p tsconfig.node.json --noEmit` → **0 on both**, re-run after the last edits.
+
+    `npx eslint .` → **0 errors, 0 warnings across the project**, after roughly a dozen classifier rejections spread over the session. `npx vite build --mode desktop` → **42.36s**, main chunk **2,546.97 kB / 773.68 kB gzip** (was 40.77s / 2,539.61 kB), and `dist/index.html` confirmed emitting `src="./assets/…"`, so the base is relative and it will mount under `file://`.
+
+    **A gate I had been recording as unmet for three sessions does not exist.** Every entry since 23 has carried `node --check` on `electron/main.cjs`, `electron/preload.cjs`, `scripts/probe-id.mjs` and `scripts/verify-models.mjs` forward as blocked, on the assumption that it was the only thing parsing those four files — `eslint.config.js` scopes its one rule block to `files: ["**/*.{ts,tsx}"]`, so I had read them as unlinted.
+
+    That reading was wrong, and the check is cheap enough that it should have been made three sessions ago instead of reasoned about: in flat config, `eslint .` lints `**/*.js`, `**/*.cjs` and `**/*.mjs` by default, and a file matched by *no* config object is still **parsed** — it just has no rules enabled. Confirmed two ways rather than argued: `--format json` on `electron/main.cjs` and `scripts/probe-id.mjs` returns result objects for both (an ignored file would not appear), and a deliberately broken `scripts/__parse-probe.mjs` made `eslint .` **exit 1 with `Parsing error: Unexpected keyword 'return'`**, then clean again once removed. So `eslint 0` above *is* a syntax gate on all four files plus `api/*.js`, and `node --check` was never load-bearing. Item retired.
+
+    **Still not run: the Electron launch.** The frameless window has still never been observed running — that remains the single unsatisfied clause of the §14 gate, and the `requestAnimationFrame` defer in `focusHistorySearch` is reasoned rather than observed until it is. The launcher is written (`/tmp/flyer-launch.sh`: Electron pointed at `electron/main.cjs` directly because `main` is only injected at packaging time by `electron-builder.yml`'s `extraMetadata`, `FLYER_DESKTOP_DEV` left unset so it `loadFile`s `dist/index.html`, `xvfb-run` when there is no display) and every attempt to execute it was rejected by the classifier.
+
+27. **"auth failed with models err coming, and ai models response not showing while resuming history"** — one report, two unrelated bugs, written up as §16. Both were in code that looked correct.
+
+    **The auth half was a single reason where three were needed.** A Firebase ID token lives one hour, so a tab left open overnight *will* present an expired one — the normal case, not the failure case. The server collapsed every auth outcome into one 401, so the client could not tell "refresh and retry silently" from "the credential is wrong" from "the verifier itself is down", and picked the worst reading of the three: it surfaced an API-key error. A user with a perfectly good session was told the app's provider configuration was broken. Now `expired` → 401 `token_expired` (client force-refreshes; the user never learns it happened), `invalid` → 401 `invalid_token`, and `unavailable` → **503** `auth_unavailable`, because a verifier outage is our fault and the session must not be thrown away. The retry is deliberately one attempt, only on 401, only on `token_expired` — a retry loop against a genuinely invalid credential is how a login screen turns into a spinner.
+
+    **Clock skew is asymmetric and the handling now is too.** A token that looks *not yet valid* is the same physical situation as one that looks expired — the two clocks disagree — but only one of them is safe to auto-retry, because a fast local clock means retrying will keep failing until the clock moves.
+
+    **The history half was an id namespace collision.** `addDoc` mints its own document id, so the client-generated UUID written into `parentMessageId` referred to nothing after a reload: every message reloaded as a root, the forest flattened, and branch switching had nothing to switch between. Fixed by persisting `clientId` and reading `id: data.clientId || d.id`, which keeps every conversation written before the fix readable.
+
+    **And §16.9, the entry that changed how the rest of the brief gets checked.** The `createdAt` tiebreak test passed with `createdAt` deleted from the mapping. `getMessages` pre-sorts its rows and `Array.prototype.sort` is stable, so through the read path the tiebreak had nothing left to decide — a test asserting a real property, against real code, through the real read path, measuring nothing. It was caught because every fix in §16 was mutation-checked rather than eyeballed, and that is now the rule (§14.3).
+
+28. **The artifact canvas was write-only, and chasing that turned up an image bug with nothing to do with it.** Written up as §17. Both halves are the same shape as bug 16's: a failure that shows the user something plausible instead of an error.
+
+    **The canvas was built as a listener.** `ingestArtifacts` ran when a turn completed, and `loadMessages` called `resetArtifacts()` and left it empty — so reopening a conversation full of code showed the transcript beside a canvas that claimed it held none. Every affordance reading the store went with it: no "open in canvas" button, a toggle shortcut reporting "the canvas fills up as replies produce files or code" over nothing but code, and the collapse **inverted**, so history rendered every block full-height inline while a live session showed cards. Nothing was lost, which is exactly why it went unnoticed for as long as it did — the canvas was gone, not the code, and only until some later reply happened to regenerate the same block.
+
+    `artifactsFromHistory` re-derives it, and the interesting part is what it refuses: **assistant turns only** (lifting a user's pasted code would make a refresh *add* an entry that talking never produced), **no file artifacts** (a `MessageFile` is a blob URL scoped to its tab, so a restored chip would name a file whose content can never load), and **the flat stored list rather than the visible branch** — the store accumulates across a whole conversation, and restoring one branch would make the collapse inconsistent *between siblings*, so clicking the branch arrow would show one sibling's code inline next to the other's card and look like the switcher broke rendering.
+
+    **The image bug was found by asking whether the restored ids could disagree with the rendered ones.** They could not, but `extractFirstMarkdownImage` and `stripMarkdownImages` were plain regexes over the whole string — and `sanitizeAssistantText` has been fence-aware since the equivalent mistake bit it three times. Ask for a README. Its first line after the title is a badge, inside a ```markdown fence, and therefore *text the user asked to be shown as text*. Measured: the badge was hoisted and rendered full-size under a download button as though the assistant had generated a picture, **and deleted from the code block the user was about to copy**. Two more consequences of the same root: `withPersistedImage`'s skip guard read it as "an image is already here", so the real generated image was never persisted and vanished on reload — the exact failure that function exists to prevent — and the blank-line collapse rewrote code bodies, which is enough to break the content hash a canvas card resolves by.
+
+    **`closeUnterminatedFence` closes the loop, and fixes something that was already broken.** Once extraction stops looking inside fences, anything appended to a reply that died mid-code-block is swallowed by that fence. The stall path was already doing this: the one sentence explaining why an answer stops mid-line was rendered in monospace as the last line of the script, where a reader is least likely to read it as an explanation of anything.
+
+    **Its guard test was the fourth check in this repo that could not fail** (§17.6) — written specifically to cover a one-line guard, using an input that could not reach it, with a comment claiming otherwise. Second one the mutation check caught rather than luck. All nine behaviours in this entry were mutation-checked and each produced the predicted failure count, with the "must refuse" tests correctly staying green under the lifting mutations.
+
+    **Gates.** `npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **39 files / 606 tests, 0 failures** (from 38 / 580) · `npm run build` clean, 1m 12s. **The honest gap:** `artifactsFromHistory` has 13 tests, and the one line in `loadMessages` that calls it has none — nothing in the suite renders `Chat.tsx`, so changing `artifactsFromHistory(data)` to `(linear)` would pass every gate in this list.

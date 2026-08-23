@@ -19,9 +19,65 @@ export default {
       },
     },
     extend: {
+      // Platform UI font stack, mirroring `body` and `h1-h6` in src/index.css.
+      // Both halves must stay in sync with that file: these arrays generate the
+      // `font-sans` / `font-display` utilities, and index.css sets the same stack
+      // as the inherited default, so a disagreement shows up as headings in one
+      // family and body copy in another.
+      //
+      // The webfonts these used to name (Inter / Space Grotesk) are no longer
+      // loaded — the Google Fonts `@import` was removed in the native-look pass
+      // because it blocks first paint, fails offline, and costs a third-party
+      // request on every launch of an installed desktop app.
+      //
+      // `display` is intentionally the *same* stack rather than a second family:
+      // the platform already picks its display cut (SF Pro Display, Segoe UI
+      // Variable Display) from `system-ui` by optical size, so naming a different
+      // face would override that with a guess. `font-display` is therefore kept
+      // as a live utility — four components use it — but it now means "heading
+      // type" rather than "different typeface", and the visual hierarchy comes
+      // from the weight and tracking those components already set.
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        display: ['Space Grotesk', 'system-ui', 'sans-serif'],
+        sans: [
+          'system-ui',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          'Segoe UI',
+          'Roboto',
+          'Helvetica Neue',
+          'Arial',
+          'Noto Sans',
+          'sans-serif',
+          'Apple Color Emoji',
+          'Segoe UI Emoji',
+          'Segoe UI Symbol',
+          'Noto Color Emoji',
+        ],
+        display: [
+          'system-ui',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          'Segoe UI',
+          'Roboto',
+          'Helvetica Neue',
+          'Arial',
+          'Noto Sans',
+          'sans-serif',
+        ],
+        // Code and any tabular/numeric readout. Previously absent, which meant
+        // `font-mono` fell back to Tailwind's default stack — that starts with
+        // `ui-monospace`, so it was already reasonable, but it put Menlo ahead of
+        // the Windows/Linux entries. Named explicitly so the code viewer and the
+        // token/latency readouts resolve the same way the platform terminal does.
+        mono: [
+          'ui-monospace',
+          'SFMono-Regular',
+          'SF Mono',
+          'Menlo',
+          'Consolas',
+          'Liberation Mono',
+          'monospace',
+        ],
       },
       colors: {
         border: "hsl(var(--border))",

@@ -1,6 +1,13 @@
 import { defineConfig, loadEnv, type ViteDevServer, type Plugin } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import path from "path";
+// Node-only, and it must stay that way: this module is also imported by
+// api/search.js and has no dependencies, so that importing it can never pull
+// server-side auth or metering code toward the browser bundle. Importing it *here*
+// is safe because vite.config.ts runs at build time, never in the client. Never
+// import it from anything under src/.
+// @ts-expect-error - plain JS module shared with the serverless route, no .d.ts
+import { runSearch } from "./api/_search-providers.js";
 
 // Env available to the /api proxy handlers. Vite does NOT load .env into
 // process.env, so we populate this from loadEnv() at config time. Falls back
@@ -454,172 +461,39 @@ async function proxySearch(
   res: DevRes,
   body: Record<string, unknown>,
 ) {
-  const serpKey =
-    env("VITE_SERP_API_KEY") || env("VITE_SERPAPI_API_KEY") || env("SERPAPI_API_KEY");
   const query = ((body.query as string) || "").trim();
-
   if (!query) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "`query` is required" }));
     return;
   }
 
-  const num = Math.min(Number(body.num) || 6, 10);
-
-  // Mirrors api/search.js: track *why* search failed so the client can tell the
-  // model "search is broken" rather than "the web returned nothing".
-  let serpError: string | null = null;
-
-  if (serpKey) {
-    try {
-      const params = new URLSearchParams({ q: query, api_key: serpKey, engine: "google", num: String(num) });
-      const upstream = await fetch(`https://serpapi.com/search.json?${params}`);
-      if (!upstream.ok) {
-        serpError = `serpapi_http_${upstream.status}`;
-        console.error("[search] SerpApi error:", upstream.status);
-      }
-      if (upstream.ok) {
-        const data = (await upstream.json()) as SerpResponse;
-        const organic = (data.organic_results || []).map((r) => ({
-          title: r.title || "",
-          link: r.link || "",
-          snippet: r.snippet || "",
-          source: r.source || null,
-          date: r.date || null,
-        }));
-
-        const news = (data.news_results || []).map((r) => ({
-          title: r.title || "",
-          link: r.link || "",
-          snippet: r.snippet || "",
-          source: r.source || null,
-          date: r.date || null,
-        }));
-
-        const topStories = (data.top_stories || []).map((r) => ({
-          title: r.title || "",
-          link: r.link || "",
-          snippet: r.original_snippet || r.snippet || "",
-          source: r.source || null,
-          date: r.date || null,
-        }));
-
-        // News and top-stories first (mirrors api/search.js): for time-sensitive
-        // queries these carry the fresh, dated items, while organic results skew
-        // toward evergreen pages.
-        const combined = [...news, ...topStories, ...organic];
-        const seenLinks = new Set<string>();
-        const results = combined.filter((r) => {
-          if (!r.title || (!r.snippet && !r.link)) return false;
-          if (r.link && seenLinks.has(r.link)) return false;
-          if (r.link) seenLinks.add(r.link);
-          return true;
-        }).slice(0, num);
-
-        const ab = data.answer_box || data.knowledge_graph || data.sports_results;
-        const overview = data.ai_overview?.text_blocks
-          ?.map((b) => b.snippet)
-          .filter(Boolean)
-          .join(" ");
-        const answerBox = ab
-          ? { title: ab.title || ab.name || null, answer: ab.answer || ab.snippet || ab.description || null }
-          : overview
-          ? { title: "AI Overview", answer: overview }
-          : null;
-
-        const related = [
-          ...(data.related_questions || []).map((q) => q.question),
-          ...(data.related_searches || []).map((r) => r.query),
-        ].filter(Boolean).slice(0, 4);
-
-        // Only treat this as a win if something usable came back. A 200 with an
-        // empty organic array (over-specific query, SerpApi quota soft-fail)
-        // used to short-circuit the DuckDuckGo fallback and hand the model an
-        // empty result set, which reads to the user as "search is broken".
-        if (results.length > 0 || answerBox?.answer) {
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ query, answerBox, results, related }));
-          return;
-        }
-        serpError = "serpapi_zero_results";
-        console.warn("[search] SerpApi returned 0 usable results — trying DuckDuckGo.");
-      }
-    } catch (err) {
-      serpError = "serpapi_fetch_failed";
-      console.warn("[search] SerpApi fetch failed, falling back to DuckDuckGo:", err);
-    }
-  } else {
-    serpError = "serpapi_key_missing";
-    console.error("[search] No SerpApi key configured — falling back to DuckDuckGo.");
-  }
-
-  // DuckDuckGo free search fallback
-  try {
-    const ddg = await searchDuckDuckGoDev(query, num);
-    if (ddg && ddg.results.length > 0) {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(ddg));
-      return;
-    }
-  } catch (err) {
-    console.error("[search] DuckDuckGo fallback error:", err);
-  }
+  // The provider chain, the result shaping and the failure taxonomy are shared with
+  // the deployed route in api/search.js. This used to be a second, hand-synced copy
+  // of all three — about 170 lines whose own comments said "mirrors api/search.js",
+  // and which had already drifted from it. A search fix applied in one place now
+  // lands in both by construction.
+  //
+  // env() rather than process.env: the dev server loads .env through Vite's loader,
+  // which applies the mode-specific files (.env.development, .env.local) that
+  // process.env alone does not see.
+  const payload = await runSearch(
+    query,
+    Number(body.num) || 6,
+    {
+      SERPAPI_API_KEY: env("SERPAPI_API_KEY"),
+      VITE_SERP_API_KEY: env("VITE_SERP_API_KEY"),
+      VITE_SERPAPI_API_KEY: env("VITE_SERPAPI_API_KEY"),
+    },
+    // Annotated because it has to be: tsconfig.node.json is `strict`, and
+    // `runSearch` arrives from an untyped `.js` module as `any`, so the callback
+    // parameter gets no contextual type and trips TS7006. `string` is what the
+    // JSDoc on runSearch promises — one line per failed provider tier.
+    (msg: string) => console.warn(msg),
+  );
 
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ query, answerBox: null, results: [], related: [], error: serpError || "no_results" }));
-}
-
-async function searchDuckDuckGoDev(query: string, num: number) {
-  const url = `https://lite.duckduckgo.com/lite/`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-    body: new URLSearchParams({ q: query }).toString(),
-  });
-  if (!res.ok) return null;
-  const html = await res.text();
-
-  // Mirrors parseDuckDuckGoLite in api/search.js — the lite layout is a flat
-  // table of rows (a result-link anchor, then a result-snippet cell), so the
-  // two are paired positionally. Note the class attributes are single-quoted.
-  const stripTags = (s: string) => s.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-  const decodeEntities = (s: string) =>
-    s.replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&lt;/g, "<")
-     .replace(/&gt;/g, ">").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
-
-  const snippets: string[] = [];
-  const snippetRe = /<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/g;
-  for (let m = snippetRe.exec(html); m; m = snippetRe.exec(html)) {
-    snippets.push(decodeEntities(stripTags(m[1])));
-  }
-
-  const results: Array<{ title: string; snippet: string; link: string; source: string | null; date: null }> = [];
-  const linkRe = /<a[^>]*href="([^"]+)"[^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>/g;
-  let i = 0;
-  for (let m = linkRe.exec(html); m && results.length < num; m = linkRe.exec(html), i++) {
-    const href = decodeEntities(m[1]);
-    const redirect = href.match(/[?&]uddg=([^&]+)/);
-    let link = "";
-    if (redirect) {
-      try { link = decodeURIComponent(redirect[1]); } catch { link = ""; }
-    } else if (href.startsWith("//")) {
-      link = `https:${href}`;
-    } else if (href.startsWith("http")) {
-      link = href;
-    }
-    const title = decodeEntities(stripTags(m[2]));
-    if (!title || !link) continue;
-    results.push({ title, snippet: snippets[i] || "", link, source: "DuckDuckGo Web", date: null });
-  }
-
-  const answerBox = results.length > 0 && results[0].snippet
-    ? { title: "Web Summary", answer: results[0].snippet }
-    : null;
-  return { query, answerBox, results, related: [] as string[] };
+  res.end(JSON.stringify(payload));
 }
 
 // ---------------------------------------------------------------------------

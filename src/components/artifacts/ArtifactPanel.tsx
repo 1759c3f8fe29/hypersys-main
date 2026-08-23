@@ -14,6 +14,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { diffLines, diffSummary } from "@/lib/artifact-diff";
+import { copyText } from "@/lib/clipboard";
 import type { Artifact } from "@/lib/artifacts";
 import { RunButton, RunOutput } from "@/components/chat/CodeRunner";
 import { isRunnableLanguage, useCodeRunner } from "@/components/chat/use-code-runner";
@@ -209,7 +210,13 @@ function ViewSwitch({
     { id: "preview", label: "Preview", shown: PREVIEWABLE.has(artifact.language) },
     { id: "markdown", label: "Render", shown: MARKDOWN_LANGS.has(artifact.language) },
     { id: "code", label: "Code", shown: true },
-    { id: "diff", label: "Diff", shown: artifact.history.length > 1 },
+    // Not for files, and not as a matter of taste. A file artifact's per-version
+    // `content` is `""` by design — files defer their bytes to an object URL the
+    // panel fetches on open, and only the newest one is ever fetched — so a
+    // two-version file diffed `""` against `""` and rendered an empty diff view,
+    // reporting "no changes" between two genuinely different spreadsheets. A
+    // comparison the data cannot support should not be offered (§14.2 #18).
+    { id: "diff", label: "Diff", shown: artifact.history.length > 1 && artifact.kind !== "file" },
   ];
   const shown = tabs.filter((t) => t.shown);
   return (
@@ -246,7 +253,7 @@ function Preview({ content, kind }: { content: string; kind: string }) {
 function CodeView({ content, language }: { content: string; language: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    await navigator.clipboard.writeText(content);
+    if (!(await copyText(content))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

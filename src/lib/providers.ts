@@ -223,7 +223,14 @@ export const MODELS: ModelSpec[] = [
     // HISTORY: answered http-503 on a verify-models run in 3.10 — a saturated
     // capacity pool, which is what a 550B-A55B deployment does under load, not a
     // bad id (it has answered on every other run). Left featured and selectable
-    // for the same reason glm-5.2 was: one transient status is not evidence.
+    // on the principle glm-5.2 established: one transient status is not evidence.
+    //
+    // That principle is worth stating carefully now that glm-5.2 has itself been
+    // hidden, because the two cases are not the same and the difference is the
+    // whole point. glm-5.2 was kept through an unresponsive probe and vindicated;
+    // it was hidden only once a 410 Gone arrived *and* its id disappeared from
+    // /v1/models. What retires a model here is an unambiguous permanent status
+    // corroborated by a second independent signal — never a count of bad days.
     //
     // It did expose a real bug, though. 503 was treated as transient by both
     // RETRY_STATUSES and FAILOVER_STATUSES in api/llm.js but as permanent by the
@@ -263,16 +270,39 @@ export const MODELS: ModelSpec[] = [
     id: "glm-5.2",
     label: "GLM 5.2",
     description: "Zhipu's frontier open reasoning model.",
-    // Hosted by NVIDIA: carries the "Free Endpoint" badge on build.nvidia.com
-    // and is present in the live /v1/models catalogue as z-ai/glm-5.2.
+    // Was hosted by NVIDIA. It is gone.
     //
-    // HISTORY: in 3.8 this id verified but would not return a completion — 6 POST
-    // attempts (50-170s each, stream and non-stream, with and without the
-    // nca-allowed-client header) got no HTTP response at all. It answers now: 7.8s
-    // to first byte on the standard probe in 3.9. So that was a cold or saturated
-    // capacity pool, not a bad id, and the model is left selectable. Kept on the
-    // record because it is the precedent for reading a single unresponsive probe
-    // as provisional rather than as grounds for deleting a model.
+    // HISTORY, in order, because the shape of it is the lesson:
+    //   3.8 — the id verified but would not return a completion. 6 POST attempts
+    //         (50-170s each, stream and non-stream, with and without the
+    //         nca-allowed-client header) got no HTTP response at all.
+    //   3.9 — it answered in 7.8s on the standard probe. So 3.8 was a cold or
+    //         saturated capacity pool, not a bad id, and the model stayed
+    //         selectable. This became the precedent for reading one unresponsive
+    //         probe as provisional rather than as grounds for deletion.
+    //   now — HTTP 410 Gone, and the id has disappeared from /v1/models (the
+    //         catalogue went 103 → 102 entries).
+    //
+    // 410 is categorically different from everything above and from the 404s that
+    // NVIDIA also returns for transient unavailability. 404 means "not found",
+    // which a loaded pool and a retired model produce identically — that
+    // ambiguity is exactly why 404 fails over and why one 404 is never evidence.
+    // 410 means "was here, deliberately removed, do not ask again", and the
+    // vanished catalogue entry is the corroborating second signal. Two independent
+    // observations agreeing is the bar this file uses before hiding anything, and
+    // 410 plus a shrunken catalogue clears it.
+    //
+    // So: hidden, not deleted. It was `featured: true` with a SINGLE route, which
+    // meant every user who picked it from the front of the model list got a hard
+    // failure with no failover path — the worst configuration a dead id can have.
+    // Kept in MODELS (rather than moved to LEGACY_MODEL_IDS) because getModel
+    // resolves against the full list, so every message already in Firestore that
+    // carries this id keeps its "GLM 5.2" byline. A legacy alias would also be
+    // *unreachable* — MODEL_BY_ID is checked first — and the suite asserts against
+    // exactly that shadowing.
+    //
+    // To restore: confirm `z-ai/glm-5.2` is back in /v1/models, then drop `hidden`
+    // and re-probe. A 410 does not come back on its own.
     routes: [{ provider: "nvidia", modelId: "z-ai/glm-5.2" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -281,7 +311,7 @@ export const MODELS: ModelSpec[] = [
     isReasoning: true,
     emoji: "🔷",
     kind: "Chat",
-    featured: true,
+    hidden: true,
   },
   {
     id: "llama-70b",
@@ -297,8 +327,10 @@ export const MODELS: ModelSpec[] = [
     // Not `featured` and not selectable: this id is in NVIDIA's catalogue but its
     // POST never came back — 4 probe attempts across 3.9, two of them with a full
     // 60s deadline, while nine other NVIDIA routes on the same key answered in
-    // under 2s. Unlike glm-5.2 above (one bad day, fine now) this has never
-    // answered here.
+    // under 2s. It has never once answered here — which is what separates it from
+    // glm-5.2 above, whose bad run in 3.8 was followed by a clean 7.8s probe. (That
+    // model is now hidden too, but for an unrelated and much clearer reason: a 410
+    // and a vanished catalogue entry.)
     //
     // Hidden rather than deleted, which is the whole reason the flag is worth
     // having: three LEGACY_MODEL_IDS entries resolve to `llama-70b`
@@ -471,15 +503,22 @@ export const MODELS: ModelSpec[] = [
     // names its weights and must obey the rule strictly.
     //
     // The exception is load-bearing, because one of the two routes is unusable as a
-    // primary. nemotron-nano-12b-v2-vl over twelve probes in 3.9-3.11:
+    // primary. nemotron-nano-12b-v2-vl over sixteen probes in 3.9-3.12:
     //
     //   1722ms, timeout, ok, http-500, timeout, 3197ms,
-    //   51473ms, 24981ms, 7718ms, http-500, http-500, 54826ms
+    //   51473ms, 24981ms, 7718ms, http-500, http-500, 54826ms,
+    //   timeout, timeout, http-500, http-500
     //
-    // Seven of twelve answered — and three of those seven took longer than the 22s
+    // Seven of sixteen answered — and three of those seven took longer than the 22s
     // api/llm.js gives a non-final route, two of them longer than the whole 50s
     // CHAIN_DEADLINE_MS. So "answers" and "answers in time" are different numbers
-    // here, and the useful one is the second: roughly four of twelve.
+    // here, and the useful one is the second: roughly four of sixteen.
+    //
+    // The last four on that list are the 3.12 additions and every one of them is a
+    // failure — two timeouts and two http-500s, the second 500 from a
+    // verify-models.mjs run rather than a targeted probe, so it is not one bad
+    // moment observed twice. Four more measurements have not changed the shape of
+    // the distribution; they have made the good days look more like the outliers.
     //
     // The 8B has answered every probe it has ever been given (5777ms most recently).
     //
@@ -493,7 +532,7 @@ export const MODELS: ModelSpec[] = [
     // asked. The decision was weighed against 2.1s when half the observed failures
     // cost ten times that.
     //
-    // With the real distribution, 12B-first spends most requests waiting: a third
+    // With the real distribution, 12B-first spends most requests waiting: a quarter
     // of them eat 22s of nothing and then the 8B's 5.8s, and a further slice
     // "succeed" at 25-55s, which is worse than failing over would have been. The
     // expected dead wait exceeds the entire successful latency of the fallback.
@@ -514,10 +553,12 @@ export const MODELS: ModelSpec[] = [
     // third of the time. Better than a hard failure, not much better.
     //
     // FLIP IT BACK only on evidence of a different distribution: five consecutive
-    // clean probes *all under 22s*, which at the current rate is a fluke of about
-    // 1 in 250. `node scripts/probe-id.mjs nvidia/nemotron-nano-12b-v2-vl --times 5`
-    // is that measurement, and it flags any run over 22s explicitly, because a route
-    // that answers at 51s looks green in a probe and fails over in production.
+    // clean probes *all under 22s*, which at the current in-budget rate of four in
+    // sixteen is a fluke of about 1 in 1000 — and the streak counter is at zero, not
+    // partway there, because the four most recent probes on record all failed.
+    // `node scripts/probe-id.mjs nvidia/nemotron-nano-12b-v2-vl --times 5` is that
+    // measurement, and it flags any run over 22s explicitly, because a route that
+    // answers at 51s looks green in a probe and fails over in production.
     routes: [
       { provider: "nvidia", modelId: "nvidia/llama-3.1-nemotron-nano-vl-8b-v1" },
       { provider: "nvidia", modelId: "nvidia/nemotron-nano-12b-v2-vl" },

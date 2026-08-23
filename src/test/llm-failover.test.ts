@@ -29,6 +29,7 @@ import {
   FAILOVER_STATUSES,
   RETRY_STATUSES,
   OVERLOAD_STATUSES,
+  GONE_STATUSES,
   CHAIN_DEADLINE_MS,
   FIRST_BYTE_TIMEOUT_MS,
 } from "../../api/llm.js";
@@ -230,6 +231,32 @@ describe("callProvider deadlines", () => {
     expect(FAILOVER_STATUSES.has(404)).toBe(true);
     expect(RETRY_STATUSES.has(404)).toBe(false);
   });
+
+  // The 410 mirror of the test above, and the pairing is the point: both statuses
+  // fail over and neither retries, but they arrive there from opposite arguments.
+  // 404 does not retry because the measured 404s came six seconds apart, so a
+  // backoff buys nothing *in practice*. 410 does not retry because the provider has
+  // stated the id is withdrawn, so a backoff cannot buy anything *in principle* —
+  // which is why the two are not folded into one status class despite behaving
+  // identically at this layer.
+  it("does not retry a 410, but does fail over from one", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve({ ok: false, status: 410, text: () => Promise.resolve("Gone") }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = callProvider(args());
+    await vi.advanceTimersByTimeAsync(CHAIN_DEADLINE_MS);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe(410);
+    // It fails over because a model one provider has retired may still be served by
+    // another, and every route on a ModelSpec is the same model rather than a
+    // substitute — so trying the next leg is not swapping the weights out.
+    expect(FAILOVER_STATUSES.has(410)).toBe(true);
+    expect(RETRY_STATUSES.has(410)).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -269,7 +296,6 @@ describe("classifyFailure", () => {
     }
   });
 
-  // A timeout has its own, better message. If 504 ever joined OVERLOAD_STATUSES the
   // Same bug as the 503 one above, found the same way and one status later. An
   // all-404 chain fell through to `all_providers_failed`, which reports the raw
   // upstream body — so a model NVIDIA had merely stopped serving for a few minutes
@@ -301,6 +327,72 @@ describe("classifyFailure", () => {
     expect(classifyFailure([attempt(404), attempt(500, "boom")]).error).toBe(
       "all_providers_failed",
     );
+  });
+
+  // The third instance of the same bug, and the first one caught before a user saw
+  // it: without its own branch an all-410 chain falls to `all_providers_failed` and
+  // pastes the raw upstream body into the chat, exactly as 503 and 404 did.
+  //
+  // The near miss is worse than the generic branch, though, which is why this is
+  // tested rather than trusted. 410 is close enough to 404 in shape that the
+  // tempting fix is to fold it in with the transient statuses above — and then the
+  // app tells the user to try again in a moment about an id that will never answer
+  // again. They retry, it fails, they retry tomorrow, it fails. Measured on
+  // z-ai/glm-5.2, which returned 410 and vanished from /v1/models in one window.
+  it("reports an all-410 chain as retired rather than temporarily unserved", () => {
+    const { error, status, detail } = classifyFailure([
+      attempt(410, '{"detail":"Gone"}'),
+      attempt(410, '{"detail":"Gone"}'),
+    ]);
+    expect(error).toBe("model_retired");
+    // 410 rather than the 404 branch's 503: there is no argument for softening a
+    // deliberate withdrawal into "service unavailable".
+    expect(status).toBe(410);
+    expect(detail).not.toContain("Gone");
+  });
+
+  // The distinction the branch exists for, asserted as an absence. A message that
+  // said "try again" would pass every other test in this file.
+  it("does not invite the user to retry a retired model", () => {
+    const { detail } = classifyFailure([attempt(410)]);
+    expect(detail).toMatch(/retired/i);
+    expect(detail).not.toMatch(/try again|in a moment|later/i);
+    // Same frozen-client constraint as the all-404 detail: routerError() falls
+    // through to `parsed.detail` for a code it has not heard of, and the desktop
+    // bundles in release/ point at the deployed API — so this string IS the message
+    // on those builds, and has to read as prose.
+    expect(detail.length).toBeGreaterThan(40);
+  });
+
+  // One leg withdrawn and another merely unserved is not enough to tell the user the
+  // model is gone. Guards the `every` in both branches against being relaxed to a
+  // `some`, which would look like a harmless generalisation.
+  it("does not call a mixed 404/410 chain retired", () => {
+    expect(classifyFailure([attempt(404), attempt(410)]).error).toBe("all_providers_failed");
+    expect(classifyFailure([attempt(410), attempt(500, "boom")]).error).toBe(
+      "all_providers_failed",
+    );
+  });
+
+  // The two invariants written down on GONE_STATUSES in api/_failover.js. Both are
+  // one-line edits away from being false and neither would fail any other test:
+  // dropping 410 from FAILOVER_STATUSES leaves a working backup route untried, and
+  // adding it to RETRY_STATUSES spends a 600ms/1500ms backoff on a closed door.
+  it("makes every gone status fail over, and none of them retry", () => {
+    expect(GONE_STATUSES.size).toBeGreaterThan(0);
+    for (const status of GONE_STATUSES) {
+      expect(FAILOVER_STATUSES.has(status), `${status} must fail over`).toBe(true);
+      expect(RETRY_STATUSES.has(status), `${status} must not retry`).toBe(false);
+    }
+  });
+
+  // Gone and overload must stay disjoint, or the ordering inside classifyFailure
+  // decides the message: the overload branch is tested first, so an overlap would
+  // classify an all-410 chain as "busy, try again" and its own branch never runs.
+  it("keeps the gone bucket out of the overload bucket", () => {
+    for (const status of GONE_STATUSES) {
+      expect(OVERLOAD_STATUSES.has(status), `${status} must not read as overload`).toBe(false);
+    }
   });
 
   // A timeout has its own, better message. If 504 ever joined OVERLOAD_STATUSES the
@@ -340,7 +432,15 @@ describe("classifyFailure", () => {
   });
 
   it("always pairs an error code with a usable detail string", () => {
-    const chains = [[], [attempt(0)], [attempt(503)], [attempt(504)], [attempt(500, "x")]];
+    const chains = [
+      [],
+      [attempt(0)],
+      [attempt(503)],
+      [attempt(504)],
+      [attempt(404)],
+      [attempt(410)],
+      [attempt(500, "x")],
+    ];
     for (const chain of chains) {
       const { error, status, detail } = classifyFailure(chain);
       expect(error, "error code must be set").toBeTruthy();

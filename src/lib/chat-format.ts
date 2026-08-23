@@ -5,7 +5,8 @@
 // generate_image tool, neither of which needs a regex.
 //
 // ---------------------------------------------------------------------------
-// Everything below tidies a model's raw text for display. One rule governs it:
+// Everything below tidies a model's raw text for display — or, in
+// `speechTextFromMarkdown`'s case, for a speech engine. One rule governs it:
 // COSMETIC REWRITES STOP AT A CODE FENCE.
 //
 // That rule is here because breaking it caused three measured defects, all of
@@ -26,19 +27,59 @@
 // response to be the envelope.
 
 const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*\]\((data:image\/[^)]+|https?:\/\/[^)\s]+)\)/i;
+// The same pattern, global, derived from the one above so the two cannot drift.
+// Safe as a module-level global: `String.prototype.replace` resets `lastIndex`
+// when it finishes, and it is never used with `.test`/`.exec`.
+const MARKDOWN_IMAGE_PATTERN_G = new RegExp(MARKDOWN_IMAGE_PATTERN.source, "gi");
 
+/**
+ * The first image the *reader* sees as an image, so the renderer can hoist it out
+ * of the prose and show it properly.
+ *
+ * Prose only. Both of these read as pedantry until you ask for a README:
+ *
+ *     Here's your README:
+ *     ```markdown
+ *     # my-lib
+ *     ![build](https://img.shields.io/badge/build-passing-green)
+ *     ```
+ *
+ * That badge is *content of a code block* — text the user asked to be shown as
+ * text. Matching it anywhere in the string meant the reply rendered with the badge
+ * image blown up at the top under a download button, as though the assistant had
+ * generated it, while `stripMarkdownImages` deleted the line from the code block
+ * the user was going to copy. One naive regex, and a README came back missing its
+ * badges with a stray picture stapled to the front.
+ *
+ * `sanitizeAssistantText` has been fence-aware since the equivalent bug bit it
+ * three times over (see the header of this file); these two were the same class,
+ * missed because an image inside a fence sounds like a thing that does not happen.
+ */
 export function extractFirstMarkdownImage(raw: string): string | undefined {
   if (!raw) return undefined;
-  return raw.match(MARKDOWN_IMAGE_PATTERN)?.[1];
+  for (const segment of segmentByFence(raw)) {
+    if (segment.kind !== "prose") continue;
+    const match = segment.text.match(MARKDOWN_IMAGE_PATTERN);
+    if (match) return match[1];
+  }
+  return undefined;
 }
 
+/**
+ * Remove the images the renderer hoists, so the same picture is not shown twice.
+ *
+ * Prose only, for the reason above: a fenced image is text. The blank-line
+ * collapse is prose-only for a second reason — it rewrote code bodies, and a code
+ * body the renderer has rewritten no longer hashes to the id `extractArtifacts`
+ * put in the artifact store, which is enough to make a block's canvas card open
+ * nothing (see artifactIdForCode).
+ */
 export function stripMarkdownImages(raw: string): string {
   if (!raw) return '';
 
-  return raw
-    .replace(/!\[[^\]]*\]\((data:image\/[^)]+|https?:\/\/[^)\s]+)\)/gi, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  return mapProse(raw, (prose) =>
+    prose.replace(MARKDOWN_IMAGE_PATTERN_G, '').replace(/\n{3,}/g, '\n\n'),
+  ).trim();
 }
 
 /**
@@ -57,13 +98,57 @@ export function stripMarkdownImages(raw: string): string {
  * broken one. Text that already carries an image is returned untouched — the
  * explicit Image-model path writes its own markdown, and a second copy would
  * make the first unreachable to a reader looking at raw content.
+ *
+ * An unterminated fence is closed before appending, because the round trip above
+ * is now a claim about *prose*: `extractFirstMarkdownImage` stopped looking inside
+ * fences, so an image appended to a reply that was cut off mid-code-block would be
+ * swallowed by that fence and never recovered — the exact disappearance this
+ * function exists to prevent, reintroduced through the back door. Closing it is
+ * also just correct: an unterminated fence renders everything after it as code, so
+ * whatever we append was never going to be read as an image anyway.
  */
 export function withPersistedImage(text: string, imageUrl?: string): string {
   if (!imageUrl || !/^https?:\/\//i.test(imageUrl)) return text;
   if (extractFirstMarkdownImage(text)) return text;
-  const body = (text || '').trim();
+  const body = closeUnterminatedFence((text || '').trim());
   const markdown = `![Generated image](${imageUrl})`;
   return body ? `${body}\n\n${markdown}` : markdown;
+}
+
+/**
+ * Terminate a fence the text opened and never closed, so anything appended after
+ * it reads as prose rather than as more code.
+ *
+ * A truncated reply is the normal case here, not a pathological one: a stream that
+ * dies does it wherever it happens to be, and inside a long code block is a
+ * likely place. Everything appended afterwards — a generated image's markdown, the
+ * note explaining that the stream stalled — otherwise lands inside the block and
+ * is shown in monospace as though the model had written it there. The stall note
+ * was the visible version of that: the one sentence telling the user why their
+ * answer stops mid-line was itself rendered as the last line of the code.
+ *
+ * Returns the text unchanged when there is nothing to close, which is almost
+ * always. The closing marker matches the opener's character and length, as
+ * CommonMark requires and as `segmentByFence` reads it.
+ */
+export function closeUnterminatedFence(text: string): string {
+  if (!text) return text;
+  const segments = segmentByFence(text);
+  const last = segments[segments.length - 1];
+  if (!last || last.kind !== 'code') return text;
+
+  const lines = last.text.split('\n');
+  const opener = lines[0].match(/^\s*(`{3,}|~{3,})/);
+  if (!opener) return text;
+  const marker = opener[1];
+  // A segment of one line is the opening fence alone; it cannot also be closing
+  // itself, and testing it against the close pattern would say it does.
+  if (lines.length > 1) {
+    const char = marker[0];
+    const closes = new RegExp(`^\\s*${char}{${marker.length},}\\s*$`);
+    if (closes.test(lines[lines.length - 1])) return text;
+  }
+  return `${text}\n${marker}`;
 }
 
 // ── Fence-aware segmentation ────────────────────────────────────────────────
@@ -272,4 +357,69 @@ export function sanitizeAssistantText(raw: string): string {
   if (wrapper) text = wrapper[2];
 
   return mapProse(text, tidyProseSpacing).trim();
+}
+
+// ── Speech ──────────────────────────────────────────────────────────────────
+
+/**
+ * The text a read-aloud button should actually pronounce.
+ *
+ * This lived in `useTextToSpeech` as a private `.replace` chain whose idea of a
+ * code block was `` /`{1,3}[^`]*`{1,3}/ `` — a fourth private fence rule, and like
+ * every other one, narrower than `segmentByFence`. Measured against the shipped
+ * chain, four of six inputs sent code to the speaker:
+ *
+ *   - **unterminated fence** — spoke the language tag and the whole body
+ *     (`"py import os for i in range(10): print(i)"`). This is the common one: it
+ *     is the state of every reply cut short mid-block.
+ *   - **four-backtick fence** — spoke the inside (`"md heading"`).
+ *   - **a backtick inside the code** — spoke fragments (`"{a}"`).
+ *   - **tilde fence** — spoke the *fence markers themselves*, out loud, twice.
+ *
+ * Two deliberate differences from the old chain, both of which it got wrong:
+ *
+ * 1. **Inline code keeps its words.** Dropping fenced blocks wholesale is right —
+ *    nobody wants a script read to them — but the old rule also deleted the
+ *    contents of inline spans, so "Run `npm ci` then `npm test`" was spoken as
+ *    "Run then now." Inline spans are short by construction; the backticks are
+ *    what must go, not the words between them.
+ * 2. **Images are removed before links.** `[text](url)` → `$1` used to run first,
+ *    and it matches the `[alt](url)` *inside* `![alt](url)` — so the image strip
+ *    on the next line had nothing left to match and every generated image was
+ *    announced as "!Generated image".
+ */
+export function speechTextFromMarkdown(raw: string): string {
+  const prose = segmentByFence(raw || "")
+    .filter((segment) => segment.kind === "prose")
+    .map((segment) => segment.text)
+    .join("\n");
+
+  return (
+    prose
+      // Images first: see (2) above. Alt text is not speech.
+      .replace(/!\[.*?\]\(.*?\)/g, "")
+      // Link text is; the URL is not.
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      // Inline code: drop the ticks, keep the words. See (1) above.
+      .replace(/`+([^`]*)`+/g, "$1")
+      .replace(/\*\*/g, "")
+      .replace(/\*/g, "")
+      .replace(/#{1,6}\s/g, "")
+      .replace(/[-•►▶→➤]/g, "")
+      // Emoji and pictographic symbols, plus the zero-width joiners and variation
+      // selectors that bind them (Unicode-aware, no surrogate-pair pitfalls).
+      .replace(/\p{Extended_Pictographic}/gu, "")
+      .replace(/‍/g, "")
+      .replace(/[\u{FE00}-\u{FE0F}]/gu, "")
+      // A blank line is a sentence boundary to a speech engine; a single newline
+      // is not. Removing a fenced block leaves the blank lines that surrounded it,
+      // which is how the pause lands in the right place — but only for an
+      // *interior* block. Trimming first is what stops a reply that ends in one
+      // from trailing a bare "." after its last word.
+      .trim()
+      .replace(/\n{2,}/g, ". ")
+      .replace(/\n/g, " ")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim()
+  );
 }

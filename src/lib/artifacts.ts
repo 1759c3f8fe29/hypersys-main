@@ -252,6 +252,57 @@ export function extractArtifacts(
 }
 
 /**
+ * The artifacts a *stored* conversation implies, in the order a live session
+ * would have ingested them.
+ *
+ * The canvas accumulates by listening to turns complete, so reopening a
+ * conversation left it empty: the code the assistant wrote yesterday was still in
+ * the transcript, but the panel had never heard of it. Every affordance that reads
+ * the store went with it — the "open in canvas" button on each block, the
+ * Ctrl-Shift-C toggle (which reported "nothing to show" on a conversation full of
+ * code), and the side-by-side reading the canvas exists for. Nothing was lost,
+ * which is why this took a while to notice; it was only unreachable until the next
+ * reply happened to regenerate the same block.
+ *
+ * Two deliberate restrictions, both of them "match what the live path does":
+ *
+ *   • **Assistant turns only.** `ingestArtifacts` is called on the assistant's
+ *     final text and nowhere else, so a user pasting thirty lines of code has
+ *     never produced an artifact. Lifting it here would make the canvas gain an
+ *     entry on reload that was not there before it — a difference that reads as a
+ *     bug precisely because it appears only after a refresh. (The user bubble also
+ *     renders its content as plain pre-wrapped text, not markdown, so there is no
+ *     collapsed-card affordance for it to disagree with.)
+ *
+ *   • **No file artifacts.** `files` is `[]` here, not `m.files`, and that is not
+ *     an oversight to tidy up later: a `MessageFile` is a blob URL scoped to the
+ *     tab that created it, which is why firestore-db never persisted them. A
+ *     `file:` artifact restored from history would list a filename whose content
+ *     can never load — a chip that fails when clicked is worse than a chip that
+ *     is honestly absent.
+ *
+ * The caller passes every stored message, not just the visible branch — the store
+ * accumulates across a conversation, and live it really does: each regeneration
+ * ingested when it completed, so an older sibling's block stays listed after a
+ * regenerate replaces it on screen. Restoring one branch would also make the
+ * collapse inconsistent between siblings.
+ *
+ * Duplicates are left in rather than pre-collapsed: `mergeArtifacts` already
+ * treats a second copy of identical code as the same version, and it is the only
+ * intended consumer.
+ */
+export function artifactsFromHistory(
+  messages: Array<{ id: string; role: string; content?: string | null }>,
+): Artifact[] {
+  const out: Artifact[] = [];
+  for (const m of messages) {
+    if (m.role !== "assistant" || !m.content) continue;
+    out.push(...extractArtifacts(m.content, [], m.id));
+  }
+  return out;
+}
+
+/**
  * Merge a turn's fresh artifacts into the running set. Same-id artifacts become
  * a new version of the existing one (history grows, `version` increments) only
  * when the content actually changed — regenerating a file with identical bytes

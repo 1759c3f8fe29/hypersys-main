@@ -157,6 +157,22 @@ export function useArtifacts(): State {
 }
 
 /**
+ * Subscribe to one question — "does the canvas hold this artifact" — rather than to
+ * the whole store.
+ *
+ * `CodeBlock` needs this for every fenced block in the conversation, and the store
+ * replaces its state object on every ingest, so `useArtifacts` there would re-render
+ * every code block in a long chat once per turn, each one re-running Prism over its
+ * body. This returns a boolean instead, and `useSyncExternalStore` bails out of the
+ * render when the snapshot is `Object.is`-equal to the last one, so a block only
+ * re-renders on the ingest that actually lifted it.
+ */
+export function useHasArtifact(id: string | null): boolean {
+  const read = () => (id ? state.artifacts.some((a) => a.id === id) : false);
+  return useSyncExternalStore(subscribe, read, read);
+}
+
+/**
  * Read the store outside React. The imperative writers above (`ingestArtifacts`,
  * `openArtifact`, …) are already callable from anywhere, so the read side needs a
  * non-hook counterpart or the store's invariants — the width clamp, what

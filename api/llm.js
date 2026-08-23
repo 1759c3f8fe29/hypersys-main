@@ -19,7 +19,7 @@
 
 import { applyGuard } from "./_guard.js";
 import { applyMeter } from "./_meter.js";
-import { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES } from "./_failover.js";
+import { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES, GONE_STATUSES } from "./_failover.js";
 
 // Keep in step with PROVIDERS in src/lib/providers.ts. Server-side only, so no
 // VITE_-prefixed key is read here by preference — those get inlined into the
@@ -80,7 +80,7 @@ const PROVIDER_ENDPOINTS = {
 // Re-exported because src/test/llm-failover.test.ts and src/test/providers.test.ts
 // both import them from this module by name, and because this is the honest place
 // to look for them: it is the file whose behaviour they govern.
-export { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES };
+export { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES, GONE_STATUSES };
 
 // Backoff between retries against the same provider. Most catalogue models have a
 // single route, so without this a 529 blip surfaces as a hard failure — the
@@ -361,6 +361,33 @@ export function classifyFailure(attempts) {
       status: 503,
       detail:
         "This model isn't being served right now. That is usually temporary — try again in a moment, or pick another model.",
+    };
+  }
+
+  // Every leg answered 410 Gone. Placed AFTER the 404 branch, and the ordering is
+  // load-bearing in the other direction than it looks: a mixed chain (one leg 404,
+  // one leg 410) matches neither `every` and correctly falls through to the generic
+  // message, because we do not know from a mixed result whether the model is
+  // retired everywhere or merely unserved somewhere.
+  //
+  // The message says "retired" and does NOT suggest trying again, which is the
+  // entire reason this branch exists rather than folding 410 in with 404 above.
+  // 410 is the one status a provider gives that is a promise about the future, and
+  // telling the user to retry an id that will never answer sends them into a loop
+  // that looks like a bug in the app.
+  //
+  // Same constraint as the 404 branch on the prose: routerError() in src/lib/ai.ts
+  // falls through to `parsed.detail` for codes it does not recognise, and the
+  // frozen desktop bundles in release/ point at the deployed API — so this exact
+  // sentence is what an older client renders.
+  if (attempts.every((a) => GONE_STATUSES.has(a.status))) {
+    return {
+      error: "model_retired",
+      // 410 rather than 503: the status is the honest one, and unlike the 404
+      // branch there is no argument for softening it into "service unavailable".
+      status: 410,
+      detail:
+        "This model has been retired by its provider and is no longer available. Pick another model — your conversation is unaffected.",
     };
   }
 

@@ -21,6 +21,11 @@
 //    like data loss (brief trap 9).
 //  - docx and pdf share `parseMarkdownBlocks`, so a heading is a heading in both.
 //  - csv quoting is not optional: an unquoted comma silently shifts a column.
+//  - the code/prose split comes from `chat-format`'s `segmentByFence`, deliberately
+//    the same rule the renderer and the artifact extractor use. This file used to own
+//    a private fence regex and it disagreed with all of them; see parseMarkdownBlocks.
+
+import { segmentByFence } from "./chat-format";
 
 export type FileFormat = "txt" | "md" | "json" | "csv" | "xlsx" | "docx" | "pdf" | "pptx";
 
@@ -111,8 +116,79 @@ function splitTableRow(line: string): string[] {
     .map((cell) => cell.trim());
 }
 
+/**
+ * A fenced segment, minus its fence lines, as a code block.
+ *
+ * `segmentByFence` hands over the whole segment including its opening fence and its
+ * closing one when there is one — an unterminated fence runs to the end of the text,
+ * which is the normal state of a truncated reply and must still produce a code block
+ * rather than swallow the document.
+ *
+ * The language is the **first token** of the info string, so ```` ```js {1,3} ```` and
+ * ```` ```python title="app.py" ```` name `js` and `python`. The old rule demanded the
+ * info string be a single token and failed the whole block otherwise.
+ */
+function codeBlockFromSegment(segment: string): MdBlock {
+  const lines = segment.split("\n");
+  const opener = lines[0].match(/^\s*(?:`{3,}|~{3,})\s*(\S+)?/);
+  const lang = opener?.[1];
+  const body = lines.slice(1);
+  if (body.length && /^\s*(?:`{3,}|~{3,})\s*$/.test(body[body.length - 1])) body.pop();
+  return { type: "code", text: body.join("\n"), lang };
+}
+
+/**
+ * Markdown → block list, for the docx / pdf / md writers.
+ *
+ * The code/prose split is delegated to `segmentByFence` rather than done here, and
+ * that is a fix rather than a tidy-up. This function used to carry its own fence rule
+ * — `/^\s*```+\s*(\S+)?\s*$/` — and a second parser for "where does code start and
+ * end" diverges in exactly one direction: narrower than the real one. Measured against
+ * `segmentByFence`, three ordinary inputs produced corrupt documents, and all three
+ * corruptions are the kind that open fine and read wrong:
+ *
+ *   • **A `~~~` fence was not a fence at all.** The block became paragraphs, `~~~python`
+ *     and `~~~` appeared as literal body text, and the code's own contents were parsed
+ *     as markdown — a Python comment `# initialise` became an **H1 heading in the
+ *     exported document**, `- item` became a bullet.
+ *   • **An info string of two tokens** (```` ```js {1,3} ````, ```` ```py title="app.py" ````,
+ *     both of which models emit constantly) did the same — and then the *closing* ```
+ *     was read as an opening fence, so every paragraph after the block was swallowed
+ *     into a code box, or dropped entirely when the block was last.
+ *   • **A nested fence closed early.** The inner ``` of a ````` ````md ````` block ended
+ *     it, so content of the example escaped its container and became real document
+ *     structure, and the tail was swallowed as code again.
+ *
+ * `segmentByFence` gets all three right (it matches CommonMark's "closing fence at
+ * least as long as the opener" rule and accepts both fence characters), is already
+ * tested, and is the rule the renderer and the artifact extractor use — so a document
+ * export now agrees with what the user saw on screen. That agreement is the actual
+ * requirement here; a private fence rule could never satisfy it.
+ */
 export function parseMarkdownBlocks(markdown: string): MdBlock[] {
-  const lines = (markdown || "").replace(/\r\n/g, "\n").split("\n");
+  const normalized = (markdown || "").replace(/\r\n/g, "\n");
+  const blocks: MdBlock[] = [];
+
+  for (const segment of segmentByFence(normalized)) {
+    if (segment.kind === "code") {
+      blocks.push(codeBlockFromSegment(segment.text));
+      continue;
+    }
+    blocks.push(...parseProseBlocks(segment.text));
+  }
+
+  return blocks;
+}
+
+/**
+ * The line-oriented parser, over prose only.
+ *
+ * Every lookahead in here (the table separator row, the table body scan) stays within
+ * one prose segment, which is what makes the split above safe: a table cannot span a
+ * code fence, so nothing that needs the next line is ever asked to look past one.
+ */
+function parseProseBlocks(text: string): MdBlock[] {
+  const lines = text.split("\n");
   const blocks: MdBlock[] = [];
   let paragraph: string[] = [];
 
@@ -125,22 +201,6 @@ export function parseMarkdownBlocks(markdown: string): MdBlock[] {
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
-
-    // Fenced code. Consume to the closing fence, or to EOF if the model never
-    // closed it — an unterminated fence must not swallow the rest as a paragraph.
-    const fence = line.match(/^\s*```+\s*(\S+)?\s*$/);
-    if (fence) {
-      flushParagraph();
-      const lang = fence[1];
-      const body: string[] = [];
-      i += 1;
-      while (i < lines.length && !/^\s*```+\s*$/.test(lines[i])) {
-        body.push(lines[i]);
-        i += 1;
-      }
-      blocks.push({ type: "code", text: body.join("\n"), lang });
-      continue;
-    }
 
     if (!line.trim()) {
       flushParagraph();

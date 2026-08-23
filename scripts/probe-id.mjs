@@ -53,10 +53,21 @@
 //                                   503 — re-probe, in a later session, before
 //                                   touching the catalogue.
 //   http-401 / http-403             The key, not the model. Nothing to re-probe.
+//   http-410                        The exception to everything above: a verdict,
+//                                   not a hint, and the only one on this list. 410
+//                                   Gone says the id was served and was
+//                                   deliberately withdrawn — a claim about the
+//                                   future, where 404 is a claim about right now.
+//                                   Nothing to re-probe; re-running it later cannot
+//                                   change the answer. Measured on z-ai/glm-5.2,
+//                                   which returned 410 *and* disappeared from
+//                                   /v1/models in the same window (103 → 102).
 //
 // A 404 is worth acting on only when it persists across *separate sessions*, not
 // across attempts within one run: three 404s six seconds apart are one measurement
-// of one bad moment, not three measurements.
+// of one bad moment, not three measurements. A 410 inverts that: one is enough,
+// though it is still worth checking the id has left /v1/models, because two
+// independent signals is the bar for pulling anything out of the sidebar.
 //
 // What a 404 does mean for certain is that the turn degrades differently, and this
 // is why 404 was added to FAILOVER_STATUSES in 3.11 (see api/_failover.js). Before
@@ -195,8 +206,49 @@ async function main() {
       anyDead = true;
       const identity = kinds.some((k) => k.kind === "identity");
       const auth = kinds.some((k) => k.kind === "auth");
+      const gone = kinds.some((k) => k.kind === "gone");
       console.log(`  ${RED}never answered${RESET} ${DIM}(${states.join(", ")})${RESET}`);
-      if (identity) {
+      // `gone` is checked before the other two, and on `some` rather than `every`,
+      // because a single 410 anywhere in the run is a fact and the others are
+      // suspicions. A 404 on attempt 2 does not un-retire a model that returned 410
+      // on attempt 1; it just means the pool answered the second knock differently.
+      if (gone) {
+        console.log(
+          `  ${DIM}http-410. The one verdict this script can reach on a first run. 404 is${RESET}`,
+        );
+        console.log(
+          `  ${DIM}ambiguous on NVIDIA — see below — but 410 Gone is a claim about the future:${RESET}`,
+        );
+        console.log(
+          `  ${DIM}the id was served, it was deliberately withdrawn, it will not answer again.${RESET}`,
+        );
+        console.log(
+          `  ${DIM}Re-running --times 5 tomorrow cannot change this, which is exactly what the${RESET}`,
+        );
+        console.log(
+          `  ${DIM}capacity advice below would have told you to do before this branch existed.${RESET}`,
+        );
+        console.log(
+          `  ${DIM}Mark it \`hidden: true\` in providers.ts rather than deleting the entry, so${RESET}`,
+        );
+        console.log(
+          `  ${DIM}messages already sent under that model still render their byline. Confirm it${RESET}`,
+        );
+        console.log(
+          `  ${DIM}has left the provider's /v1/models first: that is a second independent${RESET}`,
+        );
+        console.log(
+          `  ${DIM}signal, and two is the bar. Measured on z-ai/glm-5.2 — 410 and 103 → 102${RESET}`,
+        );
+        console.log(`  ${DIM}entries in the same window.${RESET}`);
+        console.log(
+          `  ${DIM}410 fails over (api/_failover.js) because another provider may still serve${RESET}`,
+        );
+        console.log(
+          `  ${DIM}the model, but it never retries: knocking twice on a closed door is pure${RESET}`,
+        );
+        console.log(`  ${DIM}latency. An all-410 chain surfaces as "model_retired".${RESET}`);
+      } else if (identity) {
         console.log(
           `  ${DIM}http-404. Tempting to read as "no such model", and NVIDIA does list ids it${RESET}`,
         );

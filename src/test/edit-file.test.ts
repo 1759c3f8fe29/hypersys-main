@@ -34,7 +34,16 @@ function ctxWith(attachments: ToolContext["attachments"] = []): ToolContext {
   return { modelId: "test-model", artifacts: {}, attachments };
 }
 
-describe("executeEditFile", () => {
+// Five of the eight tests below generate a real document (pptx, docx, pdf) through
+// the same generator the app ships, which is the point — a mocked generator would
+// prove nothing about format defaulting. That is genuine CPU work: ~500ms for the
+// pptx case when this file runs alone, and past the 5s default when all 32 test
+// files run in parallel on a loaded machine. It failed exactly that way once.
+//
+// The timeout goes on this describe rather than on `testTimeout` in the Vitest
+// config, because a global raise would also stop every real hang in every other
+// suite from being reported as one.
+describe("executeEditFile", { timeout: 30_000 }, () => {
   const knownId = "att-1";
 
   it("rejects an attachment_id that was never uploaded, listing the real ids", async () => {

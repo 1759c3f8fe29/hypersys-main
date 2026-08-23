@@ -18,6 +18,8 @@ import {
   stripMarkdownImages,
   extractFirstMarkdownImage,
   withPersistedImage,
+  closeUnterminatedFence,
+  speechTextFromMarkdown,
 } from "@/lib/chat-format";
 
 describe("segmentByFence", () => {
@@ -175,6 +177,107 @@ describe("markdown image helpers", () => {
   });
 });
 
+// An image inside a fence is content, not an image.
+//
+// "Write me a README" is all it takes: the reply is a ```markdown block, and a
+// README's first line after the title is usually a badge. Both helpers were plain
+// regexes over the whole string, so that badge was hoisted and rendered full-size
+// at the top of the reply under a download button — as though the assistant had
+// generated a picture — and deleted from the code block the user was about to copy.
+// The README came back missing its badges with a stray image stapled to the front.
+//
+// The same class of bug that made `sanitizeAssistantText` fence-aware three times
+// over (see this file's other describes, and the header of chat-format.ts). It was
+// missed here because an image inside a code fence sounds like something that does
+// not happen, and then someone asks for a README.
+describe("markdown image helpers are fence-aware", () => {
+  const README = [
+    "Here's your README:",
+    "",
+    "```markdown",
+    "# my-lib",
+    "",
+    "![build](https://img.shields.io/badge/build-passing-green)",
+    "",
+    "Install with npm.",
+    "```",
+    "",
+    "Want a CI badge too?",
+  ].join("\n");
+
+  it("does not hoist a badge that is part of a code block", () => {
+    expect(extractFirstMarkdownImage(README)).toBeUndefined();
+  });
+
+  it("does not delete it from the block either", () => {
+    // The user copies this block. A silently missing line is the worst kind of
+    // wrong answer, because the code looks complete.
+    expect(stripMarkdownImages(README)).toContain("![build](https://img.shields.io/badge");
+  });
+
+  it("still finds and strips an image in the prose around a fence", () => {
+    const mixed = `Here it is ![shot](https://x/y.png)\n\n\`\`\`js\nconst a = 1;\n\`\`\``;
+    expect(extractFirstMarkdownImage(mixed)).toBe("https://x/y.png");
+    expect(stripMarkdownImages(mixed)).not.toContain("![shot]");
+    expect(stripMarkdownImages(mixed)).toContain("const a = 1;");
+  });
+
+  it("prefers a prose image over an earlier fenced one", () => {
+    // Order matters and the fenced one comes first, so a "first match wins" scan
+    // that merely skipped fences *after* finding something would still fail.
+    const both = `\`\`\`md\n![badge](https://b/1.png)\n\`\`\`\n\nAnd here: ![real](https://r/2.png)`;
+    expect(extractFirstMarkdownImage(both)).toBe("https://r/2.png");
+  });
+
+  it("leaves blank lines inside a fence alone", () => {
+    // The collapse used to run over the whole string. A rewritten code body no
+    // longer hashes to the id the artifact store holds, which is enough to make
+    // the block's canvas card open nothing (see artifactIdForCode).
+    const spaced = `text\n\n\`\`\`py\na = 1\n\n\n\nb = 2\n\`\`\``;
+    expect(stripMarkdownImages(spaced)).toContain("a = 1\n\n\n\nb = 2");
+  });
+});
+
+describe("closeUnterminatedFence", () => {
+  it("closes a fence the text opened and never closed", () => {
+    expect(closeUnterminatedFence("```py\nx = 1")).toBe("```py\nx = 1\n```");
+  });
+
+  it("matches the opener's character and length", () => {
+    expect(closeUnterminatedFence("~~~~sh\nls")).toBe("~~~~sh\nls\n~~~~");
+  });
+
+  it("leaves a closed fence, and plain prose, untouched", () => {
+    const closed = "```py\nx = 1\n```";
+    expect(closeUnterminatedFence(closed)).toBe(closed);
+    expect(closeUnterminatedFence("just prose")).toBe("just prose");
+    expect(closeUnterminatedFence("")).toBe("");
+  });
+
+  it("closes an opening fence with nothing after it", () => {
+    expect(closeUnterminatedFence("```py")).toBe("```py\n```");
+  });
+
+  it("closes a bare fence, which is its own opening line and closes nothing", () => {
+    // This is the case the one-line guard exists for, and the only one: a bare
+    // ``` with no language tag *does* match the closing pattern, so without the
+    // guard the segment is read as already closed and an unterminated fence is
+    // left in place — swallowing whatever gets appended after it.
+    //
+    // Written as a separate test because the language-tagged version above cannot
+    // fail on that guard (```py does not match a close), and a check that cannot
+    // fail is worse than none — the first draft of this file had exactly that,
+    // with a comment claiming it covered the guard.
+    expect(closeUnterminatedFence("```")).toBe("```\n```");
+    expect(closeUnterminatedFence("prose\n\n```")).toBe("prose\n\n```\n```");
+  });
+
+  it("only closes the last fence, not every earlier one", () => {
+    const text = "```js\na\n```\n\nthen\n\n```py\nb";
+    expect(closeUnterminatedFence(text)).toBe(`${text}\n\`\`\``);
+  });
+});
+
 // The bug: an image made by the `generate_image` tool survived until the page
 // reloaded and then vanished. Only the text is persisted, and on load
 // `extractFirstMarkdownImage` is the only thing that recovers an image from it —
@@ -211,6 +314,27 @@ describe("withPersistedImage", () => {
     expect(withPersistedImage("File.", "blob:http://localhost/abc")).toBe("File.");
   });
 
+  it("still appends when the only image in the text is inside a fence", () => {
+    // The skip guard asks `extractFirstMarkdownImage`, which now ignores fences —
+    // and that is the fix, not a side effect. A reply whose code block happened to
+    // contain an image URL used to look like "there is already an image here", so
+    // the real generated one was never persisted and vanished on reload.
+    const withBadge = "Here's the README:\n\n```md\n![badge](https://b/1.png)\n```";
+    const saved = withPersistedImage(withBadge, URL_);
+    expect(extractFirstMarkdownImage(saved)).toBe(URL_);
+  });
+
+  it("closes a fence the reply left open, so the image is still recoverable", () => {
+    // A truncated reply plus a generated image in one turn. Appending into the
+    // open fence would put the markdown inside a code block, where the now
+    // fence-aware reader cannot see it — the same disappearance this function was
+    // written to stop.
+    const cutOff = "Here you go:\n\n```py\ndef f():\n    return 1";
+    const saved = withPersistedImage(cutOff, URL_);
+    expect(extractFirstMarkdownImage(saved)).toBe(URL_);
+    expect(saved).toContain("return 1\n```\n\n![Generated image]");
+  });
+
   it("does not add a second copy to text that already has one", () => {
     // The explicit Image-model path writes its own markdown.
     const already = `![Generated Image](${URL_})\n\nHere is your generated image:`;
@@ -220,5 +344,92 @@ describe("withPersistedImage", () => {
   it("stands alone when the model wrote no prose", () => {
     const saved = withPersistedImage("", URL_);
     expect(extractFirstMarkdownImage(saved)).toBe(URL_);
+  });
+});
+
+// The read-aloud button used to clean its own text, with `/`{1,3}[^`]*`{1,3}/` as
+// its idea of a code block — the fourth private fence rule found in this app, and
+// like the other three, narrower than `segmentByFence`. Every case below was
+// measured against the shipped chain before being written, and four of the six
+// sent code to the speaker.
+//
+// This failure is louder than the others in the literal sense: there is no wrong
+// pixel to notice, just a voice reading `for i in range(10)` at whoever pressed
+// play — often while they are looking away from the screen, which is the reason
+// to press it.
+describe("speechTextFromMarkdown", () => {
+  const CODE = "import os\nfor i in range(10):\n    print(i)";
+
+  it("drops a closed fence, which is the case the old rule did get right", () => {
+    expect(speechTextFromMarkdown(`Here you go:\n\n\`\`\`py\n${CODE}\n\`\`\`\n\nThat's it.`)).toBe(
+      "Here you go:. That's it.",
+    );
+  });
+
+  it("drops an unterminated fence — the state of every reply cut short mid-block", () => {
+    // Shipped: "Here you go:. py import os for i in range(10): print(i)". The
+    // regex needed a closing run of backticks, so a stream that stopped inside a
+    // block left the opener unmatched and the whole body as prose. The language
+    // tag got read out too.
+    expect(speechTextFromMarkdown(`Here you go:\n\n\`\`\`py\n${CODE}`)).toBe("Here you go:");
+  });
+
+  it("drops a fence longer than three backticks", () => {
+    // Shipped: "Note:. md heading. Done." — `{1,3}` matched three of the four
+    // ticks, so the fourth plus the info string plus the body all survived.
+    expect(speechTextFromMarkdown("Note:\n\n````md\n# heading\n````\n\nDone.")).toBe("Note:. Done.");
+  });
+
+  it("drops a fence whose body contains a backtick", () => {
+    // Shipped: "Here:. {a}. Done." — the body's own backtick closed the match
+    // early and the remainder came out as prose. JS template literals and any
+    // markdown-about-markdown hit this.
+    expect(speechTextFromMarkdown("Here:\n\n```js\nconst s = `${a}`;\n```\n\nDone.")).toBe(
+      "Here:. Done.",
+    );
+  });
+
+  it("drops a tilde fence instead of pronouncing its markers", () => {
+    // Shipped: "Here:. ~~~py import os print(1) ~~~. Done." The markers
+    // themselves were spoken, twice.
+    expect(speechTextFromMarkdown("Here:\n\n~~~py\nimport os\nprint(1)\n~~~\n\nDone.")).toBe(
+      "Here:. Done.",
+    );
+  });
+
+  it("keeps the words inside an inline code span", () => {
+    // The constraint that makes this not a one-line swap to a prose filter: inline
+    // spans live *inside* prose, so dropping them wholesale (shipped: "Run then
+    // now.") loses the instruction, and keeping them verbatim reads the backticks
+    // aloud. The ticks go, the words stay.
+    expect(speechTextFromMarkdown("Run `npm ci` then `npm test` now.")).toBe(
+      "Run npm ci then npm test now.",
+    );
+  });
+
+  it("does not announce an image's alt text", () => {
+    // A separate defect in the same chain, from ordering: `[text](url)` → `$1` ran
+    // before the image strip and matches the `[alt](url)` inside `![alt](url)`, so
+    // the image rule found nothing left and every generated image was read out as
+    // "!Generated image".
+    expect(speechTextFromMarkdown("Done!\n\n![Generated image](https://x/y.png)")).toBe("Done!");
+    // And the same shape one step out: a reply *ending* in a removed block must
+    // not trail a bare "." after its last word, which is what the blank line the
+    // block left behind turns into.
+    expect(speechTextFromMarkdown("Here's the script:\n\n```py\nprint(1)\n```")).toBe(
+      "Here's the script:",
+    );
+    // A link is the opposite case: say the words, not the URL.
+    expect(speechTextFromMarkdown("See [the docs](https://example.com/a/b).")).toBe(
+      "See the docs.",
+    );
+  });
+
+  it("returns nothing when the whole reply was code", () => {
+    // What the hook's "Nothing here to read aloud." toast depends on. Silence with
+    // the button flicking back to idle is indistinguishable from a failure.
+    expect(speechTextFromMarkdown("```\nprint(1)\n```")).toBe("");
+    expect(speechTextFromMarkdown(`\`\`\`py\n${CODE}`)).toBe("");
+    expect(speechTextFromMarkdown("")).toBe("");
   });
 });

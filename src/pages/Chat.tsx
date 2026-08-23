@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { useAuth } from '@/hooks/useAuth';
 import { firestoreDb, type FirestoreMemory, type UserSettings } from '@/lib/firestore-db';
@@ -24,16 +25,21 @@ import { runAgentTurn, AGENT_TOOLS_ENABLED, MAX_STEPS } from '@/lib/agent';
 import type { ToolArtifacts } from '@/lib/tools';
 import { LOGO_URL } from '@/lib/assets';
 import { extractDocument, canExtract, buildDocumentContext } from '@/lib/documents';
-import { extractArtifacts } from '@/lib/artifacts';
+import { extractArtifacts, artifactsFromHistory } from '@/lib/artifacts';
 import { clearFinishedRuns } from '@/lib/code-runs';
-import { ingestArtifacts, resetArtifacts, useArtifacts } from '@/components/artifacts/ArtifactProvider';
+import { ingestArtifacts, resetArtifacts, useArtifacts, closeArtifact, openFirstArtifact, readArtifactState } from '@/components/artifacts/ArtifactProvider';
 import { ArtifactCanvas } from '@/components/artifacts/ArtifactCanvas';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { UNAVAILABLE_REASONS } from '@/lib/shortcuts';
+import { conversationDocumentTitle } from '@/hooks/useDocumentTitle';
+import { ShortcutsDialog } from '@/components/chat/ShortcutsDialog';
+import { Button } from '@/components/ui/button';
 import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource } from '@/components/chat/types';
-import { Menu, ArrowDown, Sparkles } from 'lucide-react';
+import { Menu, ArrowDown, Sparkles, AlertTriangle, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
-import { extractFirstMarkdownImage, sanitizeAssistantText, withPersistedImage } from '@/lib/chat-format';
-import { buildMessageForest, linearizeForest, switchBranch, type TreeNode } from '@/lib/message-tree';
+import { extractFirstMarkdownImage, sanitizeAssistantText, withPersistedImage, closeUnterminatedFence } from '@/lib/chat-format';
+import { buildMessageForest, linearizeForest, switchBranch, toTreeMessages, type TreeNode } from '@/lib/message-tree';
 import { extractMemories, dedupeMemories } from '@/lib/memory';
 
 interface ArenaResponse {
@@ -112,6 +118,12 @@ const SLOW_REQUEST_TIMEOUT_MS = 130_000;
 // teardown is needed.
 const STREAM_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_VISION_MODEL = VISION_ENGINE_MODEL;
+
+/** Whether the conversations panel was collapsed when the app was last closed.
+ *  Namespaced like `Flyer_guest`, the only other app-owned key in localStorage —
+ *  the `VITE_*` ones are user-supplied API keys and follow a different convention
+ *  because they shadow build-time variable names. */
+const SIDEBAR_COLLAPSED_KEY = 'Flyer_sidebar_collapsed';
 
 // Open-ended requests benefit from the crafted master analysis prompt; targeted
 // questions do not (see the call site in handleSendMessage).
@@ -206,6 +218,15 @@ const fileToDataUrl = (file: File): Promise<string> => {
 
 export default function Chat() {
   const { user, isGuest } = useAuth();
+  /**
+   * Hoisted to the top of the component because three separate things need it and
+   * one of them is a keyboard handler registered above where this used to be
+   * declared — see the `toggle-sidebar` handler and §14.2 #20. It also used to be
+   * computed twice from the same two values, once here and once inside
+   * `handleSendMessage`, which is one definition too many for the predicate that
+   * decides whether anything is persisted at all.
+   */
+  const isAuthenticated = !!user && !isGuest;
   // The canvas is absolutely docked inside <main>, so every full-width row in
   // that column (header, message scroller, composer) has to reserve the space it
   // occupies or it renders underneath the panel. The width comes from the store
@@ -223,6 +244,22 @@ export default function Chat() {
   const canvasGutterClass = "lg:pr-[var(--canvas-gutter,0px)]";
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  // Whether the history list can be believed yet (§14 item #10).
+  //
+  // Without this the sidebar's "No conversations yet" empty state doubled as the
+  // loading state AND as the error state, which made it a false statement in two
+  // different ways: a returning user with fifty chats was told they had none for
+  // as long as the Firestore read took, and a read that failed outright looked
+  // identical to a brand-new account. An empty state has to mean "empty".
+  //
+  // Starts at 'loading' when there is a user, because Chat sits behind two auth
+  // guards in App.tsx that both short-circuit on `loading` from useAuth() — so by
+  // the time this component first renders, `user` is already resolved and a fetch
+  // is genuinely about to happen. A guest starts 'ready': there is nothing to
+  // fetch for them, and "no conversations yet" is the truthful thing to show.
+  const [conversationsStatus, setConversationsStatus] = useState<
+    'loading' | 'ready' | 'error'
+  >(() => (user ? 'loading' : 'ready'));
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   // ── Persistent memory + custom instructions (Part F.2/F.3) ──
@@ -247,6 +284,16 @@ export default function Chat() {
   // a live send appends into it. See switchBranch() in message-tree.ts.
   const messageForestRef = useRef<TreeNode[]>([]);
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
+  // Whether the last history read for the open conversation failed (§14 item #10).
+  //
+  // Without it, a failed getMessages() left `messages` empty and the render fell
+  // straight through to the WelcomeScreen — so an existing conversation whose read
+  // had errored greeted the user with "how can I help you today?". That is the
+  // worst variant of this bug family in the app: it is not merely a false empty
+  // state, it invites the user to type into what looks like a fresh chat, and the
+  // outgoing request would carry none of the history that is still sitting in
+  // Firestore. Silent context loss, presented as a normal screen.
+  const [messagesError, setMessagesError] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [statusText, setStatusText] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -255,7 +302,48 @@ export default function Chat() {
   // turn in live results instead of letting the classifier decide.
   const [deepThink, setDeepThink] = useState(false);
   const [forceWebSearch, setForceWebSearch] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  // The conversations panel: remembered across launches, and open by default on a
+  // window wide enough to hold it (§14 native look-and-feel).
+  //
+  // This was `useState(true)` — collapsed on every single launch, at every window
+  // size. Two problems, and the second is the bad one:
+  //
+  //   1. No native app forgets which panels you had open. Finder, Mail, VS Code and
+  //      Slack all restore sidebar visibility, because it is a statement about how
+  //      you work rather than a transient view state.
+  //   2. On a 1400px desktop window it hid the entire conversation history behind a
+  //      toggle the user had to find first. A returning user's chats appeared to be
+  //      gone — which, combined with the false empty state fixed in #10, was two
+  //      independent reasons to think the app had lost your data.
+  //
+  // The fallback is keyed on the `lg` breakpoint (1024px) rather than on a taste
+  // call, because that is the exact width at which the sidebar stops being `fixed`
+  // and overlaying the chat: open-by-default below it would cover the conversation
+  // the user is reading, which is why the collapsed default existed in the first
+  // place. So: remember the choice, and when there is no choice to remember, let the
+  // layout decide.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      const saved = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+      if (saved === 'true') return true;
+      if (saved === 'false') return false;
+    } catch {
+      // Private-browsing Safari throws on localStorage access rather than returning
+      // null. A remembered panel state is not worth a blank page, so fall through.
+    }
+    return window.innerWidth < 1024;
+  });
+
+  // Persisted on change rather than on unmount: the desktop shell is normally closed
+  // by killing the window, and an unmount-time write would never run.
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
+    } catch {
+      // Same reasoning as the read above — this is a convenience, not state the app
+      // depends on.
+    }
+  }, [sidebarCollapsed]);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL_ID);
   
   // Arena Mode state
@@ -444,18 +532,64 @@ export default function Chat() {
 
 
   const loadConversations = useCallback(async () => {
-    if (!user) return;
-    const data = await firestoreDb.getConversations(user.uid);
-    setConversations(data.map(c => ({
-      id: c.id,
-      title: c.title,
-      created_at: c.createdAt,
-      updated_at: c.updatedAt,
-      modelId: c.modelId
-    })) || []);
+    if (!user) {
+      // Not an early bail-out any more. A guest has no stored history, so the
+      // list is genuinely empty and genuinely finished loading — returning
+      // without saying so would leave the status stuck at whatever it was and
+      // show skeleton rows forever on a signed-out shell.
+      setConversations([]);
+      setConversationsStatus('ready');
+      return;
+    }
+    setConversationsStatus('loading');
+    try {
+      const data = await firestoreDb.getConversations(user.uid);
+      setConversations(data.map(c => ({
+        id: c.id,
+        title: c.title,
+        created_at: c.createdAt,
+        updated_at: c.updatedAt,
+        modelId: c.modelId
+      })));
+      setConversationsStatus('ready');
+    } catch (error) {
+      // Was an unhandled rejection: the promise died, the list stayed empty, and
+      // the user was shown the empty state as if the account were new. Console
+      // rather than a toast because the sidebar now renders the failure inline
+      // with its own Retry — a toast on top of that is the same news twice, and
+      // this also fires on the post-turn refresh at the end of handleSendMessage
+      // where a toast would interrupt reading the answer.
+      console.error('[chat] could not load conversations', error);
+      setConversationsStatus('error');
+    }
   }, [user]);
 
   useEffect(() => { loadConversations(); }, [loadConversations]);
+
+  // Name the window after the open conversation (§14 native look-and-feel).
+  //
+  // A native document app puts the document in its title bar, its taskbar entry and
+  // its window switcher; an app whose window is called the same thing no matter
+  // what is open is a browser tab wearing a frame. This one effect drives all three
+  // plus the in-app strip, because Chromium fires `page-title-updated` on a
+  // `document.title` write and Electron's default handler applies it to the
+  // BrowserWindow — see src/hooks/useDocumentTitle.ts for why the DOM is the
+  // transport rather than a context.
+  //
+  // Note this deliberately overrides index.html's `<title>`, which is a search-
+  // result sentence ("Flyer AI: Chat, Work, Create, Search & Code with AI"). That is
+  // the right thing to *serve* and the wrong thing for a window switcher to show.
+  // Crawlers read the served HTML; this runs after mount, so both get what they
+  // need. It also means the packaged window stops being titled with a marketing
+  // line, which the `title: "Flyer AI"` option in main.cjs never prevented — that
+  // option only holds until the page loads.
+  useEffect(() => {
+    const active = conversations.find((c) => c.id === activeConversationId);
+    document.title = conversationDocumentTitle(active?.title);
+    // No cleanup that restores the old title: the next run overwrites it, and on
+    // unmount the app is going away. Resetting to the SEO sentence on the way out
+    // would put it back in the window switcher for the final frame.
+  }, [conversations, activeConversationId]);
 
   // Load the user's persisted memories + custom instructions once they're
   // authenticated. Guest mode has no Firestore writes (isAuthenticated gate
@@ -513,7 +647,17 @@ export default function Chat() {
     hasSentThisSessionRef.current = false;
     isPinnedToBottomRef.current = true;
     setShowScrollToBottom(false);
-    if (!activeConversationId) { setMessages([]); revokeObjectUrls(); return; }
+    // Cleared here rather than only in the try block, so it also resets on the two
+    // early returns below: leaving a stale error set would make "New chat" render
+    // the failure state for a conversation that no longer exists.
+    setMessagesError(false);
+    // resetArtifacts() here as well as in the load path below, because this early
+    // return is the "New chat" case and it was leaking the canvas: messages and
+    // object URLs were cleared but the artefact store was not, so starting a fresh
+    // chat left the *previous* conversation's files and code still listed in the
+    // right-hand canvas — and still open, if it was open. The two paths look
+    // interchangeable but only one of them was doing the full teardown.
+    if (!activeConversationId) { setMessages([]); revokeObjectUrls(); resetArtifacts(); return; }
     if (isNewConversationRef.current) {
       isNewConversationRef.current = false;
       return;
@@ -530,20 +674,34 @@ export default function Chat() {
       // before parentMessageId existed read back as all-roots — a forest of
       // single-node trees — which linearizes in createdAt order, preserving
       // the original flat history exactly.
-      const forest = buildMessageForest(data.map((m) => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        imageUrl: m.role === 'assistant' ? extractFirstMarkdownImage(m.content) : undefined,
-        attachments: m.attachments,
-        modelName: m.modelName,
-        parentMessageId: m.parentMessageId ?? null,
-        siblingIndex: m.siblingIndex ?? 0,
-      })));
+      //
+      // The row mapping lives in message-tree.ts as `toTreeMessages` rather than
+      // inline here, so `message-threading-roundtrip.test.ts` drives the same code
+      // this path does. It was inline, and it was quietly dropping `createdAt`.
+      const forest = buildMessageForest(toTreeMessages(data));
       messageForestRef.current = forest;
       setMessages(linearizeForest(forest) as Message[]);
+      // Re-derive the canvas from the history we just loaded. `resetArtifacts()`
+      // above empties the store, and until this line nothing refilled it — so
+      // reopening a conversation full of code left the canvas claiming there was
+      // none (see artifactsFromHistory for what that cost).
+      //
+      // Fed the *flat* list rather than the linearized branch, and that is the
+      // faithful set rather than the convenient one: the store "accumulates
+      // artifacts across a whole conversation" (its own header comment), and live
+      // it does — every regeneration ingested as it completed, so the older
+      // sibling's block stays listed after a regenerate replaces it on screen.
+      // Restoring only the visible branch would quietly drop the rest, and the
+      // seam would show: switching to a sibling would render its code full-height
+      // inline while its neighbour showed a card, because `CodeBlock` collapses on
+      // the store holding the id and only one of them would be in there.
+      //
+      // One ingest for the conversation rather than one per message: the store
+      // emits on every call and every subscribed code block re-renders on each.
+      ingestArtifacts(artifactsFromHistory(data));
     } catch (e) {
       console.error("Failed to load messages:", e);
+      setMessagesError(true);
     } finally {
       setIsMessagesLoading(false);
     }
@@ -584,6 +742,19 @@ export default function Chat() {
         setConversations(prev => prev.map(c => c.id === activeConversationId ? { ...c, modelId } : c));
       } catch (e) {
         console.error("Failed to update conversation model:", e);
+        // Not reverted, and that is the point of the message. setSelectedModel
+        // above already succeeded, so this turn *will* use the model the user
+        // picked — what failed is only remembering it. Reverting the picker here
+        // would contradict the model the next reply is actually going to come
+        // from, which is a worse lie than the one being reported.
+        //
+        // Worth reporting rather than logging because the divergence is invisible
+        // and delayed: the picker reads correctly all session, and then the chat
+        // reopens tomorrow on the old model, so the next reply in a long thread
+        // comes from somewhere else with nothing on screen having changed.
+        toast.error("Switched for now, but couldn't save this chat's model.", {
+          id: 'model-pref-failed',
+        });
       }
     }
   };
@@ -611,13 +782,39 @@ export default function Chat() {
     content: string,
     modelName?: string,
     attachments?: ChatAttachment[],
-    parentMessageId?: string | null
+    parentMessageId?: string | null,
+    // The on-screen message's own id. Persisted alongside parentMessageId so the
+    // two are drawn from the same namespace after a reload — see the `clientId`
+    // comment in firestore-db.getMessages. Optional so a caller that has no local
+    // message (there is none today) still compiles, but every call site passes it.
+    clientId?: string
   ) => {
-    if (!user) return;
+    if (!user) return false;
     try {
-      await firestoreDb.saveMessage(conversationId, user.uid, role, content, modelName, attachments, parentMessageId);
+      await firestoreDb.saveMessage(conversationId, user.uid, role, content, modelName, attachments, parentMessageId, clientId);
+      return true;
     } catch (e) {
       console.error("Error saving message:", e);
+      // This used to log and return, which made a failed write indistinguishable
+      // from a successful one to everything downstream — the message is already
+      // in React state and on screen, so the turn carried on and looked fine.
+      //
+      // Both halves of the failure are silent and both corrupt the thread:
+      //   the user's turn fails  → the reply saves against a parentMessageId that
+      //                            no longer resolves, so the reload shows an
+      //                            answer with no question
+      //   the reply fails        → the reload shows a question with no answer, and
+      //                            the next turn sends the model a history where
+      //                            its own previous answer is missing
+      //
+      // One toast, not one per call: sonner treats a repeated `id` as an update to
+      // the same toast, so a turn where both writes fail reports once. The wording
+      // names the consequence rather than the cause, because "reopen this chat and
+      // it may be gone" is the part the user can act on — copying the reply out.
+      toast.error("Couldn't save that message. It may be missing when you reopen this chat.", {
+        id: 'save-message-failed',
+      });
+      return false;
     }
   };
 
@@ -678,7 +875,15 @@ export default function Chat() {
     // as an opaque blob and it answered by guessing. The attachment id each File
     // received above is threaded into extraction, so the text block the model
     // reads carries an attachment_id it can hand to edit_file.
-    const documentFiles = files.filter((f) => !f.type.startsWith('image/') && canExtract(f));
+    //
+    // `canExtract` is every non-image file now, which is the point: it used to be
+    // a closed format list, and this line *silently dropped* whatever it rejected.
+    // The attachment still rendered and its name still reached the model, so an
+    // upload outside the list produced a confident answer about a file nobody had
+    // opened. documents.ts is total now — unknown types are sniffed, read as text
+    // when they are text, and identified when they are not — so nothing is lost
+    // here any more.
+    const documentFiles = files.filter(canExtract);
     const extractedDocs = documentFiles.length > 0
       ? await Promise.all(
           // pendingAttachments maps 1:1 with files by index, so the matching
@@ -820,7 +1025,6 @@ export default function Chat() {
     ];
 
     let convId = activeConversationId;
-    const isAuthenticated = !!user && !isGuest;
 
     if (!convId && isAuthenticated) {
       isNewConversationRef.current = true;
@@ -838,7 +1042,24 @@ export default function Chat() {
       const currentConvId = convId;
       generateSmartChatTitle(trimmedContent || requestContent).then((smartTitle) => {
         if (smartTitle && currentConvId) {
-          firestoreDb.updateConversationTitle(currentConvId, smartTitle).catch(() => {});
+          // Swallowed on purpose, and the asymmetry with its two neighbours is
+          // the reasoning. `handleRenameConversation` rolls back and toasts;
+          // `handleSelectModel` keeps the local value and toasts (§14.2 #11).
+          // Both of those changes were *asked for*, so silence would hide the
+          // failure of something the user is waiting on. This one nobody asked
+          // for: it is an automatic tidy-up of a title the app generated. If it
+          // fails, the truncated first-50-characters title stays in Firestore,
+          // and that still names the same conversation — the degradation carries
+          // no false information, so there is no reassuring empty state to be
+          // shown by mistake. Reporting it would be a toast about a background
+          // nicety the user never requested.
+          //
+          // Logged rather than dropped, though: the empty `.catch(() => {})`
+          // this replaces left no trail anywhere, which is the one thing every
+          // deliberate swallow in this codebase is not allowed to do.
+          firestoreDb.updateConversationTitle(currentConvId, smartTitle).catch((e) => {
+            console.warn('[chat] auto title did not save:', e);
+          });
           setConversations((prev) =>
             prev.map((c) => (c.id === currentConvId ? { ...c, title: smartTitle } : c)),
           );
@@ -853,7 +1074,8 @@ export default function Chat() {
         trimmedContent || (pendingAttachments.length > 0 ? `[Image uploaded] ${pendingAttachments.map((attachment) => attachment.name).join(', ')}` : requestContent),
         undefined,
         pendingAttachments,
-        userMessage.parentMessageId
+        userMessage.parentMessageId,
+        userMessage.id,
       );
     }
 
@@ -933,7 +1155,7 @@ export default function Chat() {
         receivedAssistantContent = true;
 
         if (convId && isAuthenticated) {
-          await saveMessage(convId, 'assistant', imageContent, selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
+          await saveMessage(convId, 'assistant', imageContent, selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id);
         }
       } else {
         const messagesForModel = [...allMessages];
@@ -1035,6 +1257,29 @@ export default function Chat() {
             }
           } catch (err) {
             if (err instanceof Error && err.name === 'AbortError') throw err;
+            // The `else` twelve lines up exists to stop the model inventing
+            // headlines when a search comes back empty. Everything it prevents was
+            // still reachable through here: both splices live *inside* the try,
+            // after the await, so a thrown search added no note at all. The user
+            // saw the Search toggle lit, the model was told nothing, and the answer
+            // came out of training data reading exactly like a grounded one.
+            //
+            // Worse than the empty-result case it was written beside, not better —
+            // that one at least left a trail. This swallowed the error without even
+            // logging it.
+            console.warn('[chat] web search failed; telling the model so', err);
+            const reason = err instanceof Error ? err.message : String(err);
+            messagesForModel.splice(messagesForModel.length - 1, 0, {
+              role: 'system',
+              // Deliberately the same sentence the empty-result branch sends. The
+              // model does not need to distinguish "returned nothing" from "threw"
+              // — the instruction is identical either way — and two wordings for
+              // one situation is two sets of behaviour to keep in step.
+              content: [
+                `[WEB SEARCH ATTEMPTED FOR "${searchQuery}" BUT FAILED (reason: ${reason}).]`,
+                'Tell the user you could not retrieve live web results for this, then answer from your own knowledge while clearly flagging it may be out of date. Do NOT fabricate headlines, prices, scores, or dates.',
+              ].join('\n')
+            });
           } finally {
             setIsSearching(false);
           }
@@ -1328,7 +1573,7 @@ export default function Chat() {
             // the explicit Image-model path has always done, and it renders the
             // same: ChatMessage hoists the markdown image out of the prose with
             // stripMarkdownImages, so this adds nothing visible to the reply.
-            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
+            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id);
             maybeExtractMemories(finalText);
           }
         } else if (agentImageUrl || agentFiles.length) {
@@ -1343,7 +1588,7 @@ export default function Chat() {
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
           if (convId && isAuthenticated) {
-            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId);
+            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id);
             maybeExtractMemories(madeText);
           }
         } else {
@@ -1366,9 +1611,16 @@ export default function Chat() {
           // bubble looking done-but-incomplete with no explanation. Persisted
           // too: without a save the partial would be lost on reload, since the
           // success-path saveMessage is skipped on the abort.
+          //
+          // The fence is closed first, because a stream that dies mid-code-block
+          // is the likely shape of this failure — long code is where the silence
+          // falls — and an unterminated fence renders everything after it as code.
+          // So the one sentence explaining why the answer stops mid-line was being
+          // shown in monospace as the last line of the script, which is where a
+          // reader is least likely to read it as an explanation of anything.
           const stallSuffix = '\n\n_The stream stalled partway through. Send it again if you want the rest._';
           const persistedPartial = withPersistedImage(
-            (runPrimaryPartialText || '').replace(/\s*$/, '') + stallSuffix,
+            closeUnterminatedFence((runPrimaryPartialText || '').replace(/\s*$/, '')) + stallSuffix,
             undefined,
           );
           setMessages((prev) =>
@@ -1384,7 +1636,17 @@ export default function Chat() {
               selectedModelMeta.name,
               undefined,
               assistantMessage.parentMessageId,
-            ).catch((e) => console.warn('[chat] failed to persist stalled partial:', e));
+              assistantMessage.id,
+            );
+            // No `.catch` here, deliberately, and it used to have one.
+            // `saveMessage` catches its own failure, toasts it and returns false
+            // (§14.2 #12) — so it cannot reject, and a `.catch` on it claimed to
+            // handle a failure that could never arrive there. That is §14.2 #15's
+            // shape in miniature: a handler a reader trusts, sitting off the
+            // actual failure path. The boolean is discarded on purpose — the
+            // partial is already on screen and the toast has already named the
+            // consequence, and there is no better recovery available for a
+            // connection that has just died.
           }
         } else if (timeoutReached && !receivedAssistantContent) {
           const timeoutMessage = 'That took too long on my side—please send it again and I’ll keep it short.';
@@ -1423,6 +1685,127 @@ export default function Chat() {
     revokeObjectUrls();
     if (window.innerWidth < 1024) setSidebarCollapsed(true);
   };
+
+  // ---- keyboard accelerators (task #14, item 8) --------------------------
+  // The table of chords is src/lib/shortcuts.ts; only the actions live here,
+  // because they need state this component owns.
+  const [showShortcuts, setShowShortcuts] = useState(false);
+
+  /**
+   * Find the composer, focus it, and hand it back.
+   *
+   * Queried from the DOM rather than held as a ref threaded down into ChatInput.
+   * The composer is unmounted entirely in some states (arena mode, and while the
+   * conversation list is still loading), so a ref would be null exactly as often
+   * and would additionally require ChatInput to accept and forward one. The
+   * selector is a `data-` attribute placed for this purpose, not a class or an
+   * aria-label that someone could reasonably rename.
+   *
+   * Returns the element so the type-to-focus path in the hook can tell "no
+   * composer on screen" from "focused it" and leave the keystroke alone in the
+   * first case.
+   */
+  const focusComposer = useCallback((): HTMLElement | null => {
+    const el = document.querySelector<HTMLTextAreaElement>('textarea[data-flyer-composer]');
+    if (!el || el.disabled) return null;
+    el.focus();
+    return el;
+  }, []);
+
+  /**
+   * mod+K — put the cursor in the sidebar's history filter.
+   *
+   * Three wrinkles, all worth the comment.
+   *
+   * The sidebar is never unmounted: collapsed means `width: 0` plus a -280px
+   * translate on an `overflow-hidden` aside, so the field is in the DOM the whole
+   * time and querySelector finds it even while it is invisible. That is why this
+   * can expand and focus without threading a ref down — but it is also why
+   * `preventScroll` is needed. Focusing an element that is currently off to the
+   * left of the viewport otherwise invites the browser to scroll an ancestor to
+   * reveal it, and the ancestor here is the app shell.
+   *
+   * The focus is deferred by one frame, and that is load-bearing. A collapsed
+   * panel is `visibility: hidden` (ChatSidebar's `offscreen`, which is what keeps
+   * a closed drawer out of the tab order), and `.focus()` on a
+   * `visibility: hidden` element silently does nothing. React has not committed
+   * the expand by the time this handler returns, so focusing here would expand the
+   * sidebar and leave the cursor where it was — a shortcut that half-works, which
+   * is worse than one that does not, because the failure is invisible.
+   *
+   * The field only renders once there is history to filter, so an empty account
+   * finds nothing. Expanding anyway is the honest response — it shows the user the
+   * empty list, which is the answer to "search my chats" — and the toast explains
+   * why the cursor did not land anywhere, following the same reasoning as the
+   * artifact-canvas shortcut below.
+   */
+  const focusHistorySearch = useCallback(() => {
+    setSidebarCollapsed(false);
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLInputElement>('input[data-flyer-history-search]');
+      if (!el) {
+        toast(UNAVAILABLE_REASONS['find-conversation']);
+        return;
+      }
+      el.focus({ preventScroll: true });
+      // Select rather than append: pressing the chord again is how you start a
+      // different search, and a cursor parked after the old query means the second
+      // attempt silently searches for both.
+      el.select();
+    });
+  }, []);
+
+  useKeyboardShortcuts({
+    // While the shortcuts sheet is open, Radix's dialog owns the keyboard: it
+    // traps focus and handles Escape itself. Leaving this layer armed would mean
+    // Ctrl+B toggling a sidebar the user cannot see behind the modal.
+    disabled: showShortcuts,
+    handlers: {
+      'new-chat': handleNewConversation,
+      // Guarded, not silent. `ChatSidebar` is behind `isAuthenticated &&` further
+      // down, so for a guest this boolean has no reader: the pre-fix handler
+      // flipped it and the app did not move, while the help sheet went on
+      // promising "Show or hide conversations" (§14.2 #20).
+      'toggle-sidebar': () => {
+        if (!isAuthenticated) {
+          toast(UNAVAILABLE_REASONS['toggle-sidebar']);
+          return;
+        }
+        setSidebarCollapsed((v) => !v);
+      },
+      'show-shortcuts': () => setShowShortcuts(true),
+      'focus-composer': () => focusComposer(),
+      'find-conversation': focusHistorySearch,
+      'toggle-artifact-canvas': () => {
+        if (openArtifactId) {
+          closeArtifact();
+        } else if (readArtifactState().artifacts.length > 0) {
+          openFirstArtifact();
+        } else {
+          // Silence here would read as a broken shortcut. The canvas only has
+          // content once a reply has produced a file or a code block, and that is
+          // not guessable from the outside.
+          toast(UNAVAILABLE_REASONS['toggle-artifact-canvas']);
+        }
+      },
+      // Precedence, most-urgent first. Stopping a run is what the user almost
+      // certainly means if one is in flight; only once nothing is generating does
+      // Escape start closing things, and the sidebar comes last because on
+      // desktop it is docked and closing it on Escape would be surprising.
+      escape: () => {
+        if (isLoading) {
+          handleStopGeneration();
+          return;
+        }
+        if (openArtifactId) {
+          closeArtifact();
+          return;
+        }
+        if (!sidebarCollapsed && window.innerWidth < 1024) setSidebarCollapsed(true);
+      },
+    },
+    focusComposerOnType: focusComposer,
+  });
 
   // Regenerate: strip the last user+assistant turn, then resend the user's text.
   // Uses an effect so handleSendMessage runs against the trimmed message state.
@@ -1491,7 +1874,30 @@ export default function Chat() {
     }
   };
 
-  const isAuthenticated = !!user && !isGuest;
+  /**
+   * Rename a conversation from the sidebar's context menu (or F2 on the row).
+   *
+   * Optimistic: the list updates before the write lands, and rolls back if it
+   * fails. Renaming is a zero-risk, high-frequency edit — waiting on a network
+   * round-trip to see your own typing is what makes an app feel like a website.
+   *
+   * The rollback captures the previous title rather than refetching, because a
+   * refetch on failure is a second thing that can fail, and the state it would
+   * restore is already in hand.
+   */
+  const handleRenameConversation = async (id: string, title: string) => {
+    const previous = conversations.find((c) => c.id === id)?.title;
+    if (previous === undefined) return;
+
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
+    try {
+      await firestoreDb.updateConversationTitle(id, title);
+    } catch {
+      setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title: previous } : c)));
+      toast.error('Could not rename this conversation');
+    }
+  };
+
   const selectedModelMeta = AI_MODELS.find((model) => model.id === selectedModel) || AI_MODELS[0];
 
   return (
@@ -1528,6 +1934,8 @@ export default function Chat() {
       {isAuthenticated && (
         <ChatSidebar
           conversations={conversations}
+          conversationsStatus={conversationsStatus}
+          onRetryConversations={loadConversations}
           activeConversationId={activeConversationId}
           onSelectConversation={(id) => {
             if (isLoading) {
@@ -1541,6 +1949,7 @@ export default function Chat() {
           }}
           onNewConversation={handleNewConversation}
           onDeleteConversation={handleDeleteConversation}
+          onRenameConversation={handleRenameConversation}
           isCollapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
           selectedModel={selectedModel}
@@ -1572,9 +1981,15 @@ export default function Chat() {
           )}
           
           <div className="flex items-center gap-3 min-w-0 flex-1">
-            <motion.div className="flex w-10 h-10 rounded-xl items-center justify-center flex-shrink-0 bg-black/10 overflow-hidden" whileHover={{ scale: 1.1, rotate: 5 }}>
+            {/* `whileHover={{ scale: 1.1, rotate: 5 }}` came off this. A 10% jump
+                plus a 5-degree tilt on the app's own logo in the header is a web
+                flourish — the same `rotate: 5` was removed from the WelcomeScreen
+                tile for the same reason. This is also not a button: it has no
+                onClick, so it was offering feedback for an interaction that does
+                not exist, which is worse than overdoing it. Now a plain element. */}
+            <div className="flex w-10 h-10 rounded-xl items-center justify-center flex-shrink-0 bg-black/10 overflow-hidden">
               <img src={LOGO_URL} alt="Flyer AI" className="w-full h-full object-cover" />
-            </motion.div>
+            </div>
             <div className="min-w-0">
               <h1 className="font-display font-semibold text-base sm:text-lg truncate text-foreground/90">
                 {activeConversationId ? conversations.find((c) => c.id === activeConversationId)?.title || 'Chat' : 'Flyer'}
@@ -1583,7 +1998,21 @@ export default function Chat() {
                 <span className="text-xs text-muted-foreground/70 truncate block">{selectedModelMeta?.name || 'Default'} · {selectedModelMeta?.kind || 'Chat'}</span>
               )}
               {isGuest && (
-                <span className="text-xs text-muted-foreground/60">Guest mode • <a href="/auth" className="text-primary hover:underline">Sign in to save chats</a></span>
+                /* `<Link>`, not `<a href="/auth">`. The raw anchor was a genuine
+                   break in the desktop build rather than a style preference: a
+                   plain href does a full document navigation, so under file:// it
+                   resolved to `file:///auth`, which does not exist. That fails the
+                   main frame, and main.cjs's did-fail-load handler turns a
+                   main-frame failure into a modal "Flyer could not start" error box
+                   — so a guest clicking "Sign in to save chats" in the packaged app
+                   got an error dialog and a dead window, with no way back.
+
+                   It was also already wrong on the web: a full navigation there
+                   throws away the React tree and re-runs the whole Firebase auth
+                   bootstrap to reach a route the router could have rendered in
+                   place. `<Link>` goes through the router, which is what makes it
+                   correct under HashRouter (`#/auth`) and BrowserRouter alike. */
+                <span className="text-xs text-muted-foreground/60">Guest mode • <Link to="/auth" className="text-primary hover:underline">Sign in to save chats</Link></span>
               )}
             </div>
           </div>
@@ -1670,6 +2099,38 @@ export default function Chat() {
                   ))}
                 </div>
                 <span className="text-xs text-primary/80 font-medium mt-3">Loading messages...</span>
+              </div>
+            ) : messagesError ? (
+              /* Checked before the welcome branch, which is the entire point: a
+                 failed read leaves `messages` empty, so without this the next
+                 branch matches and the user is shown a greeting for a conversation
+                 that has history. See the messagesError declaration for why that
+                 is worse than an ordinary undesigned error state. */
+              <div
+                key="messages-error"
+                role="alert"
+                className="flex flex-col items-center justify-center h-full min-h-[50dvh] px-6 text-center"
+              >
+                {/* Amber rather than red, matching the sidebar's failure state:
+                    nothing has been lost, the read just did not arrive. */}
+                <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-4">
+                  <AlertTriangle className="w-6 h-6 text-amber-400/80" />
+                </div>
+                <h3 className="text-base font-semibold text-foreground/80">
+                  Couldn&apos;t load this conversation
+                </h3>
+                <p className="text-sm text-muted-foreground mt-1.5 max-w-sm">
+                  Your messages are still saved — the app just couldn&apos;t reach them.
+                  Check your connection and try again.
+                </p>
+                <Button variant="outline" size="sm" onClick={loadMessages} className="mt-5 gap-1.5">
+                  <RotateCw className="w-4 h-4" />
+                  Retry
+                </Button>
+                {/* Retry only — no "start a new chat" link. The composer below is
+                    disabled while this state is showing (see the `disabled` prop on
+                    ChatInput), so the one action offered here is the one that can
+                    actually resolve it. */}
               </div>
             ) : (messages.length === 0 && regenText === null) ? (
               <div key="welcome" className="h-full overflow-y-auto scrollbar-thin">
@@ -1776,6 +2237,15 @@ export default function Chat() {
             onSend={handleSendMessage}
             isLoading={isLoading}
             onStop={handleStopGeneration}
+            /* Sending is blocked while the history read is failed, and this is the
+               half of the fix that matters. The error state above stops the app
+               *claiming* the conversation is empty; this stops it acting as if it
+               were. `messages` is empty in this state, so a send would reach the
+               model with no prior turns — it would answer a follow-up question as
+               if it were the first thing ever said, and then that answer would be
+               persisted into the middle of a thread it never saw. A disabled
+               composer next to a Retry button is the honest pair. */
+            disabled={messagesError}
             modelName={selectedModelMeta?.name || 'AI'}
             modelKind={selectedModelMeta?.kind || 'Chat'}
             deepThink={deepThink}
@@ -1788,7 +2258,13 @@ export default function Chat() {
         {/* Artifact canvas — overlays the right edge of <main> when an artifact
             is open; nothing rendered otherwise, so Arena mode keeps full width. */}
         <ArtifactCanvas
-          filesForTurn={messages.flatMap((m) => m.files ?? [])}
+          // The message id rides along because a file artifact's id is its
+          // filename alone, so two turns generating `report.xlsx` are two
+          // versions of one artifact and the canvas cannot otherwise tell which
+          // version's bytes to serve (§14.2 #18).
+          filesForTurn={messages.flatMap((m) =>
+            (m.files ?? []).map((f) => ({ ...f, messageId: m.id })),
+          )}
           onEdit={(text) => {
             // Feed the artefact back into the chat as context for the next turn:
             // we wrap it and ask the model to treat it as the prior version, so
@@ -1798,6 +2274,11 @@ export default function Chat() {
           }}
         />
       </main>
+
+      {/* Rendered here, outside <main>, because Radix portals it to <body> anyway
+          and putting it inside a flex child that owns the canvas gutter invites
+          someone to "fix" its width later. */}
+      <ShortcutsDialog open={showShortcuts} onOpenChange={setShowShortcuts} />
     </div>
   );
 }

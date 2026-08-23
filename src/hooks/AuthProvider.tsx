@@ -28,6 +28,55 @@ import {
 import { auth, googleProvider } from '@/lib/firebase';
 import { AuthContext } from './useAuth';
 
+/**
+ * Firebase auth codes, mapped to sentences a person can act on (§14.2 #17).
+ *
+ * WHY THIS TABLE EXISTS
+ *
+ * `Auth.tsx` used to do `error.message.includes('Invalid login')` and
+ * `.includes('already registered')` to swap in friendly text. Those are **Supabase**
+ * message strings. This app was migrated to Firebase and the checks were never
+ * updated, so neither had matched in a long time — and since the fallback is to
+ * toast `error.message` verbatim, *every* auth error any user has ever seen was the
+ * raw SDK string `Firebase: Error (auth/invalid-credential).` The single front door
+ * of the app was showing internal error codes on its most common failure.
+ *
+ * Mapped here rather than in the page, because there are three entry points
+ * (`signIn`, `signUp`, `signInWithGoogle`) and two callers, and a table in the page
+ * would have to be duplicated or exported back out of it.
+ */
+const AUTH_MESSAGES: Record<string, string> = {
+  // The credential codes collapse into one sentence on purpose — see the note on
+  // shouldAutoCreateAccount. Firebase deliberately stopped distinguishing "no such
+  // account" from "wrong password", and reconstructing the distinction in the UI
+  // would undo the reason for that.
+  'auth/invalid-credential': 'Incorrect email or password.',
+  'auth/wrong-password': 'Incorrect email or password.',
+  'auth/user-not-found': 'Incorrect email or password.',
+  'auth/invalid-email': "That email address doesn't look right.",
+  'auth/user-disabled': 'This account has been disabled.',
+  'auth/email-already-in-use': "There's already an account with that email.",
+  'auth/weak-password': 'Choose a password of at least six characters.',
+  'auth/missing-password': 'Enter your password.',
+  'auth/too-many-requests': 'Too many attempts. Wait a minute, then try again.',
+  'auth/network-request-failed': "Couldn't reach the server — check your connection.",
+  'auth/operation-not-allowed': 'Email sign-in is not enabled for this app.',
+  'auth/popup-blocked': 'Your browser blocked the sign-in window.',
+  'auth/account-exists-with-different-credential':
+    'That email is already registered with a different sign-in method.',
+  'auth/unauthorized-domain': 'This site is not authorised for Google sign-in.',
+};
+
+/**
+ * Popup outcomes that are the user changing their mind, not failures. No native app
+ * shows an error because you closed a window, so these return no error at all.
+ */
+const POPUP_DISMISSED = new Set([
+  'auth/popup-closed-by-user',
+  'auth/cancelled-popup-request',
+  'auth/user-cancelled',
+]);
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [loading, setLoading] = useState(true);
@@ -79,13 +128,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { code: '', message: typeof err === 'string' ? err : '' };
   };
 
+  /**
+   * Turn a rejection into a sentence for the user.
+   *
+   * Falls back to `fallback` rather than to the SDK's own `message` — an unmapped
+   * code would otherwise put `Firebase: Error (auth/…)` back on screen, which is
+   * exactly the bug the table replaced. The cost is that a code nobody has listed
+   * shows generic text; the alternative is that it shows internal identifiers, and
+   * a user can act on neither, so the generic one wins.
+   *
+   * Declared below `authErrorInfo` because it calls it: both are `const` arrow
+   * functions, so ordering is load-bearing in a way `function` declarations would
+   * not have been.
+   */
+  const describeAuthError = (err: unknown, fallback: string): string => {
+    const { code } = authErrorInfo(err);
+    return AUTH_MESSAGES[code] ?? fallback;
+  };
+
   const signUp = async (email: string, password: string) => {
     try {
       await createUserWithEmailAndPassword(auth, email, password);
       return { error: null };
     } catch (err: unknown) {
       console.error("Firebase SignUp Error:", err);
-      return { error: new Error(authErrorInfo(err).message || 'Failed to sign up') };
+      return { error: new Error(describeAuthError(err, 'Failed to sign up.')) };
     }
   };
 
@@ -102,10 +169,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return { error: null, createdAccount: true };
         } catch (signUpErr: unknown) {
           console.error("Firebase Auto-SignUp Error:", signUpErr);
-          return { error: new Error(authErrorInfo(signUpErr).message || 'Failed to create account') };
+          // THE BUG THIS BRANCH USED TO HAVE, and it fired on the most common auth
+          // failure there is. `shouldAutoCreateAccount` matches `wrong-password`
+          // and `invalid-credential`, so an existing user mistyping their password
+          // reached this createUser call, which then failed with
+          // `email-already-in-use` — and *that* was the message shown. So a typo'd
+          // password reported **"There's already an account with that email."**
+          //
+          // From the user's side that is not merely unhelpful, it points at the
+          // opposite problem: it is their own account, they were signing in to it,
+          // not creating it. The two obvious next actions it invites — assume
+          // someone else has their address, or try a different address — are both
+          // wrong, and the one piece of actionable information (the password) was
+          // destroyed on the way out.
+          //
+          // `email-already-in-use` here is *proof* the account exists and the
+          // credential did not work, so it reports as a credential failure.
+          if (authErrorInfo(signUpErr).code === 'auth/email-already-in-use') {
+            return { error: new Error(AUTH_MESSAGES['auth/invalid-credential']) };
+          }
+          return { error: new Error(describeAuthError(signUpErr, 'Failed to create account.')) };
         }
       }
-      return { error: new Error(message || 'Failed to sign in') };
+      return { error: new Error(describeAuthError(err, 'Failed to sign in.')) };
     }
   };
 
@@ -114,8 +200,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await signInWithPopup(auth, googleProvider);
       return { error: null };
     } catch (err: unknown) {
+      const { code } = authErrorInfo(err);
+      // Closing the Google window is a decision, not a fault. Reporting it as an
+      // error is the kind of thing that makes an app feel like it is arguing with
+      // you, and no native sign-in sheet does it.
+      if (POPUP_DISMISSED.has(code)) {
+        console.info("Google sign-in dismissed by the user");
+        return { error: null };
+      }
       console.error("Firebase Google SignIn Error:", err);
-      return { error: new Error(authErrorInfo(err).message || 'Failed to sign in with Google') };
+      return { error: new Error(describeAuthError(err, 'Failed to sign in with Google.')) };
     }
   };
 

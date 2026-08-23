@@ -93,7 +93,14 @@ export default function ModelSelector({ selectedModel, onSelectModel }: ModelSel
         type="button"
         onClick={() => setOpen((v) => !v)}
         whileTap={{ scale: 0.97 }}
-        className="liquid-select group flex items-center gap-2 rounded-xl border border-border/40 pl-2.5 pr-2 py-1.5 hover:border-primary/40 transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40 max-w-[190px] sm:max-w-none"
+        /* focus-visible, not focus (§14 item #5). This is a button, and `focus:ring`
+           on a button paints the ring after an ordinary mouse click and leaves it
+           there until something else takes focus — one of the loudest web tells
+           there is, because no native control does that. The distinction only
+           matters for elements you click: a text field should show its focus state
+           however it was reached, which is why the search inputs in this file and
+           in ChatSidebar deliberately keep plain `focus:`. */
+        className="liquid-select group flex items-center gap-2 rounded-xl border border-border/40 pl-2.5 pr-2 py-1.5 hover:border-primary/40 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary/40 max-w-[190px] sm:max-w-none"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Select AI model"

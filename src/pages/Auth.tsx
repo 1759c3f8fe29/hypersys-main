@@ -20,6 +20,14 @@ export default function Auth() {
     if (user) navigate('/');
   }, [user, navigate]);
 
+  // The window is showing a sign-in screen, so the window should say so — in the
+  // taskbar, the window switcher and the app's own title bar, all of which follow
+  // document.title (see src/hooks/useDocumentTitle.ts). Depends on `isLogin` because
+  // this one screen is two: the toggle swaps it between signing in and signing up.
+  useEffect(() => {
+    document.title = `${isLogin ? 'Sign in' : 'Create account'} — Flyer AI`;
+  }, [isLogin]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -27,7 +35,13 @@ export default function Auth() {
       if (isLogin) {
         const { error, createdAccount } = await signIn(email, password);
         if (error) {
-          toast.error(error.message.includes('Invalid login') ? 'Invalid email or password' : error.message);
+          // Shown verbatim, because AuthProvider now maps Firebase codes to
+          // sentences. This used to read `error.message.includes('Invalid login')
+          // ? 'Invalid email or password' : error.message` — a **Supabase** message
+          // string that has never matched since the Firebase migration, so the
+          // fallback branch was the only live one and every failure surfaced as
+          // `Firebase: Error (auth/invalid-credential).` See §14.2 #17.
+          toast.error(error.message);
         } else if (createdAccount) {
           toast.success('Account created! Check your email to verify it, then sign in.');
         } else {
@@ -37,7 +51,7 @@ export default function Auth() {
       } else {
         const { error } = await signUp(email, password);
         if (error) {
-          toast.error(error.message.includes('already registered') ? 'This email is already registered' : error.message);
+          toast.error(error.message);
         } else {
           toast.success('Check your email to verify your account!');
         }
@@ -67,7 +81,7 @@ export default function Auth() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
+    <div className="app-shell-min-height flex items-center justify-center p-4 relative overflow-hidden">
       <div className="absolute inset-0 liquid-canvas" />
       <div className="absolute inset-0 liquid-sheen pointer-events-none" />
       <div className="absolute inset-0 liquid-grid opacity-40 pointer-events-none" />
@@ -80,12 +94,16 @@ export default function Auth() {
       >
         <div className="glass-panel rounded-3xl p-8 shadow-2xl border border-primary/10">
           <motion.div className="text-center mb-8" initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
-            <motion.div 
-              className="inline-flex items-center justify-center w-20 h-20 rounded-2xl mb-4 liquid-icon glow-effect"
-              whileHover={{ scale: 1.05, rotate: 5 }}
-            >
+            {/* Was a `motion.div` with `whileHover={{ scale: 1.05, rotate: 5 }}`.
+                Third and last of the tilting logos removed in the native-look pass
+                (#14) — the Chat header's and WelcomeScreen's went the same way. As
+                with the Chat header one, this is not interactive: no onClick, no
+                focus, nothing happens if you click it. Hover feedback on a purely
+                decorative element tells the user something is clickable when it is
+                not, which is a usability bug dressed as polish. */}
+            <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl mb-4 liquid-icon glow-effect">
               <Sparkles className="w-10 h-10 text-primary" />
-            </motion.div>
+            </div>
             <h1 className="text-3xl font-display font-bold gradient-text">Flyer</h1>
             <p className="text-muted-foreground mt-2 text-sm">
               {isLogin ? 'Welcome back! Sign in to continue' : 'Create an account to get started'}

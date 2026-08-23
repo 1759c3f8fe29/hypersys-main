@@ -1,17 +1,43 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+/* NO WEBFONT IMPORT, DELIBERATELY.
+ *
+ * This file used to open with a Google Fonts @import for Inter and Space
+ * Grotesk. It was removed in the native-look pass (§14), and the reason is not
+ * only aesthetic:
+ *
+ *  - It is a blocking network request on every launch. A CSS @import is
+ *    discovered late and blocks first paint, so the desktop app showed unstyled
+ *    or fallback text for as long as fonts.googleapis.com took to answer.
+ *  - Offline it fails outright. The Electron build is a real installed app that
+ *    must work with no network; every text surface silently fell back to a
+ *    different typeface, so the app did not look the same offline as online.
+ *  - It sends a request to a third party on every launch of a desktop app,
+ *    which is not something an installed application should do for decoration.
+ *  - And it is the single clearest "this is a web page" signal there is. A web
+ *    page chooses a typeface; a native app inherits the platform's.
+ *
+ * The stack below is the platform UI font, in the order that resolves correctly
+ * per OS. Keep it in sync with `fontFamily` in tailwind.config.ts — Tailwind's
+ * `font-sans`/`font-display` utilities are generated from there, and the two
+ * must not disagree.
+ */
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@property --angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
-
 @layer base {
   :root {
+    /* The CSS half of the `<meta name="color-scheme">` in index.html. The meta tag
+       covers the first frame, before this file has loaded; this covers everything
+       after, and is what any element querying `prefers-color-scheme` inside the
+       document resolves against.
+
+       Both are needed. The meta alone is not inherited by same-document contexts
+       that re-resolve the property, and this alone arrives one stylesheet too late
+       to stop the white first paint. Keep the two in sync — and see the note on the
+       meta tag for why neither says `light dark` yet. */
+    color-scheme: dark;
+
     --background: 224 32% 6%;
     --foreground: 210 40% 98%;
 
@@ -61,7 +87,45 @@
     --input: 226 22% 14%;
     --ring: 172 66% 50%;
 
-    --radius: 0.75rem;
+    /* Height of the app's own title bar. 0 in a browser; TitleBar sets it to 32px
+       on mount in the Electron shell. Declared here rather than only being set
+       imperatively so `var(--titlebar-height)` always resolves — an unset custom
+       property inside calc() invalidates the whole declaration, which would have
+       made every `.app-shell-height` element fall back to `auto` on the web build
+       and collapse the chat layout entirely. The `, 0px` fallbacks at the use
+       sites are belt-and-braces for the same reason. */
+    --titlebar-height: 0px;
+
+    /* 0.5rem = 8px, down from 0.75rem = 12px.
+       This drives Tailwind's `rounded-lg`/`rounded-md`/`rounded-sm` via the theme,
+       so it is the corner radius on every shadcn control — buttons, inputs,
+       dropdown items, dialogs, popovers. 12px on a 36px-tall button is a pill-ish
+       corner; the platforms land far lower (macOS controls sit around 6px, Windows
+       11's Fluent radius is 4px for controls and 8px for cards), and that gap is a
+       large part of why the app read as a web page.
+
+       Deliberately 8 and not 6: the app leans on larger explicit radii in its own
+       layout classes (`rounded-2xl`/`rounded-3xl` on the composer, message
+       bubbles, suggestion cards), and those are set literally rather than from this
+       variable. Dropping the control radius to 6 would have opened a visible gap
+       between controls and the surfaces holding them. 8 tightens the controls while
+       keeping the family related. */
+    --radius: 0.5rem;
+
+    /* Control heights, as tokens rather than as `h-10` literals, because this app
+       ships to two form factors from one build and they want different numbers.
+       Consumed via `h-[var(--control-height)]` in button/input/select — arbitrary
+       values on purpose, not a `.h-control` utility: `cn()` is tailwind-merge, which
+       recognises an arbitrary `h-` utility and drops it when a caller passes an
+       explicit `h-8`. A custom class name is invisible to tailwind-merge, so both
+       would survive and stylesheet order would silently decide the height.
+
+       The values below are today's shipped heights exactly, so this block on its own
+       changes nothing. The desktop tightening is the `@media (pointer: fine)`
+       override further down; a UA that does not report a pointer keeps 40px. */
+    --control-height: 2.5rem; /* 40px */
+    --control-height-sm: 2.25rem; /* 36px */
+    --control-height-lg: 2.75rem; /* 44px */
 
     --sidebar-background: 224 34% 5%;
     --sidebar-foreground: 210 40% 90%;
@@ -83,6 +147,33 @@
   .dark {
     --background: 224 32% 6%;
     --foreground: 210 40% 98%;
+  }
+
+  /* Checklist item #3: native control heights, without breaking touch targets.
+   *
+   * 40px is the correct height for a finger and consistently too airy for a mouse.
+   * The platforms this shell impersonates land lower — a standard Fluent control on
+   * Windows 11 is 32px, an AppKit regular-size control is 28-32 — and that gap is
+   * one of the loudest remaining "this is a web page" tells, because it is visible
+   * on every button and field simultaneously.
+   *
+   * Keyed on the *pointer*, not on a breakpoint, and that distinction is the whole
+   * design. A width query gets this wrong in both directions: a phone in landscape
+   * is wide and still a finger, and an Electron window dragged narrow is small and
+   * still a mouse. `pointer: fine` asks the question that actually determines the
+   * right size. It matches on every desktop including this shell, and does not match
+   * on a phone or tablet, which therefore keep the 40px above untouched.
+   *
+   * A UA that reports nothing keeps the touch numbers. That is the safe default:
+   * a 40px control under a mouse is merely roomy, while a 32px one under a finger is
+   * a missed tap.
+   */
+  @media (pointer: fine) {
+    :root {
+      --control-height: 2.25rem; /* 36px */
+      --control-height-sm: 2rem; /* 32px */
+      --control-height-lg: 2.5rem; /* 40px */
+    }
   }
 }
 
@@ -126,6 +217,177 @@
     user-select: none;
   }
 
+  /* ---------------------------------------------------------------------------
+     Checklist item #5: native cursors. Desktop shell only.
+     ---------------------------------------------------------------------------
+
+     No desktop platform shows a pointing hand over a button. macOS, Windows and
+     GNOME all show the plain arrow; the hand is a *hyperlink* idiom that the web
+     generalised to every control, and it is one of the few tells that fires on
+     literally every click target in the app at once.
+
+     Tailwind's preflight ships `button, [role="button"] { cursor: pointer }`, so
+     this is an override of a framework default rather than a new opinion — and
+     Tailwind v4 reversed that rule to `cursor: default` for exactly this reason,
+     which is the same conclusion reached upstream.
+
+     SCOPED TO `[data-flyer-desktop]`, set on <html> by TitleBar's layout effect,
+     because the web build should keep web idioms: a hand cursor in a browser tab is
+     what a user expects, and removing it there would read as a broken page rather
+     than as a native app. The attribute is set before first paint, so there is no
+     frame of hand cursors on launch.
+
+     The root declaration works by INHERITANCE, which is deliberate: any descendant
+     with its own `cursor` rule — the artifact canvas splitter's `cursor-ew-resize`,
+     the sidebar's `cursor-w-resize` — wins automatically, because an element's own
+     declaration always beats an inherited value regardless of specificity. Only the
+     elements preflight targets *directly* need an explicit override below. */
+  [data-flyer-desktop] {
+    cursor: default;
+  }
+
+  /* Beats preflight (0,1,1) vs (0,0,1), and also beats a `cursor-pointer` utility
+     (0,1,0) — intentionally. A `cursor-pointer` written on a control is describing
+     "this is clickable", which the arrow already communicates on a desktop. */
+  [data-flyer-desktop] button,
+  [data-flyer-desktop] [role="button"] {
+    cursor: default;
+  }
+
+  /* Where the I-beam is right: text you can edit, and text you can select. `.prose`
+     is the message body — showing the arrow over a reply would hide the fact that
+     it is selectable, which is the opposite of the point.
+     ---------------------------------------------------------------------------
+     THIS LIST IS SHARED WITH THE `user-select` RULE BELOW, and that is the whole
+     design: the cursor is the affordance that *advertises* the selection, so the
+     set of things showing an I-beam and the set of things you can select have to
+     be the same set. Any divergence is a bug in one direction or the other — an
+     I-beam over unselectable text is a lie, and selectable text under an arrow
+     hides that it can be selected. Adding a content surface means adding it to
+     both, which is why they are written as one comment and two rules. */
+  [data-flyer-desktop] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="button"]):not([type="submit"]):not([type="file"]),
+  [data-flyer-desktop] textarea,
+  [data-flyer-desktop] [contenteditable="true"],
+  [data-flyer-desktop] .prose,
+  /* Code blocks were missing from this list and are the clearest case for it:
+     `pre`/`code` carry the syntax-highlighted output people copy by hand when
+     they want three lines out of forty rather than the whole block the Copy
+     button gives them. */
+  [data-flyer-desktop] pre,
+  [data-flyer-desktop] code,
+  /* The user's own message. Editing a sent prompt means selecting it. */
+  [data-flyer-desktop] .liquid-message-user {
+    cursor: auto;
+  }
+
+  /* A real hyperlink keeps the hand: native apps use it too for anything that
+     leaves the app. `a` with no href is not a link, and gets the arrow. */
+  [data-flyer-desktop] a[href] {
+    cursor: pointer;
+  }
+
+  /* `not-allowed` — the crossed circle — is a web convention. A disabled button on
+     macOS or Windows shows the ordinary arrow; the greyed-out styling is what
+     communicates the state. This deliberately overrides the eleven
+     `disabled:cursor-not-allowed` utilities in the component layer. */
+  [data-flyer-desktop] button:disabled,
+  [data-flyer-desktop] :disabled,
+  [data-flyer-desktop] [aria-disabled="true"] {
+    cursor: default;
+  }
+
+  /* ── Text selection: chrome is not text (§14.2 #21) ───────────────────────
+
+     The rule up in the reset covers `button, a, [role="button"], [role="menuitem"]`
+     — *interactive* chrome. Its comment says "native apps don't let you text-select
+     chrome", but the selector only achieves that for chrome you can click, and most
+     chrome is not clickable: the welcome screen's four feature badges, the "Powered
+     by" pill, the ARENA MODE caption, every section heading and helper line. Found
+     by double-clicking one in the running desktop app — "Lightning Fast" selected
+     the word "Lightning" and painted an OS selection highlight across a decorative
+     badge, which is the plainest browser tell left in the window.
+
+     Fixed by inverting the scope rather than by extending the selector, because
+     "decorative label" is not something CSS can match. The shell defaults to
+     unselectable and content opts back in — the same direction native toolkits
+     take, where a label is inert until something makes it a text view.
+
+     SCOPED TO `[data-flyer-desktop]`, like the cursors above and for the same
+     reason: in a browser tab, selecting any text on the page is expected
+     behaviour and taking it away would read as a broken page. Only the app
+     window claims to be an app.
+
+     `user-select` INHERITS, so `none` on the root reaches every descendant and
+     each content surface below re-establishes `text` for its own subtree. That
+     is what makes the opt-in list short enough to audit — and the list is
+     deliberately the same one the cursor rule uses, so the I-beam and the
+     selection can never disagree. The one documented addition is the anchor rule
+     that follows it; `native-selection.test.ts` asserts that the two lists differ
+     by exactly that and nothing else. */
+  [data-flyer-desktop] {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  [data-flyer-desktop] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="button"]):not([type="submit"]):not([type="file"]),
+  [data-flyer-desktop] textarea,
+  [data-flyer-desktop] [contenteditable="true"],
+  [data-flyer-desktop] .prose,
+  [data-flyer-desktop] pre,
+  [data-flyer-desktop] code,
+  [data-flyer-desktop] .liquid-message-user {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* A markdown link inside a reply is content, not chrome, and the reset above
+     catches it by tag name — which beats the inherited `text` from `.prose`,
+     because a direct match always beats inheritance no matter how specific the
+     ancestor's rule is.
+
+     What that actually costs was measured rather than assumed, in the running
+     desktop app: selecting a paragraph that spans a link still copies the link's
+     text (`getSelection().toString()` returned "before LINKTEXT after" with the
+     anchor computing to `none`), so replies were never copied lossily. The loss
+     is narrower — you cannot start a selection inside the link or double-click a
+     word in it, so a link *label* is the one part of a reply you cannot pick out
+     on its own. Small, but it is content, so it opts back in. */
+  [data-flyer-desktop] .prose a,
+  [data-flyer-desktop] .liquid-message-user a {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* ── Keyboard focus, everywhere (§14 item #5) ─────────────────────────────
+     Audited by counting: ChatInput has 14 hand-rolled `<button>`s and zero
+     `focus-visible` styles, ChatMessage 19 and zero, ArtifactPanel 8 and zero.
+     Tab through the composer and nothing at all moves — the focus is real and
+     invisible, which is worse than no keyboard support because Enter then fires a
+     button the user cannot see. Only shadcn's `Button`, the title bar and three
+     spots in the sidebar had ever been given a ring.
+
+     Fixed here rather than at ~55 call sites, and the mechanism is the point:
+
+     `:where()` contributes ZERO specificity, so this whole rule weighs only the
+     (0,1,0) of `:focus-visible`. Every Tailwind focus utility is a class plus a
+     pseudo-class — (0,2,0) — so any component that already styles its own focus,
+     or that deliberately suppresses it with `focus:outline-none` (the composer
+     textarea, which shows focus through its container instead), wins automatically
+     without needing to know this rule exists. It is a floor, not an override. Same
+     reasoning as the inherited `cursor` above: make the global rule the weakest
+     thing in the cascade and local intent survives by construction.
+
+     `outline` rather than a ring/box-shadow because outline follows border-radius
+     in current Chromium, costs no layout, and cannot be clipped by a rounded
+     parent the way an inset shadow can. Radix menu items keep their `bg-accent`
+     highlight instead — their plain `.outline-none` sits in the utilities layer,
+     which is emitted after this one and ties on specificity, so source order
+     leaves them alone. That is the correct native pattern for a menu row anyway. */
+  :where(button, [role="button"], a[href], summary, [role="menuitem"], [role="option"], [role="tab"], [tabindex]:not([tabindex="-1"])):focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
   /* We turned off -webkit-tap-highlight-color above, which on a phone leaves
      taps with no feedback at all: :hover never fires on touch, so a control
      looks inert until its action completes. This restores the missing beat with
@@ -162,12 +424,24 @@
     }
   }
 
-  /* Honour the OS "reduce motion" setting the way a native app does. This app
-     runs several always-on ambient animations (background hue drift, gradient
-     sheens, composer border spin) plus framer-motion transitions on every
-     message; for users who set this because motion causes nausea or vertigo,
-     that is actively unpleasant. Near-zero rather than `none` because some
-     framer-motion callbacks fire onAnimationComplete, and 0s can skip it. */
+  /* Honour the OS "reduce motion" setting the way a native app does.
+     This comment used to open with "This app runs several always-on ambient
+     animations (background hue drift, gradient sheens, composer border spin)" —
+     that was true when it was written and is no longer true: the native-look pass
+     removed all of them. Correcting it rather than leaving it, because a
+     reduced-motion block justified by animations that no longer exist is the kind
+     of thing that gets deleted as obsolete by the next reader.
+
+     It is not obsolete. What it still guards is substantial: framer-motion drives
+     an entrance transition on every message, the streaming caret, sidebar and
+     artefact-panel slide-ins, and every `whileHover`/`whileTap` in the app. For a
+     user who set this flag because motion causes nausea or vertigo, a long chat
+     scrolling past with per-message spring animations is the actual problem — more
+     so than the decorative loops were, since those at least stayed still relative
+     to the content.
+
+     Near-zero rather than `none` because some framer-motion callbacks fire from
+     onAnimationComplete, and 0s can skip it. */
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
@@ -179,7 +453,11 @@
     }
 
     /* Ambient decoration has no informational value — drop it entirely so it
-       doesn't flash once and settle in an arbitrary keyframe. */
+       doesn't flash once and settle in an arbitrary keyframe.
+       These three now hold still for everyone, so this rule is currently a no-op.
+       Kept because it costs nothing and it is the correct guard the moment any of
+       them regains motion — which is a likelier mistake than it sounds, since the
+       class names still say "liquid". */
     .liquid-canvas,
     .liquid-sheen::after,
     .liquid-composer::before {
@@ -190,7 +468,28 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: 'Inter', system-ui, sans-serif;
+    /* Platform UI font, not a webfont.
+       This used to say `'Inter', system-ui, sans-serif` — and until this pass Inter
+       was actually being fetched from Google Fonts by an `@import` at the top of
+       this file, so it usually won. That import is gone (see the note at line 1),
+       which means the old declaration named a face that no longer loads: every
+       platform would silently fall through to `system-ui` anyway. So this is not a
+       new visual direction being imposed, it is the declaration catching up to what
+       the browser was already going to do — with one exception that is the actual
+       point: a machine with Inter installed locally would still have picked it up,
+       giving that one user a different app than everyone else.
+
+       `system-ui` first is the whole trick behind native-feeling type: it resolves
+       to SF Pro on macOS/iOS, Segoe UI Variable on Windows 11, Roboto on Android,
+       and whatever the desktop is configured for on Linux. The rest of the stack is
+       the standard fallback chain for older engines that don't know `system-ui`,
+       ending in the emoji families so emoji in chat messages render in colour
+       rather than as tofu.
+
+       Keep in sync with `fontFamily.sans` in tailwind.config.ts. */
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+      'Helvetica Neue', Arial, 'Noto Sans', sans-serif, 'Apple Color Emoji',
+      'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
@@ -216,7 +515,24 @@
   }
 
   h1, h2, h3, h4, h5, h6 {
-    font-family: 'Space Grotesk', system-ui, sans-serif;
+    /* Was `'Space Grotesk', system-ui, sans-serif`. Same reasoning as `body`
+       above: Space Grotesk is no longer fetched, so this named a face that would
+       not load — except on a machine that happened to have it installed.
+
+       The deliberate decision here is that headings do NOT get a separate display
+       family. That looks like flattening the design, so it is worth saying why it
+       is the opposite: native platforms genuinely do have a display face — SF Pro
+       Display on Apple, Segoe UI Variable Display on Windows — but the platform
+       picks it *for* you, by optical size, from the same `system-ui` family. Naming
+       a second family here would override that mechanism with a guess. So the
+       heading hierarchy is carried by weight and tracking instead, which is
+       exactly how the system's own UI does it, and `font-optical-sizing: auto`
+       lets the variable system font swap to its display cut on its own.
+
+       Keep in sync with `fontFamily.display` in tailwind.config.ts. */
+    font-family: inherit;
+    font-optical-sizing: auto;
+    letter-spacing: -0.011em;
   }
 }
 
@@ -268,19 +584,39 @@
   }
 
   /* =========================================
-     🔥 ADDICTIVE UI ENHANCEMENTS 🔥
-     ========================================= */
+     Ambient surfaces — static, deliberately
+     =========================================
+
+     This block was headed "ADDICTIVE UI ENHANCEMENTS" and ran SEVEN infinite
+     animations at once: galaxy-pulse on the app shell, liquid-pan + a full
+     360deg hue-rotate on the canvas, grid-drift on the grid, liquid-sheen, a
+     spin-border rainbow on the composer, and breathing-glow on icons. Two more
+     lived in framer-motion (WelcomeScreen's logo, ChatInput's border).
+
+     All of it is gone, and the reason is the requirement: this has to feel like a
+     native app. Native desktop applications have **no always-on ambient motion**.
+     Not subtle motion — none. A background whose hue rotates continuously is the
+     single most web-toy thing an app can do, and it was layered under
+     `backdrop-filter: blur(40px) saturate(200%)`, so every frame of it forced a
+     re-blur of the sidebar and every glass surface above it. That is a permanent
+     GPU load and a measurable battery cost for decoration the user never asked
+     for and cannot turn off.
+
+     What survives is the part that was actually doing visual work: the layered
+     gradients that give the shell depth. Static, they read as a designed surface.
+     Animated, they read as a screensaver.
+
+     The class names are deliberately unchanged so no component markup had to move
+     for this — the elements still exist and still paint, they just hold still.
+     `prefers-reduced-motion` carve-outs for `.liquid-canvas`, `.liquid-sheen` and
+     `.liquid-composer` are kept in the base layer even though nothing animates
+     now: they cost nothing and they are the correct guard if any of these ever
+     regains motion. */
 
   .liquid-app {
     background: radial-gradient(circle at 15% 50%, rgba(20, 10, 40, 1), rgba(5, 5, 12, 1) 25%),
                 radial-gradient(circle at 85% 30%, rgba(10, 20, 50, 1), rgba(5, 5, 12, 1) 25%);
     background-color: #05050c;
-    animation: galaxy-pulse 15s ease-in-out infinite alternate;
-  }
-
-  @keyframes galaxy-pulse {
-    0% { background-position: 0% 50%; }
-    100% { background-position: 100% 50%; }
   }
 
   .liquid-canvas {
@@ -288,12 +624,6 @@
       radial-gradient(circle at 0% 0%, hsla(var(--primary) / 0.15) 0%, transparent 40%),
       radial-gradient(circle at 100% 100%, hsla(var(--accent) / 0.15) 0%, transparent 40%),
       radial-gradient(circle at 50% 50%, hsla(280, 80%, 50%, 0.1) 0%, transparent 50%);
-    animation: liquid-pan 20s ease-in-out infinite alternate, hue-rotate 30s linear infinite;
-  }
-
-  @keyframes hue-rotate {
-    0% { filter: hue-rotate(0deg); }
-    100% { filter: hue-rotate(360deg); }
   }
 
   .liquid-grid {
@@ -302,108 +632,56 @@
       linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
     background-size: 30px 30px;
     mask-image: radial-gradient(circle at center, black 30%, transparent 80%);
-    animation: grid-drift 30s linear infinite;
-  }
-
-  @keyframes grid-drift {
-    0% { background-position: 0px 0px; }
-    100% { background-position: 60px 60px; }
   }
 
   .liquid-sheen {
     background: linear-gradient(105deg, transparent 20%, rgba(255,255,255,0.03) 50%, transparent 80%);
     background-size: 200% 200%;
     mix-blend-mode: overlay;
-    animation: liquid-sheen 8s linear infinite;
   }
 
-  @keyframes liquid-sheen {
-    0% { background-position: 200% 50%; }
-    100% { background-position: -200% 50%; }
-  }
-
-  /* Ultimate Glassmorphism */
+  /* Glass surfaces. `saturate(180%)`/`saturate(200%)` came down to 120%: the
+     high values were compensating for the animated hue-rotate underneath, and
+     without it they just oversaturated everything sitting on the surface. The
+     blur radii came down too (28px→20px, 40px→24px) — a 40px backdrop blur is
+     expensive per frame and native window vibrancy is subtler than that. */
   .liquid-surface,
   .liquid-header {
     background: rgba(10, 10, 15, 0.4);
     border-color: rgba(255, 255, 255, 0.05);
     box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-    backdrop-filter: blur(28px) saturate(180%);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(120%);
+    -webkit-backdrop-filter: blur(20px) saturate(120%);
   }
 
-  .liquid-message-user {
-    background: linear-gradient(135deg, hsla(var(--primary) / 0.8), hsla(var(--accent) / 0.7));
-    color: #fff;
-    box-shadow: 0 8px 32px rgba(var(--primary) / 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.4);
-    text-shadow: 0 1px 2px rgba(0,0,0,0.2);
-    border: 1px solid hsla(var(--primary) / 0.5);
-  }
-  
-  
   .liquid-sidebar {
     background: rgba(8, 8, 12, 0.6);
     border-right: 1px solid rgba(255, 255, 255, 0.03);
-    backdrop-filter: blur(40px) saturate(200%);
+    backdrop-filter: blur(24px) saturate(120%);
+    -webkit-backdrop-filter: blur(24px) saturate(120%);
   }
 
-  /* Addictive Chat Composer (Glowing Border) */
+  /* The composer. Its ::before was a spin-border rainbow on a 4s loop that sped
+     up to 2s on focus; the focus treatment now lives in ChatInput.tsx as a
+     static hairline plus ring, which is what a native text field does. */
   .liquid-composer {
     background: rgba(15, 15, 22, 0.6);
-    backdrop-filter: blur(24px) saturate(150%);
+    backdrop-filter: blur(20px) saturate(120%);
+    -webkit-backdrop-filter: blur(20px) saturate(120%);
     border-radius: 1.5rem;
     position: relative;
     box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.5);
   }
-  
-  .liquid-composer::before {
-    content: "";
-    position: absolute;
-    inset: -2px;
-    border-radius: 1.6rem;
-    padding: 2px;
-    background: linear-gradient(
-      var(--angle),
-      hsl(var(--primary)),
-      hsl(var(--accent)),
-      hsl(280, 80%, 60%),
-      hsl(var(--primary))
-    );
-    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
-    opacity: 0.5;
-    animation: spin-border 4s linear infinite;
-    pointer-events: none;
-  }
-  
-  .liquid-composer:focus-within::before {
-    opacity: 1;
-    animation: spin-border 2s linear infinite;
-  }
 
-  @keyframes spin-border {
-    to { --angle: 360deg; }
-  }
-
+  /* Was `breathing-glow 3s infinite alternate`, pulsing box-shadow and scaling to
+     1.02 forever. An icon that inflates and deflates on its own is not a native
+     control; it is an attention-grab. Static now. */
   .liquid-icon {
     position: relative;
     overflow: hidden;
     background: linear-gradient(135deg, hsla(var(--primary) / 0.3), hsla(var(--accent) / 0.1));
     border: 1px solid hsla(var(--primary) / 0.4);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.2), 0 0 20px hsla(var(--primary) / 0.4);
-    animation: breathing-glow 3s ease-in-out infinite alternate;
-  }
-
-  @keyframes breathing-glow {
-    0% {
-      box-shadow: 0 0 10px hsla(var(--primary) / 0.3), inset 0 0 5px hsla(var(--primary) / 0.2);
-      transform: scale(1);
-    }
-    100% {
-      box-shadow: 0 0 25px hsla(var(--primary) / 0.6), inset 0 0 15px hsla(var(--primary) / 0.5);
-      transform: scale(1.02);
-    }
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.15);
   }
 
   .liquid-control {
@@ -475,27 +753,18 @@
     box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.055);
   }
 
-  @keyframes liquid-pan {
-    0% {
-      background-position: 0% 12%, 0% 50%, 0 0;
-      filter: saturate(105%);
-    }
-    100% {
-      background-position: 100% 88%, 100% 50%, 0 0;
-      filter: saturate(128%);
-    }
-  }
-
-  @keyframes liquid-sheen {
-    0% {
-      opacity: 0.34;
-      transform: translateX(-3%);
-    }
-    100% {
-      opacity: 0.58;
-      transform: translateX(3%);
-    }
-  }
+  /* `@keyframes liquid-pan` and `@keyframes liquid-sheen` were deleted here.
+   *
+   * These two are a different case from the four dead utilities above: they were
+   * not stale leftovers from someone else's abandoned work, they were orphaned by
+   * *this* pass, minutes earlier. `.liquid-canvas` used to run `liquid-pan`
+   * alternating-infinite alongside a 360deg hue-rotate, and `.liquid-sheen` ran
+   * its namesake. Both rules kept their class names — the markup still uses them
+   * as static surfaces — so the keyframes were left behind referring to nothing.
+   *
+   * Deleting them in the same pass rather than "later" matters, because a
+   * surviving `@keyframes liquid-sheen` next to a `.liquid-sheen` that no longer
+   * animates is exactly the shape that gets re-wired back together by accident. */
 }
 
 @layer utilities {
@@ -532,8 +801,35 @@
      vh fallback, everything else uses dvh, which tracks the collapsing URL bar
      and (with interactive-widget=resizes-content) the on-screen keyboard. */
   .app-shell-height {
+    /* `calc(100dvh - var(--titlebar-height))` rather than a plain 100dvh, because
+       the desktop shell now draws its own 32px title bar above the routes (see
+       src/components/desktop/TitleBar.tsx) and anything sizing itself to the full
+       viewport would hang 32px below the window.
+
+       Via a custom property rather than a Tailwind class on the two consumers,
+       for one specific reason: ChatSidebar uses this class while `fixed` below the
+       lg breakpoint, and a fixed element resolves percentage heights against the
+       viewport, not against its flex parent. So `height: 100%` — which would
+       otherwise be the obvious fix, given App.tsx already constrains the routes
+       region — is correct for the Chat root and silently 32px too tall for the
+       mobile sidebar. An Electron window between the 900px minWidth and the
+       1024px lg breakpoint hits exactly that case. calc() against the viewport is
+       right in both.
+
+       --titlebar-height defaults to 0px (declared in @layer base) and is set to
+       32px by TitleBar on mount, so the web build computes plain 100dvh. */
     height: 100vh;
-    height: 100dvh;
+    height: calc(100dvh - var(--titlebar-height, 0px));
+  }
+
+  /* Same computation for the two pages that want to *fill* rather than *be* the
+     shell height — Auth and NotFound both centre their content in the viewport.
+     They used `min-h-screen` (min-height: 100vh), which overflowed the shell by
+     the title bar's height and produced a document-level scrollbar on a page with
+     nothing to scroll. */
+  .app-shell-min-height {
+    min-height: 100vh;
+    min-height: calc(100dvh - var(--titlebar-height, 0px));
   }
 
   /* Momentum scrolling for the message list. The document sets
@@ -545,13 +841,42 @@
     overscroll-behavior-y: contain;
   }
 
+  /* Overlay-style scrollbars (task #14, checklist item #6).
+     Was: a permanently-visible 6px thumb at `hsl(var(--border)/0.6)`, turning
+     primary-teal on hover.
+
+     Two separate things here are un-native, and the visible one is the lesser.
+
+     The obvious one is that the thumb was always there. macOS and GNOME both use
+     overlay scrollbars that are invisible until you interact with the region;
+     Windows 11 keeps a thin rail but still hides the thumb. A permanent bar down
+     the side of a message list is a web page's idiom. So the thumb is now
+     transparent at rest and fades in when the pointer is over the scrolling
+     element — `:hover` on the element rather than on the scrollbar, which is what
+     makes it appear as you approach rather than only once you have already found
+     it.
+
+     The one worth more: `scrollbar-gutter: stable`. Chromium's classic scrollbars
+     take real layout width, so a container reflows by 6px the moment its content
+     first overflows. In a chat that happens at a precise and terrible moment —
+     mid-stream, as the first answer grows past the viewport — and every message
+     bubble shifts left by 6px while the user is reading. Reserving the gutter
+     up-front costs 6px of always-unused space and removes the jump entirely.
+     Native scroll views do not reflow their content when a scrollbar appears, and
+     this is the only way to get that here.
+
+     `scrollbar-color` is kept for Firefox, which has genuine overlay scrollbars
+     and no ::-webkit pseudo-elements to style. It gets `thin` + a dim thumb and
+     ignores everything below, which is the right outcome there anyway. */
   .scrollbar-thin {
     scrollbar-width: thin;
     scrollbar-color: hsl(var(--border) / 0.5) transparent;
+    scrollbar-gutter: stable;
   }
 
   .scrollbar-thin::-webkit-scrollbar {
-    width: 6px;
+    width: 8px;
+    height: 8px;
   }
 
   .scrollbar-thin::-webkit-scrollbar-track {
@@ -559,13 +884,38 @@
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background-color: hsl(var(--border) / 0.6);
+    /* `background-clip: content-box` with a transparent border is the trick that
+       makes an 8px-wide scrollbar draw a 4px-wide thumb: the border eats the
+       outer 2px on each side. Sizing the thumb inside a wider hit area is exactly
+       what the platforms do — the visible rail is hairline, the grab target is
+       finger-width. */
+    background-color: transparent;
+    border: 2px solid transparent;
+    background-clip: content-box;
     border-radius: 10px;
-    transition: background-color 0.2s;
+    transition: background-color 0.18s ease;
+  }
+
+  .scrollbar-thin:hover::-webkit-scrollbar-thumb {
+    background-color: hsl(0 0% 100% / 0.16);
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-    background-color: hsl(var(--primary) / 0.5);
+    background-color: hsl(0 0% 100% / 0.28);
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:active {
+    /* Neutral white rather than the old primary-teal. A scrollbar that changes
+       to the accent colour when grabbed is drawing attention to itself; the
+       platforms just darken the thumb. */
+    background-color: hsl(0 0% 100% / 0.38);
+  }
+
+  /* Chromium draws a small square where a vertical and horizontal bar meet, and
+     it is not transparent by default — on a dark surface it shows as a pale dot
+     in the corner of any region that can scroll both ways (the code viewer). */
+  .scrollbar-thin::-webkit-scrollbar-corner {
+    background: transparent;
   }
 
   /* Smooth scrolling */
@@ -588,76 +938,58 @@
     overflow-anchor: none;
   }
 
-  .animate-pulse-glow {
-    animation: pulse-glow 2s ease-in-out infinite;
+  /* Window drag regions (task #14, checklist item #1).
+     `-webkit-app-region` is an Electron/Chromium-embedded property with no
+     Tailwind utility, and it is meaningless in a browser — where it is simply
+     ignored, which is why these can live in the shared stylesheet rather than
+     behind a desktop-only import.
+
+     Two things about it that are easy to get wrong, both encoded here rather than
+     left to each caller:
+
+     `drag` is inherited by the whole subtree, so any interactive element inside a
+     drag region needs `app-no-drag` or it becomes un-clickable — the compositor
+     claims the mousedown for a window move before the page sees it. That is the
+     failure mode where a button looks perfectly normal and does nothing, which is
+     hard to attribute.
+
+     `user-select: none` belongs with `drag` and not separately: dragging a window
+     by a region that also selects text leaves the text highlighted afterwards. */
+  .app-drag {
+    -webkit-app-region: drag;
+    -webkit-user-select: none;
+    user-select: none;
   }
 
-  @keyframes pulse-glow {
-    0%, 100% {
-      box-shadow: 0 0 20px hsla(172, 66%, 50%, 0.2);
-    }
-    50% {
-      box-shadow: 0 0 40px hsla(172, 66%, 50%, 0.4);
-    }
+  .app-no-drag {
+    -webkit-app-region: no-drag;
   }
 
-  .typing-indicator span {
-    animation: typing 1.4s infinite ease-in-out;
-  }
-
-  .typing-indicator span:nth-child(2) {
-    animation-delay: 0.2s;
-  }
-
-  .typing-indicator span:nth-child(3) {
-    animation-delay: 0.4s;
-  }
-
-  @keyframes typing {
-    0%, 60%, 100% {
-      transform: translateY(0);
-      opacity: 0.4;
-    }
-    30% {
-      transform: translateY(-4px);
-      opacity: 1;
-    }
-  }
-
-  /* Floating animation */
-  @keyframes float {
-    0%, 100% {
-      transform: translateY(0);
-    }
-    50% {
-      transform: translateY(-10px);
-    }
-  }
-
-  .animate-float {
-    animation: float 3s ease-in-out infinite;
-  }
-
-  /* Shimmer effect */
-  @keyframes shimmer {
-    0% {
-      background-position: -200% 0;
-    }
-    100% {
-      background-position: 200% 0;
-    }
-  }
-
-  .animate-shimmer {
-    background: linear-gradient(
-      90deg,
-      transparent,
-      hsla(172, 66%, 50%, 0.1),
-      transparent
-    );
-    background-size: 200% 100%;
-    animation: shimmer 2s infinite;
-  }
+  /* FOUR DEAD ANIMATION UTILITIES WERE REMOVED HERE — `.animate-pulse-glow`,
+   * `.typing-indicator span`, `.animate-float` and `.animate-shimmer`, plus their
+   * `pulse-glow`, `typing`, `float` and `shimmer` keyframes.
+   *
+   * Every one was an `infinite` animation, and not one was referenced anywhere in
+   * the repo — verified across .tsx, .ts, .html and .cjs, excluding node_modules,
+   * dist and release. So they cost nothing at runtime, but they were the reason
+   * the file *read* as though the app animated far more than it does, and the next
+   * person reaching for a loading indicator would have found four half-finished
+   * ones and picked whichever they saw first.
+   *
+   * Worth being precise about what is and is not being argued here, because the
+   * native-look pass is not "delete animation":
+   *
+   *   A loading or progress indicator SHOULD animate, in a native app as much as
+   *   anywhere — it communicates that work is happening. `.typing-indicator` was a
+   *   perfectly reasonable three-dot bouncer and would have been kept if anything
+   *   used it. It went because it was dead, not because it moved.
+   *
+   *   `.animate-float` and `.animate-pulse-glow` are the opposite: motion applied
+   *   to decoration, conveying nothing. Those are the ones that would not have
+   *   survived this pass even in use.
+   *
+   * If a loading state needs building later, build one deliberately rather than
+   * reviving whichever of these git surfaces first. */
 }
 
 /* Responsive code blocks */

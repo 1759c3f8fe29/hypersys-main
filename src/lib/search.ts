@@ -8,7 +8,7 @@
 // when running inside the native desktop shell (file:// origin); on the web it
 // is a passthrough, preserving the same-origin call.
 
-import { apiPath } from "./ai";
+import { apiPath, fetchAsUser } from "./ai";
 
 export interface SearchResult {
   title: string;
@@ -48,14 +48,29 @@ const SEARCH_PROXY_PATH = "/api/search";
 
 export async function webSearch(query: string, signal?: AbortSignal): Promise<SearchResponse | null> {
   try {
-    const res = await fetch(apiPath(SEARCH_PROXY_PATH), {
+    // Sent as the signed-in user. It was an anonymous POST, and `/api/search` goes
+    // through the same `applyMeter` as `/api/llm`: no token means the request is
+    // identified by a hashed IP and metered against DAILY_LIMIT_GUEST (10/day)
+    // rather than DAILY_LIMIT_USER (100/day). So a signed-in user's searches spent
+    // a guest allowance, and after ten of them in a day every search 429'd with a
+    // quota message that made no sense to someone who was signed in — while the
+    // user tier the quota code implements was unreachable from this path entirely.
+    //
+    // fetchAsUser also carries the expired-token retry, which matters more here than
+    // it looks: a search runs mid-turn inside the agent loop, so a 401 does not
+    // surface as "please sign in", it surfaces as the model answering without the
+    // web results it asked for.
+    const { response: res, errText } = await fetchAsUser(apiPath(SEARCH_PROXY_PATH), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, num: 6 }),
       signal,
     });
     if (!res.ok) {
-      console.error("Web search proxy error:", res.status);
+      // errText included: the status alone cannot distinguish a quota refusal from a
+      // missing provider key, and those need opposite responses from whoever reads
+      // the log. It is already read by fetchAsUser, so this costs nothing.
+      console.error("Web search proxy error:", res.status, errText);
       return null;
     }
     return (await res.json()) as SearchResponse;

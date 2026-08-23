@@ -68,6 +68,73 @@ describe("parseMarkdownBlocks", () => {
   });
 });
 
+// This function used to own a private fence regex — `/^\s*```+\s*(\S+)?\s*$/` — and a
+// second parser for "where does code start and end" is always the narrower one. Each
+// case below was measured against the shipped version and produced a corrupt document:
+// one that opens cleanly in Word and is wrong, which is the worst failure this file can
+// produce (brief §14.2 #16's shape, in the write direction).
+//
+// The split now comes from `segmentByFence`, so an export agrees with what the user saw
+// on screen. That agreement is the actual requirement, and a private rule could never
+// meet it.
+describe("parseMarkdownBlocks uses the app's one fence rule", () => {
+  // The tell in every case is a code comment becoming a document heading. `# ` is an
+  // H1 in prose and a comment in half the languages models write, so a fence that
+  // fails to hold turns the *inside* of the block into document structure.
+  const INSIDE = "# initialise\n- not a bullet";
+
+  it("treats a ~~~ fence as a fence", () => {
+    // The shipped regex knew only backticks, so this became six blocks: two paragraphs
+    // holding the literal text "~~~python" and "~~~", an H1 reading "initialise", and a
+    // bullet — with the fence markers printed in the document body.
+    const blocks = parseMarkdownBlocks(`Intro\n\n~~~python\n${INSIDE}\n~~~\n\nOutro`);
+    expect(blocks.map((b) => b.type)).toEqual(["paragraph", "code", "paragraph"]);
+    expect(blocks[1]).toMatchObject({ type: "code", lang: "python", text: INSIDE });
+  });
+
+  it("accepts an info string of more than one token", () => {
+    // ```js {1,3} and ```py title="app.py" are both routine model output, and the old
+    // `(\S+)?\s*$` required the info string to be a single token. The *second* failure
+    // is the worse one: the closing ``` was then read as an opening fence, so every
+    // paragraph after the block was swallowed into a code box — or lost, when the
+    // block was last in the document.
+    for (const info of ["js {1,3}", 'js title="app.js"', "js showLineNumbers"]) {
+      const blocks = parseMarkdownBlocks(`Intro\n\n\`\`\`${info}\n${INSIDE}\n\`\`\`\n\nOutro`);
+      expect(blocks.map((b) => b.type)).toEqual(["paragraph", "code", "paragraph"]);
+      expect(blocks[1]).toMatchObject({ lang: "js", text: INSIDE });
+      // The assertion that names the data loss: the trailing prose is still prose.
+      expect(blocks[2]).toMatchObject({ type: "paragraph", text: "Outro" });
+    }
+  });
+
+  it("lets a longer fence contain a shorter one", () => {
+    // CommonMark: the closing fence is at least as long as the opener. Writing docs
+    // about markdown is a normal request, and the old rule ended the outer block at
+    // the inner ``` — so the example's own `# heading` escaped into the document as
+    // real structure and the tail was swallowed as code.
+    const md = "Intro\n\n````md\n```js\nconst a = 1;\n```\n# inside the example\n````\n\nOutro";
+    const blocks = parseMarkdownBlocks(md);
+    expect(blocks.map((b) => b.type)).toEqual(["paragraph", "code", "paragraph"]);
+    expect(blocks[1]).toMatchObject({ lang: "md" });
+    expect((blocks[1] as { text: string }).text).toContain("# inside the example");
+    expect(blocks[2]).toMatchObject({ type: "paragraph", text: "Outro" });
+  });
+
+  it("keeps a table's lookahead inside its own segment", () => {
+    // The table branch reads `lines[i + 1]` for the separator row, and the parser is
+    // now per-segment — so this pins that a table immediately before a fence still
+    // parses, i.e. that segmenting did not sever a lookahead from what it looks at.
+    const blocks = parseMarkdownBlocks("| a | b |\n|---|---|\n| 1 | 2 |\n\n```js\nx();\n```");
+    expect(blocks.map((b) => b.type)).toEqual(["table", "code"]);
+    expect(blocks[0]).toMatchObject({ header: ["a", "b"], rows: [["1", "2"]] });
+  });
+
+  it("still gives a bare fence an empty body and no language", () => {
+    const blocks = parseMarkdownBlocks("```\n```");
+    expect(blocks).toEqual([{ type: "code", text: "", lang: undefined }]);
+  });
+});
+
 describe("parseInline", () => {
   it("splits bold, italic and code without eating the surrounding text", () => {
     expect(parseInline("a **b** c `d` e *f*")).toEqual([

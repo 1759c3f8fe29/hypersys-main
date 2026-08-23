@@ -52,7 +52,7 @@
 //     flash-free first paint, and error dialogs for the two failures that would
 //     otherwise present as a black window.
 
-const { app, BrowserWindow, session, shell, Menu, dialog } = require("electron");
+const { app, BrowserWindow, session, shell, Menu, dialog, ipcMain, nativeTheme } = require("electron");
 const path = require("path");
 const fs = require("fs");
 
@@ -162,6 +162,157 @@ function saveWindowState() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Window chrome (task #14, native look-and-feel).
+// ---------------------------------------------------------------------------
+// The single most obvious "this is a web page in a wrapper" tell was the default
+// OS title bar: a light-grey (or GTK-themed) strip with the word "Flyer AI" in
+// it, sitting on top of a dark full-bleed app that had its own header
+// immediately below. Two stacked bars, one of which the app does not control.
+//
+// So the frame comes off and the app draws its own — but *how* differs per
+// platform in ways that are not interchangeable, and getting it wrong produces
+// either duplicate window buttons or none at all:
+//
+//   macOS   `titleBarStyle: "hiddenInset"`. The traffic lights stay, drawn by the
+//           OS, inset from the corner. This is the correct macOS answer and the
+//           renderer must NOT draw its own buttons — it reserves space on the
+//           left instead. Faking traffic lights is immediately noticeable
+//           (wrong hover behaviour, no window-menu on long-press, no dimming
+//           when the window loses focus).
+//
+//   Windows `titleBarStyle: "hidden"` + `titleBarOverlay`. The overlay draws the
+//           real Windows caption buttons over the page, which matters for more
+//           than looks: Windows 11 attaches the Snap Layouts flyout to the
+//           genuine maximize button, and a hand-drawn div does not get it.
+//           Renderer reserves space on the right.
+//
+//   Linux   `titleBarStyle: "hidden"` and nothing else — `titleBarOverlay` is
+//           not implemented here, so this leaves a window with no controls at
+//           all and the renderer has to draw them. That is acceptable on Linux
+//           in a way it would not be on macOS, because there is no single
+//           canonical control set to be wrong about: GNOME shows one close
+//           button, KDE shows three, and every app ships its own look under
+//           client-side decorations. GTK apps have drawn their own for a decade.
+//
+// SAFETY: if the renderer ever fails to paint (bundle error, white screen), a
+// frameless window has no visible way to close. The escape hatch is real and
+// pre-existing rather than assumed — buildMenu registers `role: "quit"`
+// (Ctrl+Q) and a Window submenu with close/minimize, and autoHideMenuBar means
+// Alt reveals the menu bar. That is checked, not hoped for: those roles are at
+// the `isMac ? … : { role: "quit" }` line in buildMenu and in the Window menu
+// below it.
+const TITLE_BAR_OPTIONS = (() => {
+  if (process.platform === "darwin") {
+    return { titleBarStyle: "hiddenInset" };
+  }
+  if (process.platform === "win32") {
+    return {
+      titleBarStyle: "hidden",
+      // Matches --background in src/index.css (hsl(224 34% 5%) ≈ #08090d) so the
+      // caption-button strip is not a visible patch against the app. symbolColor
+      // is the glyph colour; it needs to be light on this background or the
+      // buttons vanish.
+      titleBarOverlay: { color: "#0b0b0f", symbolColor: "#c8cbd4", height: 40 },
+    };
+  }
+  return { titleBarStyle: "hidden" };
+})();
+
+// The renderer needs to know which of the three cases it is in — whether to draw
+// buttons, and which side to leave clear. Sending the raw platform string and
+// letting the renderer decide would spread this decision across two files, so
+// the main process resolves it once here and the preload passes the answer
+// through.
+//
+// "left"  → OS controls are top-left (macOS traffic lights); inset the left.
+// "right" → OS controls are top-right (Windows overlay); inset the right.
+// "none"  → no OS controls; the renderer draws its own.
+const WINDOW_CONTROLS_SIDE =
+  process.platform === "darwin" ? "left" : process.platform === "win32" ? "right" : "none";
+
+// Window control + focus IPC.
+//
+// This is the first privileged surface the preload exposes, so the shape of it
+// matters more than the size. Two rules it follows:
+//
+//   1. Every handler resolves its target from `event.sender`, never from an id
+//      or index the renderer supplies. A compromised renderer can therefore only
+//      act on its own window — it cannot enumerate or close someone else's.
+//   2. The verbs are fixed and total: minimize, toggle-maximize, close. There is
+//      no generic "call this BrowserWindow method" passthrough, which is the
+//      usual way this feature turns into arbitrary main-process access.
+function senderWindow(event) {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  // A window can be destroyed between the click and the IPC arriving — closing
+  // via the menu while a mouse-down is in flight is enough. Every handler below
+  // guards, because calling a method on a destroyed BrowserWindow throws in the
+  // main process, and an unhandled throw there is a crash rather than a logged
+  // error.
+  return win && !win.isDestroyed() ? win : null;
+}
+
+function installWindowControlIpc() {
+  ipcMain.on("flyer:window-minimize", (event) => {
+    senderWindow(event)?.minimize();
+  });
+
+  ipcMain.on("flyer:window-toggle-maximize", (event) => {
+    const win = senderWindow(event);
+    if (!win) return;
+    // unmaximize() rather than a second maximize(): the button is a toggle and
+    // the OS treats these as distinct operations. Also note this deliberately
+    // does not use isFullScreen — a maximize button that silently exits
+    // fullscreen would be surprising, and the menu already has a fullscreen
+    // toggle with the platform accelerator.
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+  });
+
+  ipcMain.on("flyer:window-close", (event) => {
+    // close(), not destroy(): close() fires the "close" event, which is what
+    // saveWindowState is bound to. destroy() would skip it and lose the geometry
+    // the user just arranged.
+    senderWindow(event)?.close();
+  });
+
+  ipcMain.handle("flyer:window-state", (event) => {
+    const win = senderWindow(event);
+    return {
+      maximized: win ? win.isMaximized() : false,
+      fullScreen: win ? win.isFullScreen() : false,
+      focused: win ? win.isFocused() : false,
+    };
+  });
+}
+
+// Push state changes to the renderer so the chrome can react the way native
+// chrome does: the maximize glyph becomes a restore glyph, and an unfocused
+// window dims its own title bar. That second one is checklist item #9 and is
+// easy to underrate — an app whose header looks identical focused and unfocused
+// is one of those differences you feel without being able to name.
+function installWindowStateEvents(win) {
+  const send = () => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+    win.webContents.send("flyer:window-state-changed", {
+      maximized: win.isMaximized(),
+      fullScreen: win.isFullScreen(),
+      focused: win.isFocused(),
+    });
+  };
+
+  for (const evt of [
+    "maximize",
+    "unmaximize",
+    "enter-full-screen",
+    "leave-full-screen",
+    "focus",
+    "blur",
+  ]) {
+    win.on(evt, send);
+  }
+}
+
 function createWindow() {
   const state = readWindowState();
 
@@ -170,6 +321,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: "Flyer AI",
+    ...TITLE_BAR_OPTIONS,
     // Linux reads the window icon from the running process, not from the .desktop
     // entry, so without this the taskbar shows the stock Electron diamond even
     // when the installed launcher icon is correct. Ignored on macOS (the bundle
@@ -177,7 +329,17 @@ function createWindow() {
     icon: path.join(__dirname, "icon.png"),
     // The default background flash on a dark app is jarring. Let the app's own
     // body background paint immediately.
-    backgroundColor: "#0b0b0f",
+    //
+    // This is the exact value of the `--background` token in src/index.css —
+    // hsl(224 32% 6%) — and of the `theme-color` meta in index.html. It used to be
+    // #0b0b0f, which is close enough to look deliberate and is not the same colour:
+    // the app's dark is blue-tinted and that one is neutral. The mismatch showed up
+    // in two places, neither of them the boot flash it was written for. Chromium
+    // paints this colour into newly-exposed area during a live window resize, so
+    // dragging a window edge revealed a strip of the wrong dark before the renderer
+    // caught up; and a slow first paint showed the whole window in the wrong shade
+    // and then shifted. Keep this equal to --background, or the seam comes back.
+    backgroundColor: "#0a0d14",
     // Do not show an empty frame while the renderer boots. A native app appears
     // already-drawn; a web shell shows a blank rectangle for a beat and then
     // paints, which reads as slow even when total time to interactive is the
@@ -190,9 +352,25 @@ function createWindow() {
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
-      // We don't expose any privileged IPC for v1; the app is pure web and calls
-      // the API over fetch. contextIsolation stays on and nodeIntegration stays
-      // off — the renderer is the same unprivileged bundle as the web build.
+      // Appended to the renderer process's argv, which is where the preload reads
+      // it from. This is the mechanism rather than letting the preload call
+      // process.platform itself: WINDOW_CONTROLS_SIDE above is the one place that
+      // decides which platform draws which controls, and a second platform check
+      // in the preload is a copy that can disagree with it after an edit. Passing
+      // the resolved answer means the preload has no opinion to get wrong.
+      additionalArguments: [`--flyer-controls-side=${WINDOW_CONTROLS_SIDE}`],
+      // contextIsolation stays on and nodeIntegration stays off. That was easy to
+      // claim when the preload exposed nothing; it is the part that actually earns
+      // its keep now that it exposes window controls. With isolation on, the
+      // `flyerDesktop` object the renderer sees is a structured clone across a
+      // world boundary — the page cannot reach the `ipcRenderer` closed over
+      // inside it, so it cannot send on channels the bridge does not name.
+      //
+      // The exposed surface is three no-argument verbs, one read and one
+      // subscription; every main-side handler resolves its target window from the
+      // IPC sender rather than from anything the renderer says. See preload.cjs
+      // for why it is shaped that way and installWindowControlIpc above for the
+      // enforcement.
       contextIsolation: true,
       nodeIntegration: false,
       // Turns on Chromium's spellchecker for the composer. A red squiggle under a
@@ -237,6 +415,7 @@ function createWindow() {
 
   installWindowGuards(mainWindow);
   installContextMenu(mainWindow);
+  installWindowStateEvents(mainWindow);
 
   const isDev = !app.isPackaged && IS_DEV;
 
@@ -407,8 +586,26 @@ function installContextMenu(win) {
     }
 
     if (!app.isPackaged) {
-      items.push({ type: "separator" });
-      items.push({ label: "Inspect element", click: () => win.webContents.inspectElement(params.x, params.y) });
+      // Only alongside real items, never as the whole menu. Two reasons, and the
+      // second is the one that matters:
+      //
+      // 1. A one-item menu reading "Inspect element" on a right-click in empty
+      //    space is a debug affordance masquerading as the app's own menu.
+      // 2. The renderer now has real context menus of its own (conversation rows
+      //    — Rename / Copy title / Delete). Radix calls preventDefault() on the
+      //    DOM contextmenu event, which should stop Blink ever asking the browser
+      //    process for a menu, so this handler should not run there at all. That
+      //    is an assumption about Chromium internals rather than something
+      //    measured, so this keeps the failure mode harmless: if the event does
+      //    reach here, the app menu appears alone instead of with a stray debug
+      //    item beside it.
+      //
+      // Inspect is still reachable — View → Toggle Developer Tools, then the
+      // element picker.
+      if (items.length) {
+        items.push({ type: "separator" });
+        items.push({ label: "Inspect element", click: () => win.webContents.inspectElement(params.x, params.y) });
+      }
     }
 
     if (items.length) Menu.buildFromTemplate(items).popup({ window: win });
@@ -446,6 +643,36 @@ async function saveImage(win, srcURL) {
 // The zoom and reload roles are the same story.
 //
 // autoHideMenuBar (above) keeps it out of sight; the accelerators still work.
+
+/**
+ * Hand a menu action to the renderer.
+ *
+ * Menu items that map to app behaviour cannot be implemented in main — main has
+ * no idea what a conversation is. They have to arrive in React as an event.
+ *
+ * This replaced an `executeJavaScript('window.location.hash = "#/chat"')` under
+ * File → New Chat, which did not work: HashRouter treats a hash it is already on
+ * as a no-op, so pressing Ctrl+N while looking at a chat — the only time anyone
+ * ever presses it — navigated nowhere and cleared nothing. The menu item had
+ * been inert since it was written.
+ *
+ * executeJavaScript is also the wrong tool in general. It injects a string into
+ * the renderer's main world, which is precisely the boundary contextIsolation
+ * exists to hold, and it couples the main process to the router implementation:
+ * switching HashRouter for BrowserRouter would silently break the menu again.
+ * An IPC message the app subscribes to is a contract both halves can see.
+ *
+ * `focusedWindow ?? mainWindow` rather than mainWindow alone: an accelerator
+ * fires against whichever window has focus, and while there is only one app
+ * window today, a menu that quietly acts on a different window than the one you
+ * are looking at is a bug that is very hard to see.
+ */
+function sendMenuCommand(command) {
+  const target = BrowserWindow.getFocusedWindow() ?? mainWindow;
+  if (!target || target.isDestroyed()) return;
+  target.webContents.send("flyer:menu-command", command);
+}
+
 function buildMenu() {
   const isMac = process.platform === "darwin";
 
@@ -473,11 +700,7 @@ function buildMenu() {
         {
           label: "New Chat",
           accelerator: "CmdOrCtrl+N",
-          // HashRouter: the app's routes live in the fragment, so setting the
-          // hash is a real in-app navigation and works identically under file://
-          // and http://. Reaching for a full reload here would throw away the
-          // renderer's state for no reason.
-          click: () => mainWindow?.webContents.executeJavaScript('window.location.hash = "#/chat"'),
+          click: () => sendMenuCommand("new-chat"),
         },
         { type: "separator" },
         isMac ? { role: "close" } : { role: "quit" },
@@ -500,6 +723,24 @@ function buildMenu() {
     {
       label: "View",
       submenu: [
+        // App-level view toggles first, platform roles below. These duplicate
+        // renderer shortcuts on purpose: the chord is what people use, the menu
+        // entry is how they find out the chord exists. Both routes end in the
+        // same renderer action, and the accelerators are only registered here so
+        // there is exactly one owner per chord — a menu accelerator wins over a
+        // renderer keydown, so binding the same chord in both places would leave
+        // the renderer's copy dead code that looks live.
+        {
+          label: "Toggle Conversations",
+          accelerator: "CmdOrCtrl+B",
+          click: () => sendMenuCommand("toggle-sidebar"),
+        },
+        {
+          label: "Toggle Files & Code",
+          accelerator: "CmdOrCtrl+Shift+E",
+          click: () => sendMenuCommand("toggle-artifact-canvas"),
+        },
+        { type: "separator" },
         { role: "reload" },
         { role: "forceReload" },
         { type: "separator" },
@@ -526,6 +767,16 @@ function buildMenu() {
     {
       role: "help",
       submenu: [
+        {
+          label: "Keyboard Shortcuts",
+          // CmdOrCtrl+/ rather than the "?" some apps use: "?" requires Shift on
+          // most layouts, so registering it as an accelerator makes Electron
+          // expect Shift too — and on layouts where "?" is unshifted the chord
+          // becomes unreachable. "/" is a physical key everywhere.
+          accelerator: "CmdOrCtrl+/",
+          click: () => sendMenuCommand("show-shortcuts"),
+        },
+        { type: "separator" },
         {
           label: "Flyer on the web",
           click: () => shell.openExternal(API_BASE || "https://myflyer.vercel.app"),
@@ -606,16 +857,32 @@ function installCsp() {
     "default-src 'self' file: data: blob: https:",
     // 'unsafe-eval' is required: Pyodide's WASM bootstrap uses it.
     "script-src 'self' file: https://cdn.jsdelivr.net 'unsafe-inline' 'unsafe-eval'",
-    // https://fonts.googleapis.com is load-bearing, not decoration: src/index.css
-    // line 1 is `@import url('https://fonts.googleapis.com/css2?family=Inter…
-    // &family=Space+Grotesk…')`, so a style-src without it blocks the app's
-    // ENTIRE typeface set and the packaged app silently renders in fallback
-    // system fonts — which reads as "the desktop build looks wrong" rather than
-    // as a CSP error, because a blocked @import reports no console message and
-    // an empty errorText.
-    "style-src 'self' file: data: https://fonts.googleapis.com 'unsafe-inline'",
+    // This used to read `style-src 'self' file: data: https://fonts.googleapis.com
+    // 'unsafe-inline'`, and the comment above it argued at length that the Google
+    // Fonts origin was "load-bearing, not decoration" because src/index.css line 1
+    // was an `@import` of Inter + Space Grotesk. That was true and is now false:
+    // the native-look pass (#14) deleted the @import, switched the app to the
+    // platform UI font, and removed the two preconnect hints from index.html.
+    //
+    // So the origin comes out of the allowlist. Worth doing rather than leaving as
+    // harmless slack — an allowlisted remote stylesheet origin is a real injection
+    // surface (a stylesheet can exfiltrate via selector-triggered background-image
+    // URLs), and this one now protects nothing. The old comment's warning still
+    // applies in reverse, though, and is the reason to be careful here: a blocked
+    // @import reports no console message and an empty errorText, so if a webfont
+    // is ever reintroduced it will fail *silently* into fallback fonts. Whoever
+    // adds one must add its origin back here in the same commit.
+    //
+    // 'unsafe-inline' stays and is not slack: Vite injects the built stylesheet
+    // and several components set inline `style` attributes.
+    "style-src 'self' file: data: 'unsafe-inline'",
     "img-src 'self' file: data: blob: https:",
-    "font-src 'self' file: data: https:",
+    // Narrowed from `'self' file: data: https:` for the same reason: with no
+    // webfonts, nothing should be fetching a font over the network at all, and
+    // `https:` here was a blanket permit for any host to serve one. data: is kept
+    // because icon fonts and inlined subsets are legitimately encoded that way,
+    // and 'self'/file: cover a font ever being bundled into dist/.
+    "font-src 'self' file: data:",
     // https: covers Firebase, the API origin, the Pyodide CDN's asset fetches
     // and the Pollinations image host.
     "connect-src 'self' file: data: blob: https:",
@@ -669,6 +936,21 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    // Before anything draws. The renderer's palette is dark-only (see the
+    // color-scheme note in src/index.css), but this app also puts *native* surfaces
+    // on screen that no stylesheet reaches: the auto-hidden menu bar, the
+    // spellcheck/context menus built in installContextMenu, every dialog.showMessageBox
+    // including the "Flyer could not start" box, and on Windows the real caption
+    // buttons drawn by titleBarOverlay. Left at the default those follow the OS, so
+    // a user on a light desktop got light menus hanging off a dark window — the
+    // giveaway being that the *app-drawn* chrome and the *OS-drawn* chrome disagreed,
+    // which no real native app does.
+    //
+    // Pinned rather than followed, to stay honest about what exists: this says "the
+    // app is dark", which is true, instead of "the app follows you", which would
+    // require a light token set. Change it to "system" in the same commit that adds
+    // one, not before.
+    nativeTheme.themeSource = "dark";
     installApiOriginRewrite();
     // Dev deliberately gets no CSP — see installCsp: the Vite HMR websocket needs
     // ws:, and localhost is already trusted.
@@ -677,6 +959,15 @@ if (!app.requestSingleInstanceLock()) {
     // menu, and setting the menu after the window exists leaves a gap where
     // copy/paste do nothing.
     buildMenu();
+    // Also before createWindow, and for a sharper reason than the menu: these are
+    // ipcMain registrations, not per-window ones, and the renderer can send its
+    // first `flyer:window-state` invoke as early as its first React effect. If the
+    // handler is not registered by then the invoke rejects with "No handler
+    // registered", the title bar renders with maximized:false against a window
+    // that is actually maximized, and the restore glyph is wrong until the user
+    // happens to toggle it. Registering here means the handler exists before any
+    // renderer does.
+    installWindowControlIpc();
     createWindow();
 
     app.on("activate", () => {
