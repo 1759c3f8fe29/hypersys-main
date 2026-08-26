@@ -1183,11 +1183,61 @@ function imageFallbackChain(modelId: string): string[] {
  */
 const MAX_IMAGE_PROMPT_CHARS = 700;
 
+/**
+ * Pixel dimensions per aspect ratio — a real parameter, replacing the prose hint
+ * that used to carry the ratio.
+ *
+ * `generate_image` has always accepted an `aspect_ratio` enum and used to fold it
+ * into the prompt text as "tall vertical composition". That is a weak lever on a
+ * diffusion model and it was also the *first thing truncated*, since the hint is
+ * appended after the prompt and MAX_IMAGE_PROMPT_CHARS cuts from the end. A user
+ * asking for a phone wallpaper got a square image.
+ *
+ * **Measured, not read off the docs** (`scripts/probe-image-size.mjs`), because the
+ * documented `model` param on this same endpoint is a no-op — §3.8 — and shipping a
+ * second nominal parameter would be that mistake twice:
+ *
+ *     no size param        -> 768x768
+ *     width=576&height=1024 -> 576x1024   exact
+ *     width=1024&height=576 -> 1024x576   exact
+ *     width=888&height=664  -> 888x664    exact
+ *     width=1024&height=1024 -> 768x768   downscaled, ratio kept
+ *     width=1600&height=900  -> 1024x576  downscaled, ratio kept
+ *
+ * So width/height are honoured, and there is a **pixel budget of 589,824** —
+ * exactly 768², which is also 1024x576 and 576x1024. Every entry below sits at or
+ * just under it, so nothing is silently rescaled: ask for 1600x900 and the bytes
+ * come back identical to 1024x576 (same md5), which is the endpoint quietly
+ * ignoring half of what it was told. 4:3 is 888x664 = 589,632 rather than the
+ * exact-ratio 886.8x665.1, because both axes want to be multiples of 8.
+ *
+ * Timing is not a reason to avoid this: the same probe measured 3.2-6.2s with the
+ * params against 3.3s without.
+ */
+export const IMAGE_DIMENSIONS: Record<string, { width: number; height: number }> = {
+  "1:1": { width: 768, height: 768 },
+  "16:9": { width: 1024, height: 576 },
+  "9:16": { width: 576, height: 1024 },
+  "4:3": { width: 888, height: 664 },
+  "3:4": { width: 664, height: 888 },
+};
+
+/** The requested ratio's canvas, or the square default for anything unknown. */
+export function imageDimensionsFor(aspectRatio?: string): { width: number; height: number } {
+  return IMAGE_DIMENSIONS[(aspectRatio || "").trim()] || IMAGE_DIMENSIONS["1:1"];
+}
+
 export async function generateImageResponse(
   prompt: string,
   modelId: string,
   _images: Array<{ dataUrl?: string }>,
   signal?: AbortSignal,
+  /**
+   * One of `IMAGE_DIMENSIONS`' keys. Optional and last, so the explicit
+   * Image-model path in Chat.tsx — which has no ratio control in the UI — keeps
+   * working unchanged and lands on the square default it already produced.
+   */
+  aspectRatio?: string,
 ): Promise<{ imageDataUrl: string; message: string }> {
   const fullPrompt = (prompt || "").trim() || buildImagePrompt("");
   // No fetch happens here, so there is nothing to cancel. Stop still works: the
@@ -1216,7 +1266,13 @@ export async function generateImageResponse(
   const encoded = encodeURIComponent(condensedPrompt);
 
   const fallbackModel = imageFallbackChain(modelId)[0] || "flux";
-  const directUrl = `https://image.pollinations.ai/prompt/${encoded}?nologo=true&model=${fallbackModel}`;
+  // Dimensions are always sent, even for 1:1 — the endpoint's own default is
+  // 768x768, so the square case is a no-op that keeps one URL shape instead of
+  // two.
+  const { width, height } = imageDimensionsFor(aspectRatio);
+  const directUrl =
+    `https://image.pollinations.ai/prompt/${encoded}` +
+    `?nologo=true&model=${fallbackModel}&width=${width}&height=${height}`;
   return {
     imageDataUrl: directUrl,
     message: "Here is your generated image:",

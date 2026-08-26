@@ -210,7 +210,17 @@ export default function MemoriesPanel({ open, onOpenChange, onMemoriesChanged, o
                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addMemory(); }
                   }}
                 />
-                <Button size="sm" onClick={addMemory} disabled={!newMemory.trim()} className="h-auto self-stretch px-3 shrink-0">
+                {/* Icon-only, so named. The adjacent textarea's placeholder ("Add a
+                    fact to remember…") is the only thing on screen saying what this
+                    does, and a placeholder is not part of the button's name. */}
+                <Button
+                  size="sm"
+                  onClick={addMemory}
+                  disabled={!newMemory.trim()}
+                  aria-label="Add memory"
+                  title="Add memory"
+                  className="h-auto self-stretch px-3 shrink-0"
+                >
                   <Plus className="w-4 h-4" />
                 </Button>
               </div>

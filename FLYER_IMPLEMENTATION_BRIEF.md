@@ -109,9 +109,11 @@ Three tests hold this in place, including a drift guard that fails if a tool is 
 
 **Pollinations caveat (verified 3.8):** Pollinations currently **ignores the `model` query param** — `flux`, `stable-diffusion-3.5-large`, `sdxl`, and `stable-diffusion` at a fixed seed all returned byte-identical JPEGs (md5 `9297b3c514cfe23c432358d986f9a6ff`), and its `/models` reports only `["sana"]`. The chain's model names are therefore nominal over one real backend. **Do not add a per-model image entry pointing at Pollinations** — an entry named `stable-diffusion-3.5-large` that renders default weights is exactly the silent substitution rule 2 forbids. Real per-model image selection needs either a self-hosted NIM container or a different hosted provider.
 
+**But `width` and `height` are honoured (measured 22, `scripts/probe-image-size.mjs`)** — which is why the `model` finding above cannot be generalised into "the query string is decorative". `576x1024` and `888x664` came back at exactly those pixels, and there is a **pixel budget of 589,824 = 768²**: an over-budget request is downscaled with the ratio kept, so `1600x900` returned bytes with the same md5 as `1024x576`. `generate_image`'s `aspect_ratio` therefore sets a real canvas (§22), and the default with no size param is 768x768.
+
 Remaining:
 
-- **Verify Pollinations responses.** The current code returns a bare URL without checking it resolves, so a dead endpoint renders as a broken image with no error.
+- ~~**Verify Pollinations responses.**~~ Closed, and by the only mechanism that can close it: nothing in `generateImageResponse` observes the response, because it performs no fetch — the URL goes to an `<img>` so the pixels stream in while the caption is already on screen. The two states a bare `<img>` cannot express are handled where they are visible, in `GeneratedImage` (ChatMessage.tsx): a spinner with "Painting…" for the 2-45s generation, and a "that image didn't come through" panel with a cache-busting **Try again** for the failure. Verifying with a HEAD first would cost a second request and still not cover a body that fails to decode.
 
 Image **editing** (img2img) is blocked on the same badge problem: `qwen-image-edit` is Downloadable-only. Unblock by self-hosting that container or adopting a hosted img2img provider.
 
@@ -637,6 +639,8 @@ There is a third, smaller one. Those stray clicks were not inert: they landed at
 **A fourth is written up in §16.9,** and it is the same defect as the second — a check that could not fail — but reached by a completely different route and caught deliberately rather than by accident. A test asserting a real property, against real code, through the real read path, passed identically with the line it was testing deleted. What made the difference there was process: every fix in §16 was mutation-checked before being believed. That is now the rule, and it is the one entry in this section that generalizes to everything else in the brief.
 
 **And a fifth in §17.6,** which is the same defect a fourth time and the second one the mutation check caught. A test written specifically to cover a one-line guard used an input that could not reach it, and said so in a comment. Read together, the four could-not-fail checks say something the individual write-ups do not: every one of them was written by someone who believed it was real, so "look at it again" has never been what catches this. The mechanical step is. Running the tests is not the check — deleting the line and watching the test go red is.
+
+**§18 is the same step catching a different kind of wrong claim, which is worth separating out.** No test there could-not-fail; what could not survive was a sentence in a *doc comment*. I had written that reordering a `.trim()` fixed a bug, and reverting only the order left the test green — the guard that actually closes it is a trailing `.trim()` inside a function one layer down. So the mutation check is not only a test-validity check: it is the only cheap way to find out **which of two guards a green test is standing on**, and a comment naming the wrong one is a trap for whoever refactors next.
 
 ---
 
@@ -1182,6 +1186,1018 @@ its naive form failed exactly the 3 and 2 tests that name it.
 
 ---
 
+## 18. One rule, five private copies of it — and two places that built it by hand — DONE
+
+§17.4 fixed a fence-blind rewrite in the image helpers. The reusable move from §14.2 #19
+is *take a fixed bug, name the class it belongs to, look for other members* — so the class
+was named as **"a rule that exists in one canonical place and again, privately, somewhere
+that needed it"**, and `rg` was pointed at the two rules `chat-format.ts` owns: the
+reasoning-tag strip and the fence split.
+
+It found four copies. All four were narrower than the canonical rule, and that direction
+is not a coincidence: **a copy is written for the case in front of its author**, so it
+handles that case and stops. The canonical version has been widened by every case anybody
+has hit since.
+
+A second sweep, run after those four were fixed and specifically for *fence* copies rather
+than for either rule by name, found a fifth in `src/lib/artifacts.ts` — §18.4. It is the
+worst of the set, and the reason to run the sweep twice: the first pass searched for the
+regexes the canonical rule uses, and this copy did not look like them. It was a hand-rolled
+scanner forty-five lines long, described in its own comment as "deterministic and
+dependency-free", which is true and was never the problem.
+
+### 18.1 The reasoning strip, twice, in `ai.ts`
+
+`stripReasoning` knows five tag spellings (`think`, `thinking`, `reasoning`, `thought`,
+`analysis`), is fence-aware, and truncates everything after a **dangling** open tag. Both
+inline copies were `/<think>[\s\S]*?<\/think>/` — one spelling, and a required closing tag.
+
+The second half is the dangerous half, and it is worth stating as a general fact about
+regexes rather than as a fact about this bug: **`[\s\S]*?` between two literals matches
+nothing when the second literal never arrives.** So on the input that matters most — a
+model that spent its whole budget thinking, or a stream cut off by the first-byte guard —
+the copy stripped *nothing at all* and passed the entire chain-of-thought through.
+
+- **`craftVisionPrompt`** takes a small model's suggested prompt and injects it into the
+  vision request as **"Analysis guidance"**. So the leak was not cosmetic: a reasoning
+  model's deliberation became a second model's instructions. The `>= 20` character gate
+  meant to catch junk made this *more* likely, not less — a paragraph of reasoning clears
+  20 characters easily, while the correct fallback (`"Describe this image."`) is what a
+  short, empty, or properly-stripped response falls back to.
+- **`generateSmartChatTitle`** had the same copy plus an ordering bug that only became
+  visible once the chain was extracted into a function and read: **`.trim()` ran last**, so
+  `/^title\s*:\s*/i` was tested against text that still carried the model's leading
+  newline. Measured against the shipped chain, three of four realistic inputs came out as
+  **"Title: Photo Analysis"** — one of the five title words spent on the word "Title".
+
+Both are now `cleanCraftedVisionPrompt(raw, fallback)` and `cleanGeneratedTitle(raw)`,
+exported and pure, which is the actual point: the behaviour used to be reachable only
+through a network call, so **none of it had ever been asserted by anything**.
+
+Two smaller things in the title path, both deliberate: the whitespace collapse is `\s+`
+rather than the shipped `\n+`, because a tab or a double space was surviving as a word
+boundary that `split(" ")` counted, silently costing one of the five words; and a response
+over 45 characters is **rejected outright rather than truncated**, because length is the
+compliance signal — the first five words of "Sure! Here is a concise title for…" make a
+worse title than the caller's own fallback.
+
+**An over-claim of mine, caught by the mutation check.** I wrote in the JSDoc that trimming
+first is what fixes the leading-newline bug. Reverting only the ordering left the test
+**green**: `stripReasoning` ends with its own `.trim()`, which runs before anything in
+`cleanGeneratedTitle` does. The bug was real — reproduced against the shipped chain
+directly — but the fix that closes it is the strip, not the reorder. Both the JSDoc and the
+test comment now say so, and the explicit `.trim()` stays as belt-and-braces precisely
+because the alternative is a correctness property of one function resting on another
+function's last line, with no contract saying it will stay there.
+
+### 18.2 The fence rule, in `file-generator.ts`
+
+This is the one whose failures reach a file on disk. `parseMarkdownBlocks` owned
+`/^\s*```+\s*(\S+)?\s*$/`, and it produced **documents that open cleanly in Word and are
+wrong** — §14.2 #16's shape (a plausible artifact instead of an error) in the write
+direction. Three measured corruptions:
+
+| Input | What the exported document contained |
+|---|---|
+| `~~~python` fence | The fence markers printed as body text, and the block's `# initialise` comment promoted to an **H1 heading** |
+| ` ```js {1,3} ` — an info string of more than one token | The same, *and* the closing ` ``` ` read as an **opening** fence, so every paragraph after the block was swallowed into a code box — or lost, when the block was last in the document |
+| ` ````md ` containing ` ```js ` | Closed at the inner fence (CommonMark: the closer must be at least as long as the opener), so the example's own headings escaped as real document structure and the tail became code |
+
+The tell in all three is the same and it is why `# ` was chosen as the probe: **`# ` is an
+H1 in prose and a comment in half the languages models write**, so a fence that fails to
+hold turns the *inside* of the block into document structure. Info strings like
+` ```py title="app.py" ` and ` ```js {1,3} ` are routine model output, and asking for a
+document about markdown is a routine request.
+
+Fixed by deleting the private regex: `parseMarkdownBlocks` now walks `segmentByFence`'s
+segments, and the old line loop became `parseProseBlocks`, which runs per prose segment.
+Worth noting for anyone editing it — every lookahead in there (the table separator row, the
+table body scan) now stays inside one prose segment, which is correct because a table
+cannot span a code fence, and is pinned by a test putting a table immediately before one.
+
+The requirement this satisfies is not "parse markdown better", it is **an export agrees
+with what the user saw on screen**. A private rule could never meet that, however good it
+got.
+
+### 18.3 The code strip, in `useTextToSpeech.ts`
+
+The fourth copy, and the loudest in the literal sense: there is no wrong pixel to notice,
+just a voice reading `for i in range(10)` at whoever pressed play — often while they are
+looking away from the screen, which is the reason to press it.
+
+Its idea of a code block was `` /`{1,3}[^`]*`{1,3}/g ``. Measured against a prose-only
+filter, four of six inputs sent code to the speaker:
+
+| Input | Shipped chain spoke |
+|---|---|
+| Closed ` ```py ` fence | *(correct — nothing)* |
+| **Unterminated** fence | `"py import os for i in range(10): print(i)"` — the language tag and the whole body |
+| ` ````md ` fence | `"md heading"` — `{1,3}` matched three of the four ticks |
+| Body containing a backtick | `"{a}"` — the body's own tick closed the match early |
+| `~~~` fence | `"~~~py import os print(1) ~~~"` — **the fence markers, out loud, twice** |
+| Inline `` `npm ci` `` | `"Run then now."` |
+
+The unterminated case is the common one, because it is the state of every reply cut short.
+
+**The last row is why this was not a one-line swap to a prose filter**, and it is the only
+interesting design decision here: the old regex was *right* to remove inline spans from
+speech, and a prose-only filter keeps them — including their backticks, which then get
+pronounced. Inline spans live inside prose and are short by construction, so the rule is
+**the ticks go, the words stay**: "Run `npm ci` then `npm test`" is spoken as
+*"Run npm ci then npm test"*. Fenced blocks are dropped whole; nobody wants a script read
+to them.
+
+Now `speechTextFromMarkdown` in `chat-format.ts`, which is where the fence rule already
+lives. Two defects fixed on the way through, neither of them about fences:
+
+- **Ordering.** `[text](url)` → `$1` ran before the image strip, and it matches the
+  `[alt](url)` *inside* `![alt](url)` — so the image rule found nothing left to match and
+  every generated image was announced as **"!Generated image"**. Images are removed first
+  now; alt text is not speech, link text is.
+- **A trailing full stop.** A blank line becomes `". "` so the engine pauses at a sentence
+  boundary, which is how removing an interior block leaves the pause in the right place —
+  but a reply *ending* in a code block left its blank lines at the end, and "Here's the
+  script." became "Here's the script.." with a hanging beat. Trimming before that
+  substitution rather than after it is the fix.
+
+### 18.4 The fence rule again, in `artifacts.ts` — and it broke artifact ids
+
+`extractCodeBlocks` owned a forty-five-line private scanner. Its closing-fence test was
+`` new RegExp(`^\\s*${marker}\\s*$`) `` — the closer had to be **exactly** the opener.
+CommonMark, and therefore `remark`, and therefore the renderer, requires it to be **at
+least as long**. One word.
+
+That word is enough because an artifact id is a **content hash derived twice** and the two
+derivations never meet in the type system (§17.6): `extractArtifacts` scans the raw
+assistant markdown to fill the store, and `CodeBlock` in `ChatMessage.tsx` hashes the string
+react-markdown handed it to decide what "Open in canvas" opens. Measured against `mdast`
+before the fix:
+
+| Input | Renderer's body | Scanner's body |
+|---|---|---|
+| ` ```js ` … closed by ` ```` ` | `const a = 1;` | ``const a = 1;\n````\n\nOutro paragraph.`` |
+| `~~~py` … closed by `~~~~` | `x = 1` | `x = 1\n~~~~\n\nOutro paragraph.` |
+
+Two failures out of one divergence:
+
+* The store holds an id **no rendered block can ever compute**, so the button opens
+  nothing, `ArtifactPanel` returns null, and the canvas docks correctly and displays
+  *nothing at all*. Nothing throws. This is the symptom that was observed in the running app
+  and is what §17.6's oracle was built to catch — it just had no test for this input.
+* The card the store does hold **contains the answer's own trailing prose**, set in
+  monospace as though the model had written it as code. And because the swallowed tail adds
+  lines, it can push a snippet past `MIN_CODE_LINES` — so for short blocks the card exists
+  *only* because of the bug.
+
+**The input is not exotic.** A model closes with a longer fence whenever it is quoting
+markdown that itself contains a fence, which is what asking for a README produces.
+
+The fix deletes the scanner and delegates to `segmentByFence`. Doing that surfaced a third
+copy of the *second half* of the same job — turning one code segment into a language and a
+body — in `file-generator.ts`'s `codeBlockFromSegment`. Both now call a new
+`parseFenceSegment` in `chat-format.ts`, which owns the fence-line removal and the
+CommonMark dedent (a fence nested in a numbered list is how models format "step 2, run
+this", and `remark` strips the opener's indentation from every body line, so anything
+hashing a block must too). Its `lang` is returned **verbatim, not lowercased**, because
+`artifactIdForCode` lowercases for identity while the document exporter wants what the model
+actually wrote.
+
+### 18.5 Every fix mutation-checked, per §14.3
+
+Each defect was restored and the suite re-run, expecting a specific count:
+
+| Mutation | Expected | Observed |
+|---|---|---|
+| `craftVisionPrompt`'s `<think>`-only regex | 3 (tag variants, dangling tag, fence-awareness) — with the closed-block test correctly **green**, since that is the one case the copy handled | 3 |
+| `generateSmartChatTitle`'s shipped chain | 3 | 3 |
+| `parseMarkdownBlocks`'s private fence regex | 3 — with the 2 structural tests (bare fence, table lookahead) correctly **green** | 3 |
+| `useTextToSpeech`'s `` /`{1,3}[^`]*`{1,3}/ `` chain | 7 — the 4 leaking fences, the inline span, the image announcement, and the code-only reply | 7 |
+| `extractCodeBlocks`'s exact-equality closer | 3 — the ` ``` `/` ```` ` case, the longer-fence-nested case, the tilde case — with **six** correctly **green**: the inner-shorter-fence case (the direction the old rule got right), CRLF, indented, mixed-case, info-string, and cut-off-mid-body | 3 |
+| `fenceFor` pinned back to `` ``` `` | 4 — the outgrow case, the run-anywhere case, and both round trips — with the no-backticks case and the *pre-fix-behaviour* test correctly **green**, the latter necessarily so | 4 |
+| the notebook wrapper's literal `` ``` `` | 1, with the ordinary-cell test correctly **green** | 1 |
+| `buildArtifactEditPrompt`'s literal `` ``` `` | 1, with the plain-artifact and inline-code tests correctly **green** | 1 |
+
+The green-under-mutation cases are the load-bearing half of this table. A mutation that
+fails *every* test in a describe block has usually broken the import, not the behaviour.
+
+### 18.6 A flaky gate, diagnosed rather than retried
+
+The first full run after these fixes reported **2 failures: "Test timed out in 5000ms"** —
+and a different two on the next run, each passing in under a second when its file was run
+alone. Both were synchronous render tests, which cannot time out for any reason of their
+own.
+
+`nproc` is 4 and the full run's load average was **21**: 40 jsdom environments over four
+cores, and vitest's default 5s budget assumes the suite has the machine to itself.
+`testTimeout` and `hookTimeout` are now **20s** in `vitest.config.ts`.
+
+This is worth a subsection because raising a timeout is normally the wrong move and the
+reasoning for it here is specific: **a gate that fails on a different test each run is
+worse than a slow one**, because the next real regression gets waved off as "that flaky one
+again". A genuine hang still fails, four seconds after the old budget would have.
+
+### 18.7 The other direction: the app *builds* fences too
+
+Once five copies of "read a fence" were gone, the obvious next question was where the app
+**writes** one. Two sites, both a hardcoded ` ``` `, both wrong on ordinary input, and
+neither found by the earlier sweeps because neither looks anything like a parser:
+
+* **`documents.ts`** wraps every notebook code cell for the model to read. A cell holding a
+  docstring with a fenced example — or one that writes a README — closes the wrapper at its
+  own fence, and the rest of the cell reaches the model as prose. A file attached precisely
+  so it would be read faithfully was handed over cut in half.
+* **`Chat.tsx`'s "edit this"** wraps an artifact and sends it back as the version to change.
+  The artifact most likely to be sent back for editing is a generated README, which is
+  exactly the document that contains fences — so the model received a document truncated at
+  its first example with the remainder quoted as prose after it, and would have returned
+  that as the new version.
+
+`fenceFor(body)` in `chat-format.ts` is the counterpart of `parseFenceSegment`: one more
+backtick than the longest run anywhere in the body, floored at three, which is
+`mdast-util-to-markdown`'s own rule. Counting anywhere rather than only at line start is
+deliberately conservative — an inner ` ```py ` cannot close a block — but a character is
+cheaper than a rule that has to be right about where.
+
+The measured pre-fix corruption, pinned as its own test so the fix cannot be quietly
+reverted: wrapping `` # Install\n\n```sh\nnpm ci\n```\n\nDone. `` in ` ```md ` does **not**
+close at the inner ` ```sh ` (an info string disqualifies a line as a closer) — it closes at
+the bare ` ``` ` ending the example. So the block stops mid-example, `Done.` comes back as
+prose, and the wrapper's own closing fence is read as a *new* opener. Three segments where
+there should be one.
+
+**Both call sites are covered, not just the helper**, which is the part §18.8's honest limit
+would otherwise have to keep apologising for. The notebook path asserts through
+`extractDocument` and reads the result back with `segmentByFence`. The `Chat.tsx` expression
+moved into `prompts.ts` as `buildArtifactEditPrompt` **because** nothing renders `Chat.tsx` —
+converting a line verified by reading into a function verified by running is the cheapest
+version of closing that gap, and it is available whenever the untested thing is a pure
+expression.
+
+### 18.8 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **40 files / 649 tests,
+0 failures** (up from 39 / 606) · `npm run build` clean, 2m 2s.
+
+The 43 new tests: 15 in `ai-text-cleanup.test.ts` (both extracted helpers, previously
+reachable only through a network call), 5 in `file-generator.test.ts` (the fence rule), 8 in
+`chat-format.test.ts` (`speechTextFromMarkdown`), 5 in `artifact-id-agreement.test.ts` (the
+closing-fence length, measured against `mdast` rather than against a second hand-rolled
+scanner), and 10 for `fenceFor` and its two call sites — 6 in `chat-format.test.ts` (one of
+them also against `mdast`), 1 in `documents.test.ts`, 3 in `prompts.test.ts`.
+
+**The honest limit.** The five parse-side fixes are pinned at the level of the extracted
+function (§18.7's two build-side call sites are covered end to end, which is the exception,
+not the rule here). Nothing in the suite renders `Chat.tsx`, so the *wiring* —
+`cleanGeneratedTitle`'s call site in particular — is verified by reading. That is the same gap
+§17.7 names for `artifactsFromHistory`, and it has not moved for that one.
+
+**It has moved for read-aloud.** §19 closes it: `read-aloud-wiring.test.tsx` renders
+`ChatMessage`, presses the button by its accessible name, and asserts on the string the fake
+speech engine receives. The claim "`speak()` is handed the message text and not some other
+string" is now checked by running — and pressing the button found a defect in
+`speechTextFromMarkdown` that eight tests of the helper had pinned as correct.
+
+It *did* move once, for the "edit this" wrap, and the move is worth naming as a reusable one:
+the untested thing was a pure expression inside a JSX callback, so it became a named function
+in `prompts.ts` and picked up three tests. That does not work for a `useEffect` or a call
+ordering, but where it applies it converts "verified by reading" into "verified by running"
+for the cost of one export.
+
+§18.4 is a partial exception and worth naming as one, because it is the only fix here whose
+test does not trust this codebase for its expected value: `artifact-id-agreement.test.ts`
+compares the store's id against one computed through `mdast-util-from-markdown`, the same
+micromark pipeline react-markdown runs. That is still not a click on the button — the *id*
+agreement is proven, the button handing that id to the panel is read — but the half it does
+cover is checked against the real parser instead of against my second opinion of it.
+
+---
+
+## 19. The read-aloud button had no name, and nothing had ever pressed it — DONE
+
+Two separate defects in one control, found by trying to write a test for it.
+
+### 19.1 Icon-only, and unlabelled
+
+Swept every `<button` under `src/components/**` and `src/pages/*` for one with no text child,
+no `aria-label` and no `title`, then read each candidate. Three came back:
+
+| Control | Announced as | Now |
+|---|---|---|
+| Read aloud (`ChatMessage.tsx:927`) | "button" | `Read aloud` / `Stop reading aloud` / `Preparing audio` |
+| Diff: earlier pair (`ArtifactPanel.tsx:~325`) | "button" | `Compare an earlier pair of versions` |
+| Diff: later pair (`ArtifactPanel.tsx:~335`) | "button" | `Compare a later pair of versions` |
+
+The first is the one that matters, and not by a small margin: it is the control in the message
+toolbar whose entire purpose is to serve someone who is not reading the screen, and to a screen
+reader it was indistinguishable from the two beside it.
+
+**The label tracks state.** One control does both jobs — press it while it is speaking and it
+stops — so a name fixed at "Read aloud" on a button that stops the audio is worse than no name
+at all. The same applies to the two chevrons: the neighbouring "v1 → v2" is the only thing on
+screen saying what they move through, and it is not part of either button's name, so the names
+say "versions" out loud.
+
+A second pass confirmed the *labelled* buttons keep their names below the `sm` breakpoint,
+where `hidden sm:inline` hides the text: `ChatInput.tsx` and `ChatMessage.tsx`'s Retry both
+carry a `title`, so nothing goes anonymous at mobile width.
+
+**One false negative worth recording.** My first sweep flagged `ChatMessage.tsx`, my second did
+not — the heuristic looking for a text ternary (`\{[a-zA-Z]+ \? '[^']+' : `) had matched a
+*className* ternary instead. The button was found by checking the line directly rather than by
+trusting the sweep. A regex-driven audit needs its hits read, and its misses spot-checked.
+
+### 19.2 Pressing it, at last — and what that found
+
+`src/test/read-aloud-wiring.test.tsx`, 7 tests. It renders `ChatMessage`, installs a fake
+`speechSynthesis` (jsdom has none), presses the button **by its accessible name**, and asserts
+on the utterance text the engine receives.
+
+The composition was the untested part, and every piece of it was separately correct:
+`ChatMessage` picks a string (`textOnlyContent || displayContent`), the hook cleans it with
+`speechTextFromMarkdown`, and *neither file's types would notice the button being handed
+`content` instead* — the raw prop, reasoning tags and all. That is the assertion with teeth:
+a reasoning tag is removed by `sanitizeAssistantText` upstream of the button and the hook knows
+nothing about it, so `<think>…</think>Hello there.` is the input that tells the two apart.
+A fence does not: the hook strips fences either way.
+
+**And pressing the button found a real defect the helper's eight tests had pinned as correct.**
+`speechTextFromMarkdown` turned a blank line into `". "` unconditionally, because a blank line
+is a sentence boundary to a speech engine and a single newline is not. But most paragraphs
+already end in a full stop, so the ordinary reply was handed over as:
+
+    Here are the two steps.. Then you are done.
+
+and the shape this button is used on most — a sentence, a script, a sentence — ends its first
+paragraph in a colon, which is worse:
+
+    Save this as scheduler.py:. Then run it.
+
+Fixed with `SPEECH_PAUSE_ALREADY`: the period is inserted only when the paragraph does not
+already end in something the engine breaks on (`.!?:;,…`). A comma is in that set even though
+it is a within-sentence pause — the test is "does the engine already break here", and appending
+to a comma produces `",."`, the same doubled punctuation the set exists to prevent.
+
+**Four existing expectations had to change**, and that is the lesson rather than an
+inconvenience: `chat-format.test.ts` asserted `"Here:. Done."` in four places. Those tests were
+written by measuring the helper against the private chain it replaced, so they recorded what
+the new function *did* and inherited a flaw neither implementation had been listened to for.
+**An expectation copied from an observed output is a regression pin, not a requirement** — it
+protects the behaviour it captured, including the parts nobody chose. What broke the tie here
+was rendering the button and reading the string a person would actually hear.
+
+The seventh test covers the silent case: a code-only reply strips to nothing, so the press
+produces a `"Nothing here to read aloud."` toast rather than silence with the icon flicking
+back to idle, which is indistinguishable from a broken speech engine.
+
+### 19.3 Mutation checks, per §14.3
+
+| Mutation | Predicted | Measured |
+|---|---|---|
+| `speak(content)` instead of `speak(textOnlyContent \|\| displayContent)` | 1 (the cleaned-reply test; the fence and prose tests survive, correctly) | **1** |
+| `aria-label` + `title` removed from the button | 7 — every test reaches it by name | **7** |
+| `aria-label` frozen at `"Read aloud"` | 2 (renames-itself, press-again-stops) | **2** |
+| `SPEECH_PAUSE_ALREADY` reverted to an unconditional `". "` | 7 — the 4 rewritten expectations, the new doubling test, and 2 in the wiring file | **7** |
+
+The last one is the useful row: it fails in *both* files, which is what proves the two are
+testing the same rule from different ends. "Still supplies the break when the paragraph ends in
+a word" correctly stayed green — that is the case the unconditional version was written for,
+and it was only ever wrong about the other one.
+
+### 19.4 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **41 files / 658 tests,
+0 failures** (up from 40 / 649) · `npm run build` clean, 59.5s.
+
+The 9 new tests: 7 in `read-aloud-wiring.test.tsx`, 2 in `chat-format.test.ts` (the paragraph
+break in both directions).
+
+Still verified by reading, and named here so it stays visible: the two `ArtifactPanel` chevrons
+have names but nothing presses them, and `Chat.tsx` remains unrendered by any test.
+
+*(Both halves closed, and each one found a defect on the way: pressing the chevrons found §20,
+and rendering `Chat.tsx` found §21's two unnamed buttons. The sentence is left standing because
+what it named as unverified is exactly where the next two bugs were.)*
+
+---
+
+## 20. The diff view could not be reached, and the guard that hid it was deliberate — DONE
+
+§19.4 named the two `ArtifactPanel` chevrons as "have names but nothing presses them". Writing
+that press found four defects, one of which had deleted the feature.
+
+### 20.1 A guard that removes the last live path
+
+`ViewSwitch` offered the Diff tab when `history.length > 1 && kind !== "file"`. The second
+clause was a real fix for a real bug (§14.2 #18): a file artifact's per-version `content` is
+`""` by design — files defer their bytes to an object URL and only the newest was ever fetched —
+so a two-version `report.xlsx` diffed `""` against `""` and reported no changes between two
+genuinely different spreadsheets.
+
+What nobody checked is whether anything was left. **A file is the only artifact that can ever
+have two versions.** A code artifact's id is a hash of its content, so re-generating a block
+either produces the same id and the same bytes — which `mergeArtifacts` deliberately treats as
+the same version — or a different id, which is a different artifact. So `history.length > 1`
+*implies* `kind === "file"`, the two clauses are mutually exclusive, and the tab could not
+appear. `DiffView`, `diffLines`, `diffSummary` and all 14 tests in `artifact-diff.test.ts` were
+unreachable from the running app, and `artifact-file-versions.test.tsx` held a test named
+"offers no Diff tab for a versioned file" pinning it there.
+
+**The shape, worth naming: a guard that removes the last live path is a deletion, and it does
+not look like one.** The condition still reads plausibly, it typechecks, the tests it breaks are
+the ones that would have caught it, and the code it protects stays compiling. §14.2 #14's family
+is "a wrong answer that looks like a right one"; this is its sibling — *no* answer that looks
+like a careful one.
+
+Fixed by resolving each version's bytes rather than declining to compare. `fetchVersionText`
+(new, `ArtifactCanvas`) matches a version's producing `messageId` to the file that turn
+generated, and is deliberately **separate from `fetchFileText`** because their fallback rules
+must differ: `fetchFileText` resolves the *newest* version and may fall back to the newest
+same-named file, which is right for filling one content pane; a diff must match exactly or fail,
+because a positional guess satisfies the comparison with the same file twice and renders as
+"identical" about two files the user knows differ.
+
+### 20.2 Three more, all found by reading the panel with the diff in mind
+
+| Defect | What the user saw |
+|---|---|
+| `<PanelBody>` had no `key` | `resolved` holds a file's fetched text and its effect refuses to re-fetch once non-null, and nothing reset it — so opening a second file showed the **first** file's bytes under the second one's name. `view` also carried a "Render" choice onto a Python artifact, and `pos` labelled a two-version artifact "v2 → v3" with the right chevron disabled. One `key={artifact.id}` fixes all three, which is why it is a key and not three effects. |
+| `useState(0)` for the diff position | Opened on v1 → v2 — "what changed the first time" — on an artifact whose newest change is the reason the panel is open. Two versions cannot tell the two behaviours apart, which is how it survived. Now `max(0, length - 2)`. |
+| No cancellation on the version resolve | Two chevron presses start two reads and the slower one wins, painting its bytes under the header of the pair the user selected. Same `runIdRef` shape as `useTextToSpeech`; here a `cancelled` flag in the effect cleanup. |
+
+And a fourth thing that is not a defect but was missing: an empty diff had one explanation for
+three causes. It now distinguishes still-reading, a version whose blob is gone ("no longer in
+this session" — a blob URL dies with its tab), and genuinely identical. Telling a user
+"identical" for the other two is the same family the whole panel keeps hitting.
+
+### 20.3 Mutation checks, per §14.3
+
+All nine tests in `artifact-version-diff.test.tsx` drive the real `ArtifactCanvas` against the
+real store with a per-URL `fetch` stub, for the same reason `artifact-file-versions.test.tsx`
+does — every one of these defects lived in the join, not in a function.
+
+| Mutation | Predicted | Measured |
+|---|---|---|
+| Restore `&& kind !== "file"` on the Diff tab | 6 — the tab test plus every test that opens the tab; the one-version test and the file-switch test survive | **6** |
+| Remove `key={artifact.id}` from `<PanelBody>` | 2 (second file's bytes, carried diff position) | **2** |
+| `useState(0)` instead of the newest pair | 3 (newest pair, steps back, carried position) | **3** |
+| `DiffView` resolves only inline `content` (the pre-fix path) | 4 — every comparison test, and the missing-bytes one now claims "identical" | **4** |
+| `fetchVersionText` matches on filename only, no `messageId` | 4 — both sides resolve to the same file, so every comparison reads "identical" | **4** |
+| Drop the `cancelled` guard | 1 (the race test) | **1** |
+
+The fourth and fifth rows are the ones worth keeping: both make the pane say *"Versions v1 and
+v2 are identical."* — checked, not assumed — which is exactly the sentence the original guard
+existed to prevent and exactly why deleting the tab looked like the safe option.
+
+### 20.4 The pinned test
+
+`artifact-file-versions.test.tsx`'s "offers no Diff tab for a versioned file" failed, as it
+should: it was a regression pin on the deleted feature, and its comment argued correctly about
+the data and wrongly about the conclusion. Rewritten to assert the tab **is** offered, with the
+reasoning recorded in place and a pointer to the file that now drives it. A test that fails when
+a feature is restored is worth reading before it is fixed — this one named the exact belief that
+had to change.
+
+### 20.5 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **42 files / 667 tests, 0
+failures** (up from 41 / 658) · `npm run build` clean, 46.2s.
+
+Still verified by reading: `Chat.tsx` is rendered by no test, and the Electron *menu*
+accelerators cannot be exercised through CDP at all — that one is a limit, not a gap, and is
+recorded as such rather than left looking like work.
+
+*(The `Chat.tsx` half closed in §21, which is also where the a11y sweep stopped being a sweep.)*
+
+---
+
+## 21. The guest half of bug 20, and the sweep that kept missing buttons — DONE
+
+Two gaps this document had recorded in its own words, closed together because the first one's
+test found the second one's defect.
+
+### 21.1 The bug that was fixed and never exercised
+
+§14.2 #20 says it plainly: *"The guest Ctrl+B path — the actual reported bug — was **not**
+exercised."* Three things covered the fix and none covered that branch. The static test
+(`shortcut-availability.test.ts`) reads `Chat.tsx` as text and proves every conditional action
+*references* its reason — it cannot see whether the branch is reached. The live CDP measurement
+pressed the chord in the running desktop app but on a signed-**in** profile, so it exercised a
+sibling of the class (`toggle-artifact-canvas`) and not `isAuthenticated`. And the third thing
+was me reading the handler.
+
+`chat-page-shortcuts.test.tsx` renders the real page and presses the key. It is the first test in
+this repo to mount `Chat.tsx`, which §14.2 #20 argued against on the grounds that "mounting the
+whole chat page against Firebase, the artifact store and eight hooks to observe one toast is a
+test that gets deleted the first time it goes flaky". That reasoning was right about the *static*
+test it was defending and wrong as a general rule: four mocks (`useAuth`, `firestore-db`,
+`sonner`, the Pyodide bridge) and a `MemoryRouter` are enough, a guest with no messages renders
+the welcome screen rather than the virtualiser, and the whole file runs in 2s. The cost of the
+mount was overestimated because nobody had tried it.
+
+**Both directions, deliberately.** A fix of this shape fails just as easily by speaking too much:
+an inverted condition toasts at every signed-in user about a shortcut that works. So the guest
+test asserts the sentence and the absence of a sidebar, and the signed-in test asserts the
+sidebar's accessible name *flipping* — the toggle observed from outside rather than a boolean
+read back — with `toast` never called. The guest assertion uses the literal string, not
+`UNAVAILABLE_REASONS['toggle-sidebar']`, because asserting against the constant the code reads
+passes for any sentence including the wrong fact ("no chats yet" — a guest's history is not
+empty, it is not *kept*).
+
+### 21.2 The fourth and fifth unnamed buttons
+
+Writing that test meant querying the header's sidebar toggle by name, and it had none. §19.1's
+sweep had missed it, and the reason is worth more than the fix: **the sweep grepped for
+`<button`, and this is a `motion.button`** — framer-motion renders a real `<button>`, and
+shadcn's `<Button>` does too. Re-swept across all three tags, with attributes stripped before
+looking for a text child (the same `{…}`-aware scan that §19.1's className-ternary false negative
+demanded), and got exactly two: the header toggle and `MemoriesPanel`'s add button, the latter
+sitting behind a dialog no test opens.
+
+| Where | Now |
+|---|---|
+| `Chat.tsx` header sidebar toggle (`motion.button`, `<Menu/>`) | `aria-label` **tracking state** — "Show conversations" / "Hide conversations" — plus `aria-expanded`. One control doing both jobs with a fixed label announces the opposite of what the press will do, which is §19.1's read-aloud lesson applied a second time. |
+| `MemoriesPanel` add button (`<Button>`, `<Plus/>`) | `aria-label="Add memory"` + `title`. The adjacent textarea's placeholder was the only thing on screen naming it, and a placeholder is not part of a button's name. |
+
+### 21.3 The sweep is now a test
+
+Three manual passes, three different misses. `icon-button-names.test.ts` walks every `.tsx` under
+`src/`, finds `<button` / `<motion.button` / `<Button` blocks, skips any with `aria-label`,
+`aria-labelledby`, `title` or an `sr-only` child, strips the opening tag with a brace-aware scan
+and reports any whose children contain no text. It currently finds **zero with no exclusion
+list**, and its failure message prints `file:line`, the tag, and the offending child — because a
+bare "expected 1 to be 0" on a sweep gives the next person nothing.
+
+Two of its three tests exist to stop the audit from lying, which is the §14.2 #14 shape turned on
+the auditor: one asserts the walker actually found files (a sweep over an empty list reports
+perfect compliance), and one pins `endOfOpenTag` against a `className={a ? "b>c" : "d"}` fixture —
+the exact input that made the §19.1 heuristic lose the read-aloud button. Every earlier version of
+this check failed by *not matching* something, and a matcher that matches nothing is
+indistinguishable from a clean codebase.
+
+`title` alone counts as a name, and that is a decision rather than an oversight: per the
+accessible-name computation it is the last-resort fallback and `getByRole("button", { name })`
+resolves it, which is how the artifact panel's Close and Download buttons pass. `aria-label` is
+better and everything added since §19.1 carries both.
+
+### 21.4 Mutation checks, per §14.3
+
+| Mutation | Predicted | Measured |
+|---|---|---|
+| Remove the `!isAuthenticated` guard from `toggle-sidebar` | 1 (the guest sentence; the other two do not depend on it) | **1** |
+| Invert it to `if (isAuthenticated)` | 2 — the guest gets silence *and* the signed-in user gets a toast plus a sidebar that no longer moves | **2** |
+| Strip the header toggle's `aria-label`/`title` | 1 (the signed-in test, which finds the control by name) | **1** |
+| Freeze that label at `"Hide conversations"` | 1 — it renders, it just stops telling the truth after the press | **1** |
+| Strip both new labels, against the sweep | 1 failure naming **both** buttons with file:line | **1**, both named |
+
+### 21.5 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **44 files / 673 tests, 0
+failures** (up from 42 / 667) · `npm run build` clean, 44.6s.
+
+What is left, stated as a limit rather than a to-do: Electron *menu* accelerators cannot be
+driven through CDP, so the shell-level chords are verified by reading `electron/main.cjs` and by
+the one-owner-per-chord argument in Trap 13. Nothing in a jsdom suite can reach them either.
+
+---
+
+## 22. Two tools nothing had ever called, and an argument that did nothing — DONE
+
+Picked by asking which files under `src/` are named by no test at all. Six were; two of them are
+*tools the model calls on the user's behalf* — `create_file` and `generate_image` — which is the
+worst place on that list for a blind spot, because their inputs are not validated JSON but a
+language model's best effort.
+
+### 22.1 `aspect_ratio` was a word in a sentence
+
+`generate_image` has accepted `aspect_ratio` since it replaced the classifier, and it spent it on
+prose: `"9:16"` became the phrase *"tall vertical composition"*, appended to the prompt. So a
+phone-wallpaper request came back square, which is the visible half.
+
+The invisible half is worse. The hint was appended **after** the prompt, and
+`MAX_IMAGE_PROMPT_CHARS` truncates from the *end* — so on exactly the long prompts the schema asks
+the model to write (70-110 words for a full scene), the ratio was the first thing cut. **The
+argument was most likely to be discarded when it had been most carefully chosen**, and nothing
+reported that: a prompt is a string, and a string that lost its last eight words still generates.
+
+### 22.2 The endpoint takes pixels, and that was measured rather than read
+
+`width`/`height` are real parameters here. The reason to prove it instead of trusting the docs is
+§3.8, one screen up in this document: the *same endpoint* documents a `model` param and ignores
+it, four names returning byte-identical JPEGs. A second nominal parameter would have been that
+mistake twice, and it would have looked exactly like a fix.
+
+`scripts/probe-image-size.mjs` reads the dimensions out of the returned JPEG's SOF marker — no
+decoder, no key, nothing to leak:
+
+| requested | returned | |
+|---|---|---|
+| *no size param* | 768x768 | the endpoint's own default |
+| 576x1024 | **576x1024** | exact |
+| 1024x576 | **1024x576** | exact |
+| 888x664 | **888x664** | exact |
+| 1024x1024 | 768x768 | downscaled, ratio kept |
+| 1600x900 | 1024x576 | downscaled, ratio kept — *same md5 as the explicit 1024x576* |
+
+So: honoured, with a **pixel budget of 589,824**, which is exactly 768² and also 1024×576 and
+576×1024. Every row of `IMAGE_DIMENSIONS` sits at or just under it, because an over-budget entry
+is not an error — it is a *silent* rescale, and the app would then report a size it did not get.
+4:3 is 888x664 (589,632) rather than the exact 886.8x665.1 because both axes want to be multiples
+of 8.
+
+Two things the probe also settled. **Latency is not an argument against this**: 3.2-6.2s with the
+params against 3.3s without, once the first (uncold) run is discounted — round one's 37-44s and
+round two's 3-6s for identical URLs, with identical md5s, is the endpoint's cache, which is also
+what makes the `1600x900` → `1024x576` md5 match meaningful. And the prose hint is now **gone**
+rather than kept alongside: a duplicated lever is the one that gets truncated without anyone
+noticing. `style` has no parameter, so `STYLE_HINTS` stays prose.
+
+### 22.3 `create_file`: two arguments a model picks independently
+
+`filename` and `format` are chosen in the same breath and disagree constantly, and `required` in a
+schema is a request rather than a guarantee — tools/types.ts says so in as many words.
+
+| Input | Was | Now |
+|---|---|---|
+| `{filename: "q3-report.csv"}`, no `format` | *unsupported format `""`* — a complaint about an argument the user never saw, beside a filename that named the format unambiguously | inferred from the extension |
+| `{filename: "report.xlsx", format: "csv"}` | `report.xlsx.csv`, which Windows displays as `report.xlsx` with the real extension hidden, so it is double-clicked expecting Excel | `report.csv` — the format wins, because `content` was written to match it |
+| `{filename: "archive.tar.gz", format: "txt"}` | `archive.tar.gz.txt` | unchanged: `gz` is not a format this app claims, so it is part of the name |
+| `{filename: "mystery.bin", format: "binary"}` | error | **still an error** — nothing is guessed from nothing, and the message carries the string the model sent so the retry can succeed |
+
+The last row is the point of the other three. Inferring from a *stated* extension is reading an
+argument; inferring from nothing would be the silent-substitution rule — a `.bin` arriving as a
+`.txt`.
+
+### 22.4 Mutation checks, per §14.3
+
+| Mutation | Predicted | Measured |
+|---|---|---|
+| URL drops `width`/`height` (the pre-fix behaviour) | 4 — every ratio assertion; the table's own tests must survive, since the table is still correct | **4**, table green |
+| Transpose `9:16` to 1024x576 | 2 — the 9:16 case, and the orientation test that derives sign from the ratio string | **2** |
+| `1:1` → 1024x1024 (over budget) | 4 — the budget test, both square-default paths, and `imageDimensionsFor` | **4** |
+| `create_file` stops inferring the format | 1 | **1** |
+| `withExtension` always appends | 1, and no existing generator/edit-file test may break | **1** of 39 |
+| `create_file` assigns `artifacts.files` instead of appending | 1 | **1** |
+
+The first row is the one worth keeping: it is the *only* mutation that restores shipped behaviour,
+and the three table tests staying green is what says they test the table rather than the wiring.
+
+### 22.5 What the tests pin that is not about pixels
+
+Both suites assert the **contents** of their failure strings, because an `{ok:false}` from a tool
+is not an error page — it is the next thing the model reads, and its one job is to say what to
+send instead. And two assert an absence: `create_file`'s result must not contain the file body
+(the model pastes back whatever it is handed, which is the second half of the user's own "donot
+show file content generated by ai" report), and `generate_image`'s must not contain the URL.
+
+`generate_image`'s abort test spies on `generateImageResponse` and asserts the rejection
+propagates — the single exception to "an executor never throws", since a user who pressed stop
+wants the turn gone rather than a paragraph about why the image failed. It could only pass if the
+spy really intercepts the ESM binding, which is worth knowing for the next test in this shape.
+
+### 22.6 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **46 files / 696 tests, 0
+failures** (from 44 / 673) · `npm run build` clean, 52.5s.
+
+Still uncovered by any test, listed so the next pass has a target rather than a feeling:
+`useSpeechToText`, `useWindowState`, `use-toast`, `src/lib/assets.ts`. The first two are browser-API
+wrappers (`SpeechRecognition`, Electron window state) where a jsdom test would mostly assert
+against its own mock; that is a reason to be honest about the gap, not a reason it is fine.
+
+---
+
+## 23. A share card that had been dead for six months, and a comment describing a guard that was not there — DONE
+
+Two defects that a running app cannot show you. One is only visible to crawlers; the other is only
+visible on an interleaving the transport happens to avoid. Both were sitting behind text that
+claimed they were handled.
+
+### 23.1 `og:image` answered 403 for ~6 months
+
+`index.html` carried a Google Cloud Storage **signed** URL from the gpt-engineer scaffold:
+`…/og-images/73d3e610-…?Expires=1772265237&GoogleAccessId=…&Signature=…`. That signature stopped
+being valid on **2026-02-28**. Measured, not inferred:
+
+```
+og:image                                    -> 403  SignatureDoesNotMatch  (397 B of XML)
+https://myflyer.vercel.app/og-image.png     -> 200  image/png  222,156 B
+```
+
+So for about six months, every share of the site on Twitter, Facebook, WhatsApp, Slack, LinkedIn
+and Discord rendered with **no preview card** — while `public/og-image.png`, already exactly
+1200x630 and already deployed, was referenced by nothing at all.
+
+Nothing in the app could report this, and that is the structural point rather than an excuse:
+`og:image` is read only by crawlers. The page rendered perfectly the whole time. There is no
+console error, no failed request in the Network tab, no user complaint short of someone noticing a
+bare link in a group chat. **The only place this is checkable is the document**, which is why the
+fix ships with a test that reads `index.html` as text.
+
+Now `https://myflyer.vercel.app/og-image.png`, absolute (Open Graph consumers do not resolve
+relative URLs against the document) and on the canonical origin, so it expires exactly when the
+deploy does — the property the signed URL lacked. `og:image:type` added; `twitter:image` spelled
+out rather than left to the crawler's `og:` fallback, since `summary_large_image` is the one
+consumer that is strict about it.
+
+### 23.2 The sitemap link was worse than a 404
+
+`<link rel="sitemap" type="application/xml" href="/sitemap.xml">` had been there since the
+scaffold and the file never existed. On Vercel that is not a missing file:
+`vercel.json`'s `{"source": "/((?!api/).*)", "destination": "/index.html"}` answered it **200 with
+19,804 bytes of HTML** while the link declared `application/xml`. A 404 tells a crawler there is no
+sitemap; a 200 of HTML tells it the sitemap is malformed.
+
+`public/sitemap.xml` now exists with the one canonical URL — `/chat` is a `<Navigate>` redirect and
+`/auth` is a sign-in page, and a sitemap listing a redirect earns a Search Console warning rather
+than a second indexed page. The line that actually does the work is in `robots.txt`
+(`Sitemap: …/sitemap.xml`), because no major crawler reads the `<link>` tag; the tag stays only
+because it is now true.
+
+**And the missing file was the one reference the desktop build could not fix.** Measured across two
+`vite build --mode desktop` runs, before and after adding it:
+
+```
+before:  <link rel="sitemap" href="/sitemap.xml" />     ← left absolute
+after:   <link rel="sitemap" href="./sitemap.xml" />    ← rewritten
+         <link rel="manifest" href="./manifest.json" /> ← rewritten in both runs
+```
+
+Vite rewrites public-asset URLs in the HTML for a relative `base`, but **only the ones it can
+resolve to a real file**; an unresolvable path it leaves alone. So the broken reference is exactly
+the reference that does not get fixed, in the one build where a leading `/` resolves against the
+filesystem root. That is the invariant `head-assets.test.ts` pins: every root-relative reference
+must name a file that exists — checked against `public/` *and* the project root, because that is
+what Vite does (`/src/main.tsx` is bundled from the root, `/favicon.ico` is copied from `public/`).
+
+### 23.3 `useWindowState` had a comment for a guard it did not implement
+
+The hook seeds itself from one `getWindowState()` invoke and then follows a subscription. Its own
+comment said the `live` flag stopped the invoke's answer from *"clobbering a newer state that the
+subscription may already have delivered"*. It did not. `live` only goes false on **unmount**, so a
+fetch resolving during a normal lifetime passed it and wrote anyway:
+
+1. the effect invokes `getWindowState()`. The window is still `show: false` here — `main.cjs` shows
+   it on `ready-to-show`, which fires *after* the renderer's first paint — so the snapshot being
+   computed says `focused: false`;
+2. the window is shown, `focus` fires, the subscription delivers `focused: true`;
+3. step 1's snapshot lands and overwrites it, dimming the title bar of a focused window.
+
+**Honest severity: latent, not observed.** Electron queues the invoke reply before the later
+`focus` send, so step 3 usually arrives first and nothing is visible. That is an ordering property
+of the transport, not of this hook — the same race is reachable with no coincidence by maximizing
+during the round trip, and the `catch` path was strictly worse, writing a *guess*
+(`{maximized: false, fullScreen: false, focused: true}`) over a measured value.
+
+Fixed with a second flag, `superseded`, set by the subscription. The subscription is newer than the
+fetch **by construction**: the fetch answers a question asked before the event happened. One
+direction only — a flag that also latched the subscription would freeze the title bar after first
+paint, which is the same defect approached from the other side, and there is a test for that.
+
+### 23.4 Mutation checks, per §14.3
+
+| Mutation | Predicted | Measured |
+|---|---|---|
+| Restore the dead signed `og:image` | 2 — origin, and the expiring-URL class check | **2** |
+| Delete `public/sitemap.xml` | 2 — the resolve sweep, and the urlset check | **2** |
+| Drop the `robots.txt` `Sitemap:` line | 1 | **1** |
+| `og:image:width` 1200 → 1201 | 1 — dimensions are read from the PNG header, not restated | **1** |
+| `og:image` made relative | 1 | **1** |
+| `useWindowState` reverted to shipped code | 2 — stale snapshot, and the rejection fallback | **2** |
+| `superseded` also latches the subscription | 1 — later events stop applying | **1** |
+| Cleanup forgets `unsubscribe()` | 1 | **1** |
+| The fetch never seeds at all | 3 | **3** |
+| Drop the `live` guard | **0** — see below | **0** |
+
+### 23.5 Two things the mutation pass found in the tests themselves
+
+**A control that guarded the wrong half of a union.** `referencedUrls()` is
+`linkedPaths()` ∪ *meta contents*, and its control assertion was a length check — which either half
+satisfies alone. Blinding only the meta matcher left all seven tests **green** while the sweep had
+stopped reading the very tags the bug was in. It now pins the meta half to the value it exists to
+police (`expect(urls).toContain(meta("og:image"))`) and the href half separately. This is the third
+appearance of one lesson — §14.2 #14, §21.3, and now here — and the shape is always the same: **a
+matcher that matches nothing is indistinguishable from a clean document.** A union needs one
+control per branch, not one per function.
+
+**A test that could not fail was deleted rather than kept.** The `live` (unmount) guard has nothing
+observable: React 18 removed the "setState on an unmounted component" warning, so the only
+available assertion was `console.error` staying empty — which it does with the guard removed too,
+confirmed by mutation (all eleven green). The guard stays in the code, because it is correct and
+free. The check does not, because a test that cannot fail reads as coverage. Why it was removed is
+recorded in the test file's header, where the next person will look before writing it again.
+
+### 23.6 Measured and deliberately not changed
+
+`<meta name="keywords">` is **11,168 of index.html's 22,012 characters — 50.7% of the document** —
+611 keywords, 579 unique, costing **2,926 bytes gzipped** on the critical path of every page load
+(the HTML is the one resource that must be revalidated on every visit, since it names the hashed
+bundles). Google has ignored this tag for ranking since 2009 and Bing treats stuffing as a spam
+signal, so the SEO return on those bytes is zero, and entries like *"Flyer AI cons"*, *"Flyer AI
+vs"* and *"Flyer AI clone"* are working against the brand rather than for it.
+
+Left in place regardless: it is hand-authored content, not code, and deleting 611 keywords someone
+added on purpose is not what "fix the bugs" asks for. Recorded here with the numbers so the decision
+is one line of work whenever it is wanted.
+
+### 23.7 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **48 files / 713 tests, 0
+failures** (from 46 / 696) · `npm run build` clean. `useWindowState` is no longer on the
+zero-coverage list; `useSpeechToText`, `use-toast` and `src/lib/assets.ts` still are.
+
+---
+
+## 24. The dev server had been dead, and every gate was green — DONE
+
+### 24.1 What was broken
+
+`npm run dev` did not start the app. It served `index.html`, the boot splash rendered, and React
+never mounted. One console error, and only one:
+
+```
+Failed to load resource: the server responded with a status of 404 (Not Found)
+  http://localhost:5199/api/_failover.js
+```
+
+`src/lib/providers.ts:27` imports `FAILOVER_STATUSES` from `../../api/_failover.js` — deliberately,
+so that the browser bundle gets the failure-classification sets without dragging `_meter.js` →
+`_auth.js` (JWT verification, Redis quota) toward the client. In dev, Vite serves that module at its
+path from the project root: `/api/_failover.js?t=<mtime>`.
+
+`vite.config.ts` installs a middleware that claimed the whole namespace:
+
+```ts
+const url = req.url || "";
+if (!url.startsWith("/api/")) return next();
+…
+const route = url.replace(/^\/api\//, "").replace(/\?.*$/, "");
+if (route === "nvidia") { … } else { res.writeHead(404); res.end('{"error":"Unknown endpoint"}'); }
+```
+
+`/api/` is not only a route namespace here. It is also a directory. The middleware answered the
+module request with `application/json` and `{"error":"Unknown endpoint"}`, the import failed,
+`providers.ts` failed, and the whole module graph went with it.
+
+Measured, not inferred. A real headless Chrome (151.0.7922.173) driven over CDP against
+`npm run dev`: `document.querySelectorAll("button, input, textarea").length` stayed **0** for twelve
+seconds, `#root` still held the two splash children from `index.html`, and the console contained the
+404 above and nothing else. After the fix, the same probe: **6** interactive elements, `#root` with
+3 children, no errors — only React Router's two v7 future-flag warnings.
+
+### 24.2 Why four green gates could not see it
+
+| Gate | Why it passes with the dev server dead |
+| --- | --- |
+| `npm run build` | Rollup inlines the import at bundle time. No HTTP request is ever made for it. |
+| `npx vitest run` | Vitest resolves `../../api/_failover.js` from disk. `providers.test.ts` even imports it directly. |
+| `npm run lint` | Never starts a server. |
+| `npm run typecheck` | Never starts a server. |
+
+Lint clean, typecheck clean, 713 tests passing and a clean production build, while the primary
+development workflow had not worked. Nothing in the suite started a dev server, so nothing in the
+suite could tell.
+
+### 24.3 The fix, and the fix that would have been wrong
+
+Own the routes we implement; hand everything else back to Vite:
+
+```ts
+const DEV_API_ROUTES = new Set(["nvidia", "llm", "mistral", "pollinations", "search"]);
+…
+const route = url.replace(/^\/api\//, "").replace(/[?#].*$/, "");
+if (!DEV_API_ROUTES.has(route)) {
+  if (isApiSourceFile(route)) return next();
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Unknown endpoint" }));
+  return;
+}
+```
+
+Three details, each load-bearing:
+
+- **The guard runs before the CORS headers and before the body drain.** The old order set five
+  response headers and consumed the request stream before it knew whether the request was even
+  addressed to it.
+- **`[?#]` rather than `\?`.** Vite appends `?t=<mtime>` and `?import`; the old single-`?` strip was
+  right for those but silently wrong for a fragment, and the route name has to be exact before it can
+  be compared against a set.
+- **Unrecognised paths keep the JSON 404 instead of falling through.** Falling through for everything
+  is the shorter fix and the worse one: Vite's SPA fallback answers a typo'd endpoint with **200 and
+  19,804 bytes of index.html**, so `await res.json()` fails on a parse error instead of on a status.
+  That is the same failure shape as the sitemap in §23.2, one layer down. A 404 that says
+  "Unknown endpoint" is strictly more informative than a 200 that lies.
+
+The trailing `else` in the dispatch chain is now unreachable while the set and the chain agree, which
+is what it is for: it reports `Route "x" is allowlisted but has no dev handler` rather than hanging.
+
+Measured after the fix, on the same running server:
+
+| Request | Before | After |
+| --- | --- | --- |
+| `/api/_failover.js` | 404 `application/json` | **200 `text/javascript`** |
+| `/api/nope` | 404 `{"error":"Unknown endpoint"}` | 404 `{"error":"Unknown endpoint"}` |
+| `OPTIONS /api/llm` | 204 | 204 |
+| `OPTIONS /api/nope` | 204 | 404 (the fall-through decision now precedes the preflight) |
+| `/api/../package.json` (raw socket) | 404 | 404 |
+| `/.env` | 403 (Vite `fs.deny`) | 403 |
+
+### 24.4 The traversal guard, and what it is not
+
+`isApiSourceFile()` resolves the route against `api/` and re-checks the prefix, because `req.url` is
+the **raw** request target: a hand-written `GET /api/../package.json HTTP/1.1` keeps its `..`.
+Measured over a plain socket — 200 with the real package.json when the prefix check is removed, 404
+when it is present.
+
+It is not a security boundary, and the comment in the config says so. Both branches end at Vite — we
+either call `next()` or answer 404, we never read a file ourselves — so `server.fs.deny` still decides
+what is readable and `.env` is 403 either way (measured). What the check buys is that `/api/…` cannot
+quietly become a second file server for the project root under an API-shaped URL.
+
+Two facts recorded while establishing that, both of which change how the test is written:
+
+- **`fetch` cannot express the attack.** undici normalises `/api/../package.json` to `/package.json`
+  before the request leaves the client, so the middleware never sees it. A `fetch`-based version of
+  this test passed with the guard deleted.
+- **Percent-encoding is not a second vector.** Node does not decode `req.url`, so
+  `/api/..%2fpackage.json` arrives as one filename containing `%2f`, which does not exist and takes
+  the `existsSync` 404 — never reaching the prefix check at all. The encoded probes are kept in the
+  test, but labelled as recorded-not-relied-on, because they pass for a reason unrelated to the guard
+  they appear to be testing.
+
+### 24.5 The test that starts a server
+
+`src/test/dev-api-router.test.ts`, six tests, `@vitest-environment node`. It calls Vite's own
+`createServer()` against the real `vite.config.ts` and `listen()`s on an ephemeral port — 7.1s cold,
+~1.3s warm — because the thing that broke was the server, and nothing short of a server can see it.
+
+Two tests carry the invariant, from opposite directions, and neither hardcodes the URL:
+
+- Walk `src/**/*.{ts,tsx}` for `from "…/api/*.js"` specifiers, request each, expect 200 and a
+  JavaScript content-type. This covers any future client import under `api/` automatically.
+- Fetch the *transformed* `/src/lib/providers.ts`, pull the `/api/…` specifiers out of the output Vite
+  actually emitted, request those, and assert the body contains `FAILOVER_STATUSES`. The bug was a
+  disagreement between the URL Vite emits and the URL the middleware answers, so a test that writes
+  down its own guess for either half cannot watch the two drift apart.
+
+Each has a control assertion, and the OPTIONS-ownership test asserts **both** branches of the
+fall-through decision — 204 for each of the five real routes, 404 for `nvidia-but-not-really` — so a
+guard stubbed to one answer cannot pass it.
+
+`src/test/setup.ts` needed one change to make a node-environment test possible at all: its
+`Object.defineProperty(window, "matchMedia", …)` is now guarded on `typeof window !== "undefined"`.
+Unguarded, it throws before the test body runs, and the failure reads as a broken test rather than a
+missing global.
+
+### 24.6 Mutation results
+
+| # | Mutation | Predicted | Measured |
+| --- | --- | --- | --- |
+| M1 | `if (false && !DEV_API_ROUTES.has(route))` — the original bug, restored | 4 | **4** (module, transform, 404 body, OPTIONS ownership) |
+| M2 | `isApiSourceFile()` always `true` | 2, possibly 3 | **3** — the OPTIONS case did differ: the SPA fallback answers a preflight with 200 |
+| M3 | Drop the resolved-path prefix check | 1 | **0**, then **1** — see below |
+| M4 | Remove `"search"` from `DEV_API_ROUTES` | 2 | **2** (ownership + set/chain agreement) |
+| M5 | 404 body → `{"error":"Not found"}` | 1 | **1** |
+| M6 | Blind the static import scan | 1 | **1** |
+| M7 | Blind the transform-specifier extraction | 1 | **1** |
+
+**M3 is the finding.** The first version of that test probed the traversal with `fetch`, and deleting
+the guard changed nothing: 0 failures against a predicted 1. The guard was real, the test was not —
+undici had normalised the `..` away, so the assertion had been passing on a request that never
+reached the code it named. Rewritten over a raw socket (`net.connect`, request target written
+verbatim), the same mutation fails on the first assertion. Fourth appearance in this project of an
+assertion that holds for the wrong reason being indistinguishable from one that holds for the right
+one — §14.2 #14, §21.3, §23.5, and now here, with the twist that this time the mutation caught it
+rather than a re-read.
+
+### 24.7 Not changed, and why
+
+- **The empty Radix toast viewport.** The lead that started this sweep: `<Toaster />` is mounted at
+  `src/App.tsx:109` and nothing in the app can ever put a toast in it — every one of the 39 call
+  sites imports `toast` from `sonner`. The Radix viewport is in the DOM on every route, `<ol>`,
+  `z-index: 100`, 420×32px at the bottom-right on a 1280-wide window, directly over the composer.
+  That is the shape of an invisible click blocker, so it was hit-tested rather than assumed:
+  `getComputedStyle().pointerEvents` is **`none`** (Radix sets it while the viewport is empty) and
+  `document.elementFromPoint()` at all five probe points returns the elements underneath. No defect.
+  The stack is dead weight — `use-toast.ts` (186 lines), `toast.tsx`, `toaster.tsx`, a re-export shim
+  and `@radix-ui/react-toast` — but dead weight is a cleanup, not a bug, and it is left for one.
+- **`server.host: "::"` with the dev server serving project files.** `/package.json` is 200
+  `application/json`, 4,252 bytes, on every interface while `npm run dev` runs. That is Vite's
+  documented dev behaviour for every file in the root, the binding is deliberate (the desktop shell
+  and phone testing), and `fs.deny` still covers `.env`, `.env.*` and `*.{crt,pem}` — measured 403 for
+  `.env`, `.env.desktop` and `.env.example`. `api/` was never protected by anything except the bug.
+  Scanned `api/` for hardcoded credentials before widening its reach: none.
+- **The `autocomplete` advisory on `/auth`.** Chrome logs `Input elements should have autocomplete
+  attributes (suggested: "current-password")`. Real, small, and unrelated to this unit; noted for the
+  next one.
+
+### 24.8 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **49 files / 719 tests, 0
+failures** (from 48 / 713) · `npm run build` clean. And, for the first time, a gate that fails when
+`npm run dev` stops working.
+
+---
+
 ## 12. Definition of done (still the gate)
 
 - `npm run typecheck`, `npm run test`, `npm run build` all pass. **Note:** `npx tsc --noEmit` is *not* a typecheck here — the root `tsconfig.json` is `"files": []` plus project references, so it examines zero files. The real typecheck is the two `tsc -p` passes inside `npm run build`. See the §14 gate note.
@@ -1492,3 +2508,175 @@ A fourth was found only by testing the *teardown*, not the launch: closing the w
     **Its guard test was the fourth check in this repo that could not fail** (§17.6) — written specifically to cover a one-line guard, using an input that could not reach it, with a comment claiming otherwise. Second one the mutation check caught rather than luck. All nine behaviours in this entry were mutation-checked and each produced the predicted failure count, with the "must refuse" tests correctly staying green under the lifting mutations.
 
     **Gates.** `npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **39 files / 606 tests, 0 failures** (from 38 / 580) · `npm run build` clean, 1m 12s. **The honest gap:** `artifactsFromHistory` has 13 tests, and the one line in `loadMessages` that calls it has none — nothing in the suite renders `Chat.tsx`, so changing `artifactsFromHistory(data)` to `(linear)` would pass every gate in this list.
+
+29. **One rule, five private copies of it, and two more places that built it by hand — six of the seven corrupted something a user reads, copies, hears, or hands to a model.** Written up as §18. This entry is the §14.2 #19 move applied deliberately rather than stumbled into: §17.4 had just fixed a fence-blind rewrite, so the *class* was named — "a rule that exists in one canonical place and again, privately, somewhere that needed it" — and `rg` was pointed at the two rules `chat-format.ts` owns. It found four copies, and a second sweep — run after those were fixed, and aimed at *fence* copies rather than at either canonical regex — found a fifth. **Every one was narrower than the canonical version.** That direction is the reusable part: a copy is written for the case in front of its author, so it handles that case and stops, while the canonical version has been widened by every case anybody has hit since.
+
+    **The reasoning strip, twice in `ai.ts`, both `/<think>[\s\S]*?<\/think>/` against a canonical rule that knows five tag spellings and handles a dangling tag.** The dangling half is the one that generalises past this codebase: **`[\s\S]*?` between two literals matches nothing when the second literal never arrives**, so on the input that matters most — a model that spent its whole budget thinking, or a stream cut off by the first-byte guard — the copy stripped *nothing* and passed the whole chain-of-thought through. In `craftVisionPrompt` that output is injected into the vision request as **"Analysis guidance"**, so a reasoning model's deliberation became a second model's instructions, and the `>= 20` character gate meant to catch junk made that outcome *more* likely than the correct fallback. In `generateSmartChatTitle` the same copy sat above an ordering bug that only became visible once the chain was extracted and readable: `.trim()` ran last, so `^title:` was tested against text that still had the model's leading newline on it, and **three of four realistic inputs came out as "Title: Photo Analysis"** — one of five title words spent on the word "Title".
+
+    **The fence rule in `file-generator.ts` is the one whose failures reach a file on disk**, and it produced documents that **open cleanly in Word and are wrong** — §14.2 #16's shape in the write direction. A `~~~` fence printed its markers as body text and promoted the block's `# initialise` comment to an H1. A two-token info string (` ```js {1,3} `, ` ```py title="app.py" ` — routine model output) did the same and then read the *closing* fence as an opening one, swallowing all trailing prose into a code box or dropping it. A ` ````md ` block closed at its inner ` ``` `, so the example's own headings escaped as real structure. The tell in all three is why `# ` is the probe: it is an H1 in prose and a comment in half the languages models write, so a fence that fails to hold turns the *inside* of the block into document structure. Fixed by deleting the private regex; the requirement is not "parse markdown better" but **an export agrees with what the user saw on screen**, which a private rule could never meet however good it got.
+
+    **The fourth copy was the read-aloud strip, and it is the loudest in the literal sense** — no wrong pixel to notice, just a voice reading `for i in range(10)` at whoever pressed play, often while looking away from the screen, which is the reason to press it. `` /`{1,3}[^`]*`{1,3}/g `` leaked in four of six measured cases: an unterminated fence spoke the language tag and the whole body (the common case — it is the state of every reply cut short), a four-backtick fence spoke its inside, a body containing a backtick spoke fragments, and a `~~~` fence **pronounced the fence markers, twice**. The interesting part is why it was not a one-line swap to a prose-only filter: the old regex was *right* to remove inline spans, and a prose filter keeps them including their backticks. So the rule is **the ticks go, the words stay** — "Run `npm ci`" is spoken, not skipped. Two non-fence defects came out with it: `[text](url)` → `$1` ran before the image strip and matches the `[alt](url)` inside `![alt](url)`, so every generated image was announced as **"!Generated image"**; and a reply *ending* in a code block left the blank lines that became `". "`, so "Here's the script." was spoken with a hanging extra beat.
+
+    **The fifth copy broke artifact ids, which is the only failure here that shows the user a correct-looking window with nothing in it.** `extractCodeBlocks` required the closing fence to be *exactly* the opener; CommonMark requires it to be **at least as long**. One word, and it only bites on input nobody thinks to try — except "quote some markdown" is not exotic, it is what asking for a README produces. An id is a content hash derived twice and the two derivations never meet in the type system (§17.6), so a divergence is silent by construction: measured against `mdast`, the renderer's body for a ` ```js ` block closed by ` ```` ` was `const a = 1;` and the scanner's was ``const a = 1;\n````\n\nOutro paragraph.`` — the store holding an id **no rendered block can compute**, so the button opens nothing and the canvas docks and displays nothing at all, while the card it does hold contains the answer's own trailing prose set in monospace. And because the swallowed tail adds lines, a short block can clear `MIN_CODE_LINES` *only because of the bug*. It also explains why the first sweep missed it: the search was for the canonical rule's regexes, and this was a forty-five-line hand-rolled scanner whose own comment described it as "deterministic and dependency-free" — both true, and never the problem. Deleting it surfaced a third copy of the job's *second half* (language + body from one segment) in `file-generator.ts`, so that moved to a new shared `parseFenceSegment`, which also owns the CommonMark dedent a fence nested in a numbered list needs.
+
+    **Then the sweep was pointed the other way, at code that *writes* a fence rather than reads one — and found two more.** Both hardcoded ` ``` `, both wrong on ordinary input, and neither reachable by the earlier searches because neither looks remotely like a parser. `documents.ts` wraps every notebook code cell for the model to read, so a cell holding a docstring with a fenced example was handed over **cut in half**, with the remainder arriving as prose — a file attached precisely so it would be read faithfully. And the canvas's "edit this" wraps an artifact and sends it back as the version to change, where the shape is almost self-selecting: the artifact most likely to be sent back for editing is a generated README, which is exactly the document that contains fences, so the model was asked to revise a document truncated at its first example with the rest of it quoted as prose underneath — and would have returned that. `fenceFor` (one more backtick than the longest run in the body, floored at three, which is `mdast-util-to-markdown`'s rule) is the counterpart of `parseFenceSegment`, and the measured corruption is pinned as its own test: wrapping a README in ` ```md ` does not close at the inner ` ```sh ` — an info string disqualifies a line as a closer — it closes at the bare ` ``` ` ending the example, leaving three segments where there should be one.
+
+    **One of those two call sites stopped being a wiring gap instead of being apologised for.** The "edit this" wrap was three lines inside a JSX callback, in the 1900-line file nothing in the suite renders — the same gap §17.7 names. It is now `buildArtifactEditPrompt` in `prompts.ts` with three tests. The generalisation: **when the untested thing is a pure expression, moving it behind an export converts "verified by reading" into "verified by running" for the cost of one import.** It does not help for an effect or a call ordering, which is why the rest of the gap is still open and still recorded as open.
+
+    **All five mutation-checked, and the green-under-mutation cases are the load-bearing half.** Vision regex → 3 failures with the closed-block test correctly green (the one case the copy handled). Shipped title chain → 3. Private fence regex → 3, with the two structural tests correctly green. Read-aloud chain → 7. Exact-equality closer → 3, with **six** correctly green, including the opposite direction the old rule got right (a ` ```` ` block must *not* close at an inner ` ``` `) — the case a `>=` written as `<=` would break while passing everything else. `fenceFor` pinned back to a literal → 4, with the no-backticks case green and, necessarily, the test that asserts the *pre-fix* behaviour. Each build-side call site → 1, with its ordinary-input sibling green. A mutation that fails *every* test in a describe block has usually broken the import rather than the behaviour, which is what those green cases rule out.
+
+    **And one of my own doc comments was caught over-claiming, by the same mechanical step.** I wrote that trimming first fixes the leading-newline bug; reverting only the ordering left the test **green**, because `stripReasoning` ends with its own `.trim()` and runs first. The bug was real — reproduced against the shipped chain directly — but the guard that closes it is the strip. Both the JSDoc and the test comment now state which one does the work, and that no input can distinguish them today. The explicit `.trim()` stays precisely because the alternative is a correctness property of one function resting on another function's last line, with no contract saying it will stay there.
+
+    **A flaky gate was diagnosed rather than retried (§18.6).** The first full run reported 2 failures reading "Test timed out in 5000ms" — a *different* two on the next run, each passing in under a second when run alone, and both synchronous render tests that cannot time out for any reason of their own. `nproc` is 4 and the run's load average was 21: 40 jsdom environments over four cores, against a default budget that assumes the suite owns the machine. `testTimeout`/`hookTimeout` are now 20s. Raising a timeout is normally the wrong move, so the reasoning is written in place: **a gate that fails on a different test each run is worse than a slow one**, because the next real regression gets waved off as "that flaky one again".
+
+    **Gates.** `npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **40 files / 649 tests, 0 failures** (from 39 / 606) · `npm run build` clean, 2m 2s. The 43 new tests: 15 for the two extracted `ai.ts` helpers, 5 for the fence rule in `file-generator.test.ts`, 8 for `speechTextFromMarkdown`, 5 for the closing-fence length in `artifact-id-agreement.test.ts`, 10 for `fenceFor` and both of its call sites. **The honest limit, mostly unchanged from §17.7:** the five parse-side fixes are pinned at the extracted function, and nothing renders `Chat.tsx` or clicks the read-aloud button, so `cleanGeneratedTitle`'s call site and `speak()` receiving the message text are still verified by reading. Two things are better than that. Both build-side call sites are covered end to end. And two tests take their expected values from `mdast-util-from-markdown` — the parser react-markdown actually runs — rather than from a second opinion of mine about what that parser does, which for a fence rule is the only oracle worth having.
+
+30. **The read-aloud button had no name, and nothing had ever pressed it — and pressing it found a defect eight passing tests had pinned as correct.** Written up as §19. Two defects in one control, and the second one only exists because of how the first was fixed.
+
+    **It was icon-only and unlabelled, and it is the one control in the toolbar that exists for someone not reading the screen.** A screen reader announced "button" — indistinguishable from Copy and Retry beside it. Swept every `<button` under `src/components/**` and `src/pages/*` for no text child, no `aria-label`, no `title`, and read each candidate: three came back, the read-aloud button and the artifact panel's two diff chevrons. All three now carry both attributes, and the read-aloud name **tracks state** (`Read aloud` / `Stop reading aloud` / `Preparing audio`), because one control does both jobs and a name frozen at "Read aloud" on a button that stops the audio is worse than no name. The chevrons say "versions" out loud, since the neighbouring "v1 → v2" is the only thing on screen naming what they move through and it is not part of either button's name. **My own sweep had a false negative worth recording:** the heuristic for a text ternary matched a *className* ternary, so the read-aloud button appeared in the first pass and vanished from the second — it was found by reading line 927 directly. A regex-driven audit needs its hits read and its misses spot-checked.
+
+    **Then the button got pressed, for the first time.** `read-aloud-wiring.test.tsx` renders `ChatMessage`, installs a fake `speechSynthesis` (jsdom has none), presses the button **by its accessible name**, and asserts on the string the engine receives. That closes the gap §18.8 stated as open. The composition was the untested part and every piece of it was separately correct: `ChatMessage` picks a string, the hook cleans it, and **neither file's types would notice `speak(content)`** — the raw prop, reasoning tags and all. So the load-bearing input is `<think>…</think>Hello there.`, because `sanitizeAssistantText` removes that tag *upstream of the button* and the hook knows nothing about it. A fence cannot tell the two apart; the hook strips fences either way. Confirmed by mutation: `speak(content)` fails exactly one of the seven, and it is that one.
+
+    **And the press found a real defect in `speechTextFromMarkdown`, which already had eight tests.** A blank line became `". "` unconditionally — correct, because a blank line is a sentence boundary to a speech engine and a single newline is not, and wrong, because most paragraphs already end in a full stop. The ordinary reply was handed over as `"Here are the two steps.. Then you are done."`, and the shape this button is used on most — sentence, script, sentence — introduces the script with a colon, giving `"Save this as scheduler.py:. Then run it."` Fixed with `SPEECH_PAUSE_ALREADY`: insert the period only when the paragraph does not already end in something the engine breaks on (`.!?:;,…`). A comma is in that set despite being a within-sentence pause, because the test is "does the engine already break here" and appending to a comma produces `",."` — the same doubled punctuation the set exists to prevent.
+
+    **Four existing expectations had to be rewritten, and that is the entry's point rather than a footnote.** `chat-format.test.ts` asserted `"Here:. Done."` in four places. Those tests were written by measuring the new helper against the private chain it replaced, so they recorded what the function *did*, and inherited a flaw neither implementation had ever been *listened to* for. **An expectation copied from an observed output is a regression pin, not a requirement** — it defends the behaviour it captured, including the parts nobody chose. Eight tests of the helper could not break the tie; rendering the button and reading the string a person would hear did it in one line. This is the same shape as §18.5's caught doc comment, one level up: there the mutation check found a *comment* over-claiming, here the wiring test found the *test suite* under-asking.
+
+    **Mutation checks, four of them, all matching prediction.** `speak(content)` → 1. Name attributes removed → 7 (every test reaches the button by name). Name frozen at "Read aloud" → 2. `SPEECH_PAUSE_ALREADY` reverted to the unconditional `". "` → 7, and that row is the useful one: it fails in **both** files, which is what proves they test the same rule from opposite ends. "Still supplies the break when the paragraph ends in a word" correctly stayed green — that is the case the unconditional version was written for, and it was only ever wrong about the other one.
+
+    **Gates.** `npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **41 files / 658 tests, 0 failures** (from 40 / 649) · `npm run build` clean, 59.5s. The 9 new tests: 7 in `read-aloud-wiring.test.tsx`, 2 in `chat-format.test.ts` for the paragraph break in both directions. **Still open, and named so it stays visible:** the two `ArtifactPanel` chevrons now have names but nothing presses them, and `Chat.tsx` is still rendered by no test, so `cleanGeneratedTitle`'s call site remains verified by reading.
+
+31. **Pressing those chevrons found that the diff view could not be reached at all — a guard added on purpose had deleted the feature.** Written up as §20. Four defects, and the largest one is a shape worth carrying: **a guard that removes the last live path is a deletion, and it does not look like one.**
+
+    **The Diff tab's condition was `history.length > 1 && kind !== "file"`, and those two clauses are mutually exclusive.** The second was a real fix for a real bug (§14.2 #18): a file artifact's per-version `content` is `""` by design — files defer their bytes to an object URL and only the newest was ever fetched — so a two-version `report.xlsx` diffed `""` against `""` and reported no changes between two different spreadsheets. What nobody checked is whether anything was left. **A file is the only artifact that can ever have two versions:** a code artifact's id is a hash of its content, so re-generating a block either produces the same id and the same bytes — which `mergeArtifacts` deliberately treats as the same version — or a different id, which is a different artifact. So excluding files excluded everything. `DiffView`, `diffLines`, `diffSummary` and all 14 tests in `artifact-diff.test.ts` were unreachable from the running app, the condition still read plausibly, it typechecked, and `artifact-file-versions.test.tsx` held a test called "offers no Diff tab for a versioned file" holding it in place. §14.2 #14's family is "a wrong answer that looks like a right one"; this is its sibling — *no* answer that looks like a careful one.
+
+    **Fixed by resolving each version's bytes instead of declining to compare.** `fetchVersionText` matches a version's producing `messageId` to the file that turn generated, and is deliberately separate from `fetchFileText` rather than a parameter with a default, because their fallback rules must differ: `fetchFileText` resolves the newest version and may fall back to the newest same-named file, which is right for filling one content pane; a diff must match exactly **or fail**, because a positional guess satisfies the comparison with the same file twice and renders as "identical" about two files the user knows differ. Failing loudly is the only honest option there, and the mutation that removes the `messageId` clause proves it: four tests fail, and the pane says "Versions v1 and v2 are identical."
+
+    **Three more, all in the same panel.** `<PanelBody>` had no `key`, so every piece of per-artifact state leaked across a switch — and `resolved`'s effect refuses to re-fetch once non-null, so opening a second file showed the **first** file's bytes under the second one's name; `view` also carried a "Render" choice onto a Python artifact and `pos` labelled a two-version artifact "v2 → v3" with the right chevron disabled. One `key={artifact.id}` fixes all three, which is why it is a key and not three effects. The diff opened on the **oldest** pair (`useState(0)`) on an artifact whose newest change is the reason the panel is open — two versions cannot tell the two behaviours apart, which is how it survived. And the version resolve had no cancellation, so two chevron presses started two reads and the slower one painted its bytes under the header of the pair the user selected: the same `runIdRef` shape as `useTextToSpeech`, here a `cancelled` flag in the effect cleanup. Plus one thing that was missing rather than wrong — an empty diff had one explanation for three causes, and now distinguishes still-reading, a version whose blob is gone, and genuinely identical.
+
+    **Nine tests, six mutations, every count as predicted.** `artifact-version-diff.test.tsx` drives the real `ArtifactCanvas` against the real store with a per-URL `fetch` stub, because every one of these defects lived in the join and not in a function. Restore `&& kind !== "file"` → 6, and the two survivors are the right two. Remove the `key` → 2. `useState(0)` → 3. Inline-`content`-only resolve → 4. Filename-only version match → 4. Drop the `cancelled` guard → 1. The race test is the one that needed care: both presses in a single `act` would batch `pos` back to its start and never begin the read being raced, so they are separate `fireEvent` calls and the losing side is delayed 30ms by the stub.
+
+    **The pinned test failed, as it should.** "offers no Diff tab for a versioned file" was a regression pin on the deleted feature, and its comment was correct about the data and wrong about the conclusion. Rewritten to assert the tab **is** offered, with the belief that had to change recorded in place. A test that fails when a feature is restored is worth reading before it is fixed.
+
+    **Gates.** `npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **42 files / 667 tests, 0 failures** (from 41 / 658) · `npm run build` clean, 46.2s. **Still verified by reading:** `Chat.tsx` is rendered by no test. The Electron *menu* accelerators are a different case — CDP cannot exercise them at all, so that is a limit rather than a gap, and §20.5 says so instead of leaving it looking like work.
+
+32. **`Chat.tsx` was rendered by a test for the first time, and the render found two more unnamed buttons.** Written up as §21. Bug 20's guest path — the branch §14.2 #20 explicitly recorded as unexercised — is now measured, and the a11y sweep that kept missing buttons is now a test instead of a habit.
+
+    **The gap was named in this document and it was still a gap.** §14.2 #20's own words: *"The guest Ctrl+B path — the actual reported bug — was **not** exercised."* Three things covered the fix and none covered that branch. `shortcut-availability.test.ts` reads `Chat.tsx` as text and proves each conditional action references its reason, which is indirection-proof and blind to whether the branch is reached. The live CDP run pressed the chord in the real desktop app but on a signed-**in** profile, so it proved the mechanism on a sibling member of the class and nothing about `isAuthenticated`. The third was me reading the handler. `chat-page-shortcuts.test.tsx` mounts the real page as a guest and presses the key.
+
+    **The reason nobody had mounted it was an estimate, not a measurement.** §14.2 #20 argued that "mounting the whole chat page against Firebase, the artifact store and eight hooks to observe one toast is a test that gets deleted the first time it goes flaky." Right about the static test it was defending, wrong as a general rule: four mocks (`useAuth`, `firestore-db`, `sonner`, the Pyodide bridge) and a `MemoryRouter` suffice, a guest with no messages renders the welcome screen rather than the virtualiser, and the file runs in about two seconds. **Both directions are asserted**, because this fix fails just as easily by speaking too much — an inverted condition toasts at every signed-in user about a shortcut that works fine, which is more annoying than the silence it replaced. Guest: the sentence, and no sidebar to toggle. Signed in: the toggle's accessible name flipping "Hide" → "Show", which is the state observed from outside rather than a boolean read back, and `toast` never called. The guest assertion is the **literal string**, not `UNAVAILABLE_REASONS['toggle-sidebar']` — asserting against the constant the code reads is a tautology that passes for any sentence, including the wrong fact ("no chats yet": a guest's history is not empty, it is not *kept*, and telling someone who just had a long conversation that they have no chats reads as data loss).
+
+    **Querying that toggle by name found it had none — the fourth unnamed icon-only button, and §19.1 had swept for exactly this.** The miss has a cause worth more than the fix: **the sweep grepped for `<button`, and this is a `motion.button`.** framer-motion renders a real `<button>`; so does shadcn's `<Button>`. Re-swept across all three tags with the opening tag stripped at its brace-depth-zero `>` before looking for a text child — the `{…}`-aware scan §19.1's className-ternary false negative already demanded — and got exactly two: the header toggle, and `MemoriesPanel`'s add button, which sits behind a dialog no test opens and was named on screen only by the adjacent textarea's placeholder. The header toggle's label **tracks state** (`aria-label` + `aria-expanded`), because one control doing both jobs with a fixed label announces the opposite of what the press will do — §19.1's read-aloud lesson, second application.
+
+    **Three manual passes, three different misses, so the sweep is now written down.** `icon-button-names.test.ts` walks every `.tsx` under `src/`, matches all three tags, excludes `aria-label` / `aria-labelledby` / `title` / an `sr-only` child, and reports anything whose children hold no text — with `file:line`, the tag and the offending child in the failure message, because a bare "expected 1 to be 0" on a sweep gives the next person nothing. It needs no exclusion list. Two of its three tests exist to stop the audit from lying, which is §14.2 #14's shape turned on the auditor: one proves the walker found files at all (a sweep over an empty list reports perfect compliance), and one pins `endOfOpenTag` against `className={a ? "b>c" : "d"}` — the exact input that lost the read-aloud button between two §19.1 passes. **Every earlier version of this check failed by not matching something, and a matcher that matches nothing is indistinguishable from a clean codebase.** A source sweep rather than a render for the same reason `shortcut-availability.test.ts` scrapes text: mounting every component that owns a button would need Firebase, Pyodide and speech mocks and would *still* miss the control behind an unopened dialog, which is precisely the button it found.
+
+    **Five mutations, all matching prediction.** Guard removed → 1. Guard inverted → 2, and that row is the point: the guest goes silent *and* the signed-in user gets a toast plus a sidebar that stops moving. Header label stripped → 1. Header label frozen at "Hide conversations" → 1; it still renders, it just stops telling the truth after the press. Both new labels stripped, against the sweep → 1 failure naming both buttons by file:line.
+
+    **Gates.** `npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **44 files / 673 tests, 0 failures** (from 42 / 667) · `npm run build` clean, 44.6s. §19.4's "still verified by reading" sentence named two things — the unpressed chevrons and the unrendered `Chat.tsx` — and each one, once exercised, produced a defect (§20 and this entry). The sentence is left standing in place with a note, because where a document admits it has not looked is where the bugs were.
+
+33. **An argument that had never done anything, and two tools nothing had ever called.** Written up as §22. `generate_image`'s `aspect_ratio` now sets pixels on the endpoint instead of appending an adjective to the prompt, and `create_file` survives the two ways a model's `filename` and `format` disagree.
+
+    **The sweep that found it was "which files under `src/` does no test name?"** Six. Two of them were tools the model calls on the user's behalf, which is the worst place on that list to have a blind spot: a tool executor's inputs are not validated JSON, they are a language model's best effort, and `tools/types.ts` says as much in its own header — *"models routinely omit required fields"*. I took the tools over the untested hooks because they sit on the path the user has actually reported bugs on.
+
+    **The defect was visible from reading the executor, and its second half was not.** `aspect_ratio` had been an enum since the classifier deletion, and `"9:16"` became the phrase *"tall vertical composition"* appended to the prompt — a weak lever, so phone-wallpaper requests came back square. The half worth writing down: `MAX_IMAGE_PROMPT_CHARS` truncates from the **end**, and the hint was appended last, so on exactly the 70-110-word prompts the schema asks the model to write, the ratio was the first thing dropped. **The argument was most likely to be discarded when it had been most carefully chosen**, and nothing could report that — a prompt is a string, and a string missing its last eight words still generates an image.
+
+    **`width`/`height` were measured, not read off the docs, and the reason is one screen up in this document.** §3.8 established that this same endpoint documents a `model` param and ignores it — four names, byte-identical JPEGs. Trusting a second nominal parameter would have been that mistake twice and would have looked exactly like a fix. `scripts/probe-image-size.mjs` (keyless, reads dimensions straight out of the JPEG SOF marker, fixed seed so a byte difference is the parameter and not the sampler) got: 576x1024, 1024x576 and 888x664 returned **exactly**; 1024x1024 and 1600x900 downscaled ratio-preserving; no size param → 768x768. So the budget is **589,824 pixels = 768²**, and `1600x900` came back with the *same md5* as the explicit `1024x576` — the same-bytes evidence that §3.8 used to prove `model` does nothing, here proving the opposite thing about `width`. Every `IMAGE_DIMENSIONS` row sits at or under the budget, because an over-budget entry is not an error, it is a silent rescale, and the app would then be reporting a size it did not get. Latency was checked too, since it is the only real argument against sending the params: 3.2-6.2s with, 3.3s without.
+
+    **The prose hint is deleted rather than kept as a belt-and-braces.** Keeping both would have left a duplicate of a real parameter sitting in the exact region of the string that gets truncated — which is the bug, not a backup for it. `style` keeps `STYLE_HINTS` because style has no parameter to duplicate.
+
+    **`create_file`'s two fixes are both "read an argument", never "guess".** A missing `format` is now taken from the filename's extension (`q3-report.csv` used to answer *unsupported format `""`* — a complaint about an argument the user never saw, beside a filename that named the format unambiguously). A *conflicting* one replaces the extension instead of stacking: `{filename: "report.xlsx", format: "csv"}` gave `report.xlsx.csv`, which Windows displays as `report.xlsx` with the real extension hidden, so it is double-clicked expecting Excel and opens as text; the format wins because `content` was written to match it. Only a **supported** extension is replaced, so `archive.tar.gz` keeps its `.gz`. And `{filename: "mystery.bin", format: "binary"}` is still an error, which is the row that justifies the other three — inferring from a stated extension is reading an argument, inferring from nothing is the silent-substitution rule.
+
+    **Six mutations, every count as predicted.** URL drops `width`/`height` → 4, with the three table tests staying green, which is what says they test the table and not the wiring; this is also the only mutation in the set that restores shipped behaviour. Transpose 9:16 → 2 (the case, plus the orientation test that derives the sign from the ratio string rather than restating the table, so copying the table cannot satisfy it). `1:1` over budget → 4. `resolveFormat` removed → 1. `withExtension` always appends → 1 out of 39 tests across three files, which was the check that mattered there: `edit-file` and the generator suite must not care. `artifacts.files` assigned instead of appended → 1.
+
+    **Both suites assert failure-string contents, not shapes.** An `{ok:false}` is not an error page, it is the next thing the model reads, and it has one job: to say what to send instead. Two assertions are absences — `create_file`'s result must not carry the file body and `generate_image`'s must not carry the URL, because a model pastes back whatever it is handed, next to the download or the picture the user is already looking at. That is the model-facing half of the user's own *"donot show file content generated by ai when it is shown in side panel"*.
+
+    **Gates.** `npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **46 files / 696 tests, 0 failures** (from 44 / 673) · `npm run build` clean, 52.5s. §5's "Verify Pollinations responses" bullet is struck through in place, with the note that nothing in `generateImageResponse` observes the response because it performs no fetch — the URL *is* the observable behaviour, and a failed image is already handled where it is visible, in `GeneratedImage`.
+
+34. **The share card had been dead for six months, and a comment described a guard the code did not have.** Written up as §23. Both defects are invisible from inside a running app, which is the only thing they have in common and the reason neither had been found.
+
+    **`og:image` was a Google Cloud Storage signed URL from the scaffold, and its signature expired on 2026-02-28.** Measured: 403 `SignatureDoesNotMatch`, while `https://myflyer.vercel.app/og-image.png` answers 200 with 222,156 bytes of PNG at exactly 1200x630 and had been referenced by nothing. So for ~6 months every share of the site on Twitter, Facebook, WhatsApp, Slack, LinkedIn and Discord rendered with no preview card, and there was no way to notice from inside the app: `og:image` is read only by crawlers, so the page kept rendering perfectly. Repointed at our own origin, absolute (Open Graph consumers do not resolve relative URLs), so it now expires exactly when the deploy does.
+
+    **The sitemap link was worse than a 404.** `<link rel="sitemap" href="/sitemap.xml">` had shipped since the scaffold with no such file, and `vercel.json` rewrites everything outside `/api/` to `/index.html` — so it answered **200 with 19,804 bytes of HTML** while declaring `application/xml`. A 404 tells a crawler there is no sitemap; that told it the sitemap was malformed. Real one added with the single canonical URL (`/chat` is a redirect and `/auth` a sign-in page; a sitemap listing a redirect is a Search Console warning, not an extra indexed page), plus the `robots.txt` `Sitemap:` directive, which is the half crawlers actually read.
+
+    **And the missing file was the one reference the desktop build could not fix — measured across two builds.** Under `--mode desktop`, Vite rewrote `/manifest.json` → `./manifest.json` and `/favicon.ico` → `./favicon.ico`, but left `/sitemap.xml` absolute; after the file existed, the same build emitted `./sitemap.xml`. Vite rewrites public-asset URLs for a relative `base` **only where it can resolve them to a real file**. So the broken reference is exactly the one that stays absolute, in the one build where a leading `/` resolves against the filesystem root. `head-assets.test.ts` pins that invariant against both roots Vite uses — `public/` for copied assets, the project root for `/src/main.tsx`.
+
+    **`useWindowState`'s comment claimed `live` prevented a race it cannot see.** `live` only goes false on unmount, so an invoke resolving during a normal lifetime passed it and overwrote whatever the subscription had already delivered: the effect asks for state while the window is still `show: false` (main.cjs shows it on `ready-to-show`, after first paint), the window is then shown and `focus` fires, and the older snapshot lands last and dims the title bar of a focused window. **Latent rather than observed**, and worth saying so: Electron queues the reply before the later `focus` send, so the safe interleaving usually wins — but that is a property of the transport, not of the hook, and the `catch` path was worse still, writing a guess over a measured value. Fixed with a `superseded` flag, one-directional, because a flag that also latched the subscription would freeze the title bar after first paint — the same defect from the other side, and now a test.
+
+    **Ten mutations, every count as predicted, and two of them were about the tests.** Dead URL restored → 2. Sitemap deleted → 2. `robots.txt` directive dropped → 1. `og:image:width` 1200 → 1201 → 1 (the dimensions are read out of the PNG header, so editing the image without the meta tags fails). og:image made relative → 1. Hook reverted → 2. `superseded` latching the subscription → 1. Cleanup forgetting `unsubscribe` → 1. Fetch never seeding → 3.
+
+    **A control assertion that guarded the wrong half of a union.** `referencedUrls()` is `linkedPaths()` ∪ meta contents, and its control was a length check, which either half satisfies alone — so blinding *only* the meta matcher left all seven tests green while the sweep had stopped reading the exact tags the bug lived in. Now one control per branch. Third appearance of the same lesson (§14.2 #14, §21.3, here): **a matcher that matches nothing is indistinguishable from a clean document**, and a union needs a control per branch rather than per function.
+
+    **A test that could not fail was deleted rather than kept.** React 18 removed the "setState on an unmounted component" warning, so the `live` guard has nothing observable and the only assertion available — `console.error` staying empty — holds with the guard removed as well, confirmed by mutation (all eleven green). The guard stays in the code because it is correct and free; the check does not, because a test that cannot fail reads as coverage. The reason is recorded in the test file's header, where someone will look before writing it again.
+
+    **Measured and deliberately left alone:** `<meta name="keywords">` is 11,168 of index.html's 22,012 characters — **50.7% of the document**, 611 keywords, 2,926 bytes gzipped on the critical path — for a tag Google has ignored since 2009. Not deleted: it is hand-authored content, not code, and removing 611 keywords someone added on purpose is not what "fix the bugs" asks for. Numbers recorded in §23.6 so the decision is one line of work whenever it is wanted.
+
+    **Gates.** `npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **48 files / 713 tests, 0 failures** (from 46 / 696) · `npm run build` clean. `useWindowState` leaves the zero-coverage list; `useSpeechToText`, `use-toast` and `src/lib/assets.ts` remain on it.
+
+### 35. The dev server had been dead, and every gate was green
+
+Started from the zero-coverage list — `use-toast.ts` was next — and the file turned out to be stock
+shadcn, unmodified, imported by nothing except the `<Toaster />` that renders it. Every one of the 39
+`toast` call sites in the app comes from `sonner`. So `src/App.tsx:109` mounts a Radix toast viewport
+that nothing can ever put a toast into: an `<ol>` at `z-index: 100`, 420×32px, pinned to the
+bottom-right of the window, directly over the composer. That is the shape of an invisible click
+blocker, and the honest way to find out was to hit-test it rather than argue about it.
+
+Which meant a real browser, which meant `npm run dev`, which is where the actual bug was. The app
+never mounted. Twelve seconds after navigation the page still held index.html's boot splash, there
+were zero buttons, inputs or textareas in the document, and the console contained exactly one error:
+`404 (Not Found) http://localhost:5199/api/_failover.js`.
+
+`src/lib/providers.ts` imports its failure-classification sets from `../../api/_failover.js` — on
+purpose, so the browser gets them without dragging `_meter.js` and `_auth.js` toward the client. In
+dev, Vite serves that file at `/api/_failover.js?t=<mtime>`. And `vite.config.ts`'s dev proxy opened
+with `if (!url.startsWith("/api/")) return next();` and answered everything it did not recognise with
+a JSON 404. `/api/` is a route namespace *and* a directory; the middleware only knew about the first
+meaning. The import 404'd, `providers.ts` failed, and the module graph failed with it.
+
+What makes this one worth writing down is not the bug, it is that four gates were green over it. The
+production build inlines that import at bundle time and never requests it over HTTP. Vitest resolves
+it from disk — `providers.test.ts` imports the same file directly and passes. Lint and typecheck never
+start a server. So: lint clean, typecheck clean, 713 tests passing, clean build, and the primary
+development workflow had not worked. There was no test in the suite that started a dev server, so
+there was no test in the suite that could tell.
+
+The fix owns the routes the proxy implements (`DEV_API_ROUTES`), checked before any CORS header or
+body drain, falls through to Vite for real files under `api/`, and keeps the JSON 404 for everything
+else. That last part matters: falling through for unrecognised paths too is the shorter fix, and it
+makes the SPA fallback answer a typo'd endpoint with 200 and 19,804 bytes of index.html, so the client
+fails inside `res.json()` on a parse error instead of on a status. Exactly the failure shape as
+§23.2's sitemap, one layer down. Also fixed the query strip from `\?` to `[?#]`, since a route name has
+to be exact before a set can be asked about it.
+
+`src/test/dev-api-router.test.ts` starts a real dev server — `createServer()` against the real config,
+`listen()` on an ephemeral port, 7.1s cold — because that is the only thing that can see this class of
+defect. Two of the six tests carry the invariant from opposite ends and neither writes down a URL: one
+walks `src/` for `api/*.js` specifiers and requests each, the other reads the specifiers back out of
+Vite's *transformed* `providers.ts` and requests those. The bug was a disagreement between the URL
+Vite emits and the URL the middleware answers, so a test holding its own copy of either half cannot
+watch them drift.
+
+Seven mutations: 4, 3, 0, 2, 1, 1, 1 against predictions of 4, 2–3, 1, 2, 1, 1, 1. The zero is the
+finding. The traversal guard in `isApiSourceFile()` is real — over a raw socket, deleting it turns
+`GET /api/../package.json` into a 200 with the actual package.json — but the test had probed it with
+`fetch`, and undici normalises `/api/../package.json` to `/package.json` before the request leaves the
+client. The assertion had been passing on a request that never reached the code it named. Rewritten
+with `net.connect` and the request target written verbatim, the mutation fails immediately. Fourth
+time in this project that an assertion holding for the wrong reason was indistinguishable from one
+holding for the right reason; first time a mutation, rather than a re-read, is what caught it. The
+same measurement pass established that percent-encoded separators are not a second vector at all —
+Node does not decode `req.url`, so `/api/..%2fx` is one filename containing `%2f`, which fails the
+`existsSync` check long before the prefix check — so those probes stay in the test labelled as
+recorded, not relied upon.
+
+The toast viewport, for the record: `pointerEvents` computes to `none`, because Radix sets it while the
+viewport is empty, and `elementFromPoint` at all five probe points returns the composer and the
+background beneath it. No defect. The dead stack — 186 lines of `use-toast.ts`, `toast.tsx`,
+`toaster.tsx`, a re-export shim and `@radix-ui/react-toast` — is cleanup, not a bug, and stays for
+now. Two things noted in passing and deliberately not touched: the dev server binds `::` and serves
+`/package.json` on every interface, which is Vite's documented behaviour for every file in the root
+and leaves `.env`, `.env.*` and `*.{crt,pem}` at 403 (measured, and `api/` scanned for hardcoded
+credentials before widening its reach — none); and Chrome's `autocomplete` advisory on `/auth`, which
+is real, small, and belongs to the next unit.
+
+Gates: lint clean · typecheck clean · **49 files / 719 tests, 0 failures** · build clean. One of those
+tests now fails if `npm run dev` stops working.

@@ -25,7 +25,7 @@
 //    the same rule the renderer and the artifact extractor use. This file used to own
 //    a private fence regex and it disagreed with all of them; see parseMarkdownBlocks.
 
-import { segmentByFence } from "./chat-format";
+import { segmentByFence, parseFenceSegment } from "./chat-format";
 
 export type FileFormat = "txt" | "md" | "json" | "csv" | "xlsx" | "docx" | "pdf" | "pptx";
 
@@ -82,7 +82,21 @@ export function withExtension(filename: string, format: FileFormat): string {
     .replace(/-{2,}/g, "-")
     .replace(/^[.\s-]+|[.\s-]+$/g, "")
     .trim() || `file.${format}`;
-  return safe.toLowerCase().endsWith(`.${format}`) ? safe : `${safe}.${format}`;
+  if (safe.toLowerCase().endsWith(`.${format}`)) return safe;
+
+  // A *different* known extension is replaced rather than appended. Models pick
+  // the two arguments independently and disagree often — `{filename:
+  // "report.xlsx", format: "csv"}` is a routine call — and appending produced
+  // "report.xlsx.csv": a name that reads like a mistake and that Windows shows
+  // as "report.xlsx" with a hidden second extension, so the user double-clicks
+  // it expecting Excel. The format wins because `content` was written to match
+  // it, and only a supported format is replaced: "archive.tar.gz" keeps its
+  // ".gz" (`gz` is not ours to reinterpret) and "notes.v2" keeps its ".v2".
+  const existing = /\.([A-Za-z0-9]+)$/.exec(safe)?.[1]?.toLowerCase();
+  if (existing && isSupportedFormat(existing)) {
+    return `${safe.slice(0, -(existing.length + 1))}.${format}`;
+  }
+  return `${safe}.${format}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,22 +133,19 @@ function splitTableRow(line: string): string[] {
 /**
  * A fenced segment, minus its fence lines, as a code block.
  *
- * `segmentByFence` hands over the whole segment including its opening fence and its
- * closing one when there is one — an unterminated fence runs to the end of the text,
- * which is the normal state of a truncated reply and must still produce a code block
- * rather than swallow the document.
+ * `parseFenceSegment` owns the header parse — the language is the **first token** of the
+ * info string, so ```` ```js {1,3} ```` and ```` ```python title="app.py" ```` name `js`
+ * and `python`, where the old private rule demanded a single token and failed the whole
+ * block otherwise. It also strips CommonMark's fence indentation, which matters here for
+ * the exact reason it matters to the canvas: a fence nested in a numbered list is how
+ * models write "step 2, run this", and its body is not indented by two spaces.
  *
- * The language is the **first token** of the info string, so ```` ```js {1,3} ```` and
- * ```` ```python title="app.py" ```` name `js` and `python`. The old rule demanded the
- * info string be a single token and failed the whole block otherwise.
+ * `lang` comes back as `""` for a bare fence and the writers want `undefined`, which is
+ * the whole of the mapping below.
  */
 function codeBlockFromSegment(segment: string): MdBlock {
-  const lines = segment.split("\n");
-  const opener = lines[0].match(/^\s*(?:`{3,}|~{3,})\s*(\S+)?/);
-  const lang = opener?.[1];
-  const body = lines.slice(1);
-  if (body.length && /^\s*(?:`{3,}|~{3,})\s*$/.test(body[body.length - 1])) body.pop();
-  return { type: "code", text: body.join("\n"), lang };
+  const { lang, body } = parseFenceSegment(segment);
+  return { type: "code", text: body, lang: lang || undefined };
 }
 
 /**

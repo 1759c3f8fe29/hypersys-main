@@ -126,7 +126,7 @@ describe("two turns, one filename", () => {
     expect(vi.mocked(fetch).mock.calls[0][0]).toBe(NEW_URL);
   });
 
-  it("offers no Diff tab for a versioned file", async () => {
+  it("offers a Diff tab for a versioned file", async () => {
     const files = twoVersionsOfTheSameFilename();
     render(<ArtifactCanvas filesForTurn={files} />);
 
@@ -140,12 +140,20 @@ describe("two turns, one filename", () => {
       expect(screen.getByRole("button", { name: "Code" })).toBeInTheDocument();
     });
 
-    // A file artifact's per-version `content` is "" — files defer their bytes to
-    // an object URL, and only the newest is ever fetched. So the diff view had
-    // "" on both sides and reported no changes between two different
-    // spreadsheets. Offering a comparison the data cannot support is worse than
-    // offering none, because an empty diff reads as "these are identical".
-    expect(screen.queryByRole("button", { name: "Diff" })).toBeNull();
+    // This assertion used to read `toBeNull()`, and the paragraph justifying it
+    // was correct about the data and wrong about the conclusion. The data: a file
+    // artifact's per-version `content` is "" — files defer their bytes to an
+    // object URL, and only the newest was ever fetched — so the diff view had ""
+    // on both sides and reported no changes between two different spreadsheets.
+    // The conclusion drawn from it was to hide the tab for `kind === "file"`.
+    //
+    // But **a file is the only artifact that can ever have two versions** (a code
+    // artifact's id is a hash of its content), so hiding it for files hid it
+    // always: `DiffView`, `diffLines` and `diffSummary` became unreachable, and
+    // this test was the pin holding that in place. The fix resolves each version's
+    // bytes on demand rather than declining to compare — see
+    // `artifact-version-diff.test.tsx`, which drives the tab this now asserts.
+    expect(screen.getByRole("button", { name: "Diff" })).toBeInTheDocument();
   });
 });
 

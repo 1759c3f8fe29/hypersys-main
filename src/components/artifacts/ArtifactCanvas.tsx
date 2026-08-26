@@ -10,7 +10,7 @@
 import { useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { ArtifactPanel } from "./ArtifactPanel";
-import type { Artifact } from "@/lib/artifacts";
+import type { Artifact, ArtifactVersion } from "@/lib/artifacts";
 import { useArtifacts, setCanvasWidth } from "./ArtifactProvider";
 import type { MessageFile } from "@/components/chat/types";
 
@@ -123,6 +123,34 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
     [resolveFile],
   );
 
+  /**
+   * The bytes of **one particular version**, for the diff view.
+   *
+   * `resolveFile` cannot serve this: it exists to fill the panel's single content
+   * pane, so it resolves the newest version and falls back to the newest
+   * same-named file when no version matches. Both behaviours are right there and
+   * wrong here. A diff asks "how do these two versions differ", and a fallback can
+   * answer it with the same file on both sides — which renders as "identical", the
+   * one output a user comparing two files they know differ will believe. So this
+   * matches the producing message exactly and throws when it cannot.
+   *
+   * The honest failure it throws is reachable in normal use: an artifact opened
+   * from a download chip carries a synthetic messageId no message owns, and a
+   * blob URL dies with the tab that made it.
+   */
+  const fetchVersionText = useCallback(
+    async (artifact: Artifact, version: ArtifactVersion): Promise<string> => {
+      const file = filesForTurn.find(
+        (f) => `file:${f.filename}` === artifact.id && f.messageId === version.messageId,
+      );
+      if (!file) throw new Error("That version's file is no longer in this session.");
+      const res = await fetch(file.url);
+      if (!res.ok) throw new Error("Could not read that version of the file.");
+      return res.text();
+    },
+    [filesForTurn],
+  );
+
   // When the panel opens it uses whatever docked width the store holds; there is
   // no per-open reset, because the width is a preference the user set by
   // dragging and re-normalising it on every open fights that.
@@ -161,7 +189,12 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
         title="Drag to resize"
         className="absolute left-0 top-0 bottom-0 w-1 -translate-x-1/2 cursor-ew-resize hover:bg-primary/40 z-[5] hidden lg:block touch-none"
       />
-      <ArtifactPanel onEdit={onEdit} onDownload={onDownload} fetchFileText={fetchFileText} />
+      <ArtifactPanel
+        onEdit={onEdit}
+        onDownload={onDownload}
+        fetchFileText={fetchFileText}
+        fetchVersionText={fetchVersionText}
+      />
     </aside>
   );
 }

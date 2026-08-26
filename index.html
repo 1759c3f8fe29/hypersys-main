@@ -37,7 +37,22 @@
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="Flyer AI — free AI assistant for coding, image generation, and web search" />
 
-    <meta property="og:image" content="https://storage.googleapis.com/gpt-engineer-file-uploads/attachments/og-images/73d3e610-0e1e-4550-ba73-2a3f9b95f78c?Expires=1772265237&amp;GoogleAccessId=go-api-on-aws%40gpt-engineer-390607.iam.gserviceaccount.com&amp;Signature=x0sSlWetuyIqvK2UeznSCsRP7BG4kBI%2BDJ5yXmuxEwEcGMSloazUBg%2BXllgjAAGSIxyiKxvsdR9UXrWd4gvu8GjPsGNRwQisYE0HKvKrX0GWaUSxuPgiSZ3psr5EoGvm1qs9KBQcm0LIGe%2Bb%2BmiMceEAp13c0nkOUjwuQyX4oH1BAWha9%2FZopxETdRxgPUby%2FLcFATsd7jNl0226zGvUmWvA0jYxsIs7EOBcYL8Q6iXmEIYmOG74Gste3qxTKuNlSH8Y8W%2FBctvaqH1jpK6zRNKLN4vlX%2FZHhCAj8%2BjIaQDBhVda9xNKICdk2o3wGbq7VbdBa0PYz%2Brot950NnCZ4g%3D%3D">
+    <!-- The share image is on our own origin, and it has to stay that way.
+         This was a Google Cloud Storage *signed* URL left over from the
+         gpt-engineer scaffold — `?Expires=1772265237&Signature=…` — which stopped
+         resolving on 2026-02-28 and answers 403 `SignatureDoesNotMatch` (measured,
+         not inferred). Nothing in the app could report that: og:image is read only
+         by crawlers, so the page kept rendering perfectly while every share of it
+         on Twitter, Facebook, WhatsApp, Slack and LinkedIn had no preview card.
+         public/og-image.png was already 1200x630 and already deployed, and had
+         never been referenced by anything.
+
+         Absolute rather than "/og-image.png" because Open Graph consumers do not
+         resolve relative URLs against the document — and same-origin as the
+         canonical above, so this URL now expires exactly when the deploy does,
+         which is the property the signed URL lacked. -->
+    <meta property="og:image" content="https://myflyer.vercel.app/og-image.png" />
+    <meta property="og:image:type" content="image/png" />
     <meta property="og:site_name" content="Flyer AI" />
     <meta property="og:locale" content="en_US" />
 
@@ -49,7 +64,10 @@
     <meta name="twitter:site" content="@FlyerAI" />
     
     
-    <meta name="twitter:image" content="https://storage.googleapis.com/gpt-engineer-file-uploads/attachments/og-images/73d3e610-0e1e-4550-ba73-2a3f9b95f78c?Expires=1772265237&amp;GoogleAccessId=go-api-on-aws%40gpt-engineer-390607.iam.gserviceaccount.com&amp;Signature=x0sSlWetuyIqvK2UeznSCsRP7BG4kBI%2BDJ5yXmuxEwEcGMSloazUBg%2BXllgjAAGSIxyiKxvsdR9UXrWd4gvu8GjPsGNRwQisYE0HKvKrX0GWaUSxuPgiSZ3psr5EoGvm1qs9KBQcm0LIGe%2Bb%2BmiMceEAp13c0nkOUjwuQyX4oH1BAWha9%2FZopxETdRxgPUby%2FLcFATsd7jNl0226zGvUmWvA0jYxsIs7EOBcYL8Q6iXmEIYmOG74Gste3qxTKuNlSH8Y8W%2FBctvaqH1jpK6zRNKLN4vlX%2FZHhCAj8%2BjIaQDBhVda9xNKICdk2o3wGbq7VbdBa0PYz%2Brot950NnCZ4g%3D%3D">
+    <!-- Same file as og:image, spelled out rather than left to the crawler's
+         og: fallback, because twitter:card is summary_large_image and the card
+         renderer is the one consumer that is strict about it. -->
+    <meta name="twitter:image" content="https://myflyer.vercel.app/og-image.png" />
     
     <!-- Theme Color — matches the actual --background token so the status bar
          and splash screen have no visible seam when the app paints. -->

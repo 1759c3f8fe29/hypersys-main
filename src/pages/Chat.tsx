@@ -19,6 +19,7 @@ import {
   buildFlyerThinkingPrompt,
   buildVisionSystemPrompt,
   buildDeepThinkDirective,
+  buildArtifactEditPrompt,
 } from '@/lib/prompts';
 import { webSearch, buildSearchContext } from '@/lib/search';
 import { runAgentTurn, AGENT_TOOLS_ENABLED, MAX_STEPS } from '@/lib/agent';
@@ -1970,8 +1971,17 @@ export default function Chat() {
           <div className="absolute inset-0 bg-gradient-to-r from-transparent via-primary/[0.02] to-transparent pointer-events-none" />
 
           {isAuthenticated && (
+            /* Icon-only, so named — and the name tracks state, because this one
+               control both opens and closes. §19.1's sweep missed it twice over:
+               it grepped for `<button`, and this is a `motion.button` that
+               framer-motion renders as a real one. The chord that does the same
+               job (Ctrl+B) says "Show or hide conversations" in the shortcut
+               sheet; this says which of the two the press will do. */
             <motion.button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              aria-label={sidebarCollapsed ? 'Show conversations' : 'Hide conversations'}
+              aria-expanded={!sidebarCollapsed}
+              title={sidebarCollapsed ? 'Show conversations' : 'Hide conversations'}
               className="relative p-2.5 rounded-xl bg-secondary/40 hover:bg-secondary/70 border border-border/30 transition-all duration-200 group"
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
@@ -2269,8 +2279,11 @@ export default function Chat() {
             // Feed the artefact back into the chat as context for the next turn:
             // we wrap it and ask the model to treat it as the prior version, so
             // "edit this" becomes a follow-up the model can act on directly.
-            const fenced = "```\n" + text + "\n```";
-            handleSendMessage(`Here's the current version — make the changes I describe:\n${fenced}`);
+            // The wrap lives in `prompts.ts` because nothing renders this file,
+            // and it had a real bug: a literal ``` closes at the first fence
+            // *inside* the artifact, so a generated README went to the model
+            // truncated at its own first example. See `buildArtifactEditPrompt`.
+            handleSendMessage(buildArtifactEditPrompt(text));
           }}
         />
       </main>

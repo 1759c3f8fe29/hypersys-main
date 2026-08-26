@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  index.html has advertised <link rel="sitemap" href="/sitemap.xml"> since the
+  scaffold, and this file did not exist. On Vercel that is not a 404: vercel.json
+  rewrites everything outside /api/ to /index.html, so the URL answered 200 with
+  19,804 bytes of HTML while declaring itself application/xml — a malformed
+  sitemap, which tells a crawler less than no sitemap at all.
+
+  Only "/" is listed. /chat is a <Navigate> redirect and /auth is a sign-in page;
+  a sitemap is a list of canonical destinations, and putting a redirect in one is
+  a Search Console warning rather than a second indexed page.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://myflyer.vercel.app/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>

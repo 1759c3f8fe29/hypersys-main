@@ -19,6 +19,7 @@ import {
   scavengeText,
   type ExtractedDocument,
 } from "@/lib/documents";
+import { segmentByFence, parseFenceSegment } from "@/lib/chat-format";
 
 const fileOf = (name: string, content: string, type = "") =>
   new File([content], name, { type });
@@ -423,6 +424,27 @@ describe("extractDocument on .ipynb", () => {
     );
     expect(doc.text).toContain("Output: [image/png]");
     expect(doc.text).not.toContain("iVBORw0KGgo");
+  });
+
+  it("wraps a cell that contains a fence in a longer one", async () => {
+    // The wiring assertion for `fenceFor`, and a real shape: a cell whose docstring
+    // shows a fenced example — or one that writes a README — used to be wrapped in
+    // ```, which CommonMark closes at the cell's *own* fence. The model then read
+    // the rest of the cell as prose, so a file attached to be read faithfully was
+    // handed over cut in half.
+    const cell = 'help = """\n```sh\nnpm ci\n```\n"""';
+    const doc = await extractDocument(
+      notebook([{ cell_type: "code", source: cell }]),
+    );
+
+    // Read back with the app's own fence rule: the cell must come out as one code
+    // segment holding exactly what went in.
+    const segments = segmentByFence(doc.text);
+    expect(segments).toHaveLength(1);
+    expect(segments[0].kind).toBe("code");
+    const parsed = parseFenceSegment(segments[0].text);
+    expect(parsed.lang).toBe("python");
+    expect(parsed.body).toBe(cell);
   });
 
   it("keeps an error output, which is usually why the notebook was attached", async () => {

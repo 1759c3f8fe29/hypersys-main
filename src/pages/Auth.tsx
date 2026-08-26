@@ -135,12 +135,26 @@ export default function Auth() {
             <div className="flex-1 h-px bg-border/50" />
           </div>
 
+          {/* `name` and `autoComplete` on both fields, and the password value
+              switches with the mode. Chrome logged
+              `[DOM] Input elements should have autocomplete attributes
+              (suggested: "current-password")` on every load of this page
+              (measured over CDP), which is the browser saying it cannot tell what
+              these fields are: a manager that guesses wrong either fails to fill
+              or saves the wrong entry, and `name` is half of how it guesses.
+
+              `current-password` vs `new-password` is not cosmetic. The first asks
+              the manager to fill the saved credential; the second tells it not to,
+              and to offer a generated one instead. This form is one component with
+              an `isLogin` toggle, so the attribute has to move with the toggle —
+              a hardcoded `current-password` would ask the browser to autofill an
+              existing password into a field for an account being created. */}
           <form onSubmit={handleSubmit} className="space-y-5">
             <motion.div className="space-y-2" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.4 }}>
               <Label htmlFor="email" className="text-foreground/80 text-sm font-medium">Email</Label>
               <div className="relative group">
                 <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground group-focus-within:text-primary transition-colors" />
-                <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Enter your email" required className="pl-12 py-6 bg-secondary/50 border-border/50 focus:border-primary/50 rounded-xl" />
+                <Input id="email" type="email" name="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Enter your email" required className="pl-12 py-6 bg-secondary/50 border-border/50 focus:border-primary/50 rounded-xl" />
               </div>
             </motion.div>
 
@@ -148,7 +162,7 @@ export default function Auth() {
               <Label htmlFor="password" className="text-foreground/80 text-sm font-medium">Password</Label>
               <div className="relative group">
                 <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground group-focus-within:text-primary transition-colors" />
-                <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password" required minLength={6} className="pl-12 py-6 bg-secondary/50 border-border/50 focus:border-primary/50 rounded-xl" />
+                <Input id="password" type="password" name="password" autoComplete={isLogin ? 'current-password' : 'new-password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password" required minLength={6} className="pl-12 py-6 bg-secondary/50 border-border/50 focus:border-primary/50 rounded-xl" />
               </div>
             </motion.div>
 

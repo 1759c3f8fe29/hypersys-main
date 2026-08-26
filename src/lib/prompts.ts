@@ -47,6 +47,8 @@
 // renders behind `opts.toolsAvailable` and explicitly overrides the hedging
 // language above it. Two audiences, one document, one flag deciding which.
 
+import { fenceFor } from "./chat-format";
+
 /**
  * Knowledge cutoffs, stated to the model so it can reason about staleness.
  * These mirror the two reference prompts. They are not a claim about any
@@ -846,4 +848,22 @@ export function buildVisionSystemPrompt(opts: PromptRenderOptions): string {
   ]
     .join("\n")
     .trim();
+}
+
+/**
+ * The message the canvas's "edit this" sends: the artifact's current text, handed
+ * back as the version to change.
+ *
+ * A named function rather than three lines inside a JSX callback, and not for
+ * tidiness — nothing in the suite renders `Chat.tsx`, so an expression there is
+ * verified by reading and this is verified by running. The wrap is the part that
+ * has been wrong: it used a literal ``` and CommonMark closes a block at the first
+ * fence line at least as long as the opener, so a generated README — the artifact
+ * most likely to be sent back for editing — arrived truncated at its own first
+ * example, with the rest of itself trailing as prose. `fenceFor` outgrows whatever
+ * is inside.
+ */
+export function buildArtifactEditPrompt(text: string): string {
+  const fence = fenceFor(text);
+  return `Here's the current version — make the changes I describe:\n${fence}\n${text}\n${fence}`;
 }

@@ -28,16 +28,39 @@ export function useWindowState(): WindowState | null {
   useEffect(() => {
     if (!bridge) return;
 
-    // Guards the async fetch below. Without it, a fetch resolving after unmount
-    // calls setState on a dead component — harmless in React 18 but it also
-    // clobbers a *newer* state that the subscription may already have delivered,
-    // since the invoke round-trip and the first "focus" event race each other.
+    // Two separate guards, and the difference between them is the whole point.
+    //
+    // `live` is about unmount: a fetch resolving on a dead component.
+    //
+    // `superseded` is about *ordering*, which `live` cannot express — it is only
+    // false after unmount, so an in-flight fetch resolving during a normal
+    // lifetime passes it and writes anyway. The interleaving that matters:
+    //
+    //   1. effect runs, `getWindowState()` invoked — the window is still `show:
+    //      false` at this point (main.cjs shows it on "ready-to-show", which
+    //      fires *after* the renderer's first paint), so the answer being
+    //      computed says `focused: false`;
+    //   2. the window is shown, "focus" fires, the subscription delivers
+    //      `focused: true`;
+    //   3. the invoke's reply — the snapshot from step 1 — lands and overwrites
+    //      it, dimming the title bar of a focused window.
+    //
+    // Electron happens to queue the reply before the later "focus" send, so
+    // today step 3 usually arrives first and nothing is visible; that is an
+    // ordering coincidence in the transport, not a property of this hook. The
+    // same race is reachable without any coincidence by maximizing during the
+    // round trip, and the `catch` path below makes it worse — it writes a
+    // *guess* that would overwrite a measured value.
+    //
+    // So: the subscription always wins. It is strictly newer than the fetch by
+    // construction, since the fetch answers a question asked before it.
     let live = true;
+    let superseded = false;
 
     bridge
       .getWindowState()
       .then((initial) => {
-        if (live) setState(initial);
+        if (live && !superseded) setState(initial);
       })
       .catch(() => {
         // An invoke can reject for exactly one reason that matters here: no
@@ -45,12 +68,15 @@ export function useWindowState(): WindowState | null {
         // default rather than staying null keeps the title bar rendered — a
         // frameless Linux window with no title bar has no close button, so
         // "render it with possibly-wrong glyph state" beats "render nothing".
-        if (live) setState({ maximized: false, fullScreen: false, focused: true });
+        if (live && !superseded) setState({ maximized: false, fullScreen: false, focused: true });
       });
 
     // Overwrites rather than merges: the main process always sends all three
     // fields together, so a merge would only hide a future partial payload bug.
-    const unsubscribe = bridge.onWindowStateChange(setState);
+    const unsubscribe = bridge.onWindowStateChange((next) => {
+      superseded = true;
+      setState(next);
+    });
 
     return () => {
       live = false;

@@ -60,13 +60,13 @@ const STYLE_HINTS: Record<string, string> = {
   sketch: "pencil sketch, visible hatching, monochrome",
 };
 
-const RATIO_HINTS: Record<string, string> = {
-  "1:1": "square composition",
-  "16:9": "wide cinematic composition",
-  "9:16": "tall vertical composition",
-  "4:3": "landscape composition",
-  "3:4": "portrait composition",
-};
+// `aspect_ratio` used to live here too, as a prose hint ("tall vertical
+// composition") folded into the prompt. It is now a real parameter: the endpoint
+// honours width/height, measured in scripts/probe-image-size.mjs, so the ratio
+// picks the canvas instead of nudging the sampler. That fixes two things at once —
+// a 9:16 request came back square, and the hint was appended *after* the prompt so
+// MAX_IMAGE_PROMPT_CHARS truncated it away first on exactly the long prompts this
+// schema asks for. Style has no such parameter, so STYLE_HINTS stays prose.
 
 export async function executeGenerateImage(
   args: Record<string, unknown>,
@@ -79,11 +79,7 @@ export async function executeGenerateImage(
 
   const style = asString(args.style);
   const ratio = asString(args.aspect_ratio);
-  const fullPrompt = [
-    prompt,
-    style ? STYLE_HINTS[style] : undefined,
-    ratio ? RATIO_HINTS[ratio] : undefined,
-  ]
+  const fullPrompt = [prompt, style ? STYLE_HINTS[style] : undefined]
     .filter(Boolean)
     .join(", ");
 
@@ -93,6 +89,7 @@ export async function executeGenerateImage(
       DEFAULT_IMAGE_MODEL_ID,
       [],
       ctx.signal,
+      ratio,
     );
     if (!imageDataUrl) {
       return { ok: false, error: "generate_image: the image service returned nothing. Tell the user and offer to retry." };

@@ -15,7 +15,7 @@ import remarkGfm from "remark-gfm";
 
 import { diffLines, diffSummary } from "@/lib/artifact-diff";
 import { copyText } from "@/lib/clipboard";
-import type { Artifact } from "@/lib/artifacts";
+import type { Artifact, ArtifactVersion } from "@/lib/artifacts";
 import { RunButton, RunOutput } from "@/components/chat/CodeRunner";
 import { isRunnableLanguage, useCodeRunner } from "@/components/chat/use-code-runner";
 import { useArtifacts, closeArtifact } from "./ArtifactProvider";
@@ -37,9 +37,24 @@ interface Props {
   onDownload?: (artifact: Artifact) => void;
   /** Resolve a file artifact's text from its object URL (only used for files). */
   fetchFileText?: (artifact: Artifact) => Promise<string>;
+  /**
+   * Resolve **one specific version** of a file artifact, which is what the diff
+   * view needs and `fetchFileText` cannot give it: that one always resolves the
+   * newest version, because it exists to fill the panel's single content pane.
+   *
+   * Separate rather than a parameter with a default, because the two have
+   * different fallback rules and the difference is load-bearing. Resolving the
+   * newest may fall back to the newest same-named file when no version matches
+   * (see `resolveFile`); resolving version *n* must match `messageId` exactly or
+   * fail, because the whole claim a diff makes is "these two are different
+   * versions of the same file", and a positional guess can satisfy it with the
+   * same file twice — a diff that says "identical" about two files the user knows
+   * differ. Failing loudly is the only honest option there.
+   */
+  fetchVersionText?: (artifact: Artifact, version: ArtifactVersion) => Promise<string>;
 }
 
-export function ArtifactPanel({ onEdit, onDownload, fetchFileText }: Props) {
+export function ArtifactPanel({ onEdit, onDownload, fetchFileText, fetchVersionText }: Props) {
   const { artifacts, openId } = useArtifacts();
   const artifact = useMemo(
     () => artifacts.find((a) => a.id === openId) || null,
@@ -76,7 +91,23 @@ export function ArtifactPanel({ onEdit, onDownload, fetchFileText }: Props) {
   return (
     <div className="h-full flex flex-col bg-card border-l border-border/40">
       <PanelHeader artifact={artifact} onClose={closeArtifact} onDownload={onDownload} />
-      <PanelBody artifact={artifact} onEdit={onEdit} fetchFileText={fetchFileText} />
+      {/* Keyed, so switching artifacts starts the body over. Every piece of
+          state below belongs to one artifact and none of it was being reset:
+          `resolved` holds a file's fetched text and its effect refuses to
+          re-fetch once it is non-null, so opening a second file showed the
+          *first* file's bytes under the second one's name — the §14.2 #16 shape
+          again, a wrong answer that looks like a right one. `view` carried a
+          user's "Render" choice onto a Python artifact, and `pos` carried a diff
+          position onto an artifact with fewer versions, labelling it "v4 → v5".
+          One key fixes all three, which is why it is a key and not three
+          effects. */}
+      <PanelBody
+        key={artifact.id}
+        artifact={artifact}
+        onEdit={onEdit}
+        fetchFileText={fetchFileText}
+        fetchVersionText={fetchVersionText}
+      />
     </div>
   );
 }
@@ -127,10 +158,12 @@ function PanelBody({
   artifact,
   onEdit,
   fetchFileText,
+  fetchVersionText,
 }: {
   artifact: Artifact;
   onEdit?: (t: string) => void;
   fetchFileText?: (a: Artifact) => Promise<string>;
+  fetchVersionText?: (a: Artifact, v: ArtifactVersion) => Promise<string>;
 }) {
   const latest = artifact.history[artifact.history.length - 1];
   // File artifacts resolve their text from an object URL on demand.
@@ -188,7 +221,9 @@ function PanelBody({
         {effectiveView === "preview" && <Preview content={content} kind={artifact.language} />}
         {effectiveView === "code" && <CodeView content={content} language={artifact.language} />}
         {effectiveView === "markdown" && <MarkdownView content={content} />}
-        {effectiveView === "diff" && <DiffView artifact={artifact} />}
+        {effectiveView === "diff" && (
+          <DiffView artifact={artifact} fetchVersionText={fetchVersionText} />
+        )}
       </div>
       {onEdit && effectiveView !== "diff" && (
         <EditBar content={content} onEdit={onEdit} />
@@ -210,13 +245,28 @@ function ViewSwitch({
     { id: "preview", label: "Preview", shown: PREVIEWABLE.has(artifact.language) },
     { id: "markdown", label: "Render", shown: MARKDOWN_LANGS.has(artifact.language) },
     { id: "code", label: "Code", shown: true },
-    // Not for files, and not as a matter of taste. A file artifact's per-version
-    // `content` is `""` by design — files defer their bytes to an object URL the
-    // panel fetches on open, and only the newest one is ever fetched — so a
-    // two-version file diffed `""` against `""` and rendered an empty diff view,
-    // reporting "no changes" between two genuinely different spreadsheets. A
-    // comparison the data cannot support should not be offered (§14.2 #18).
-    { id: "diff", label: "Diff", shown: artifact.history.length > 1 && artifact.kind !== "file" },
+    // This used to read `history.length > 1 && kind !== "file"`, and that second
+    // clause was right about the bug and fatal to the feature. The bug: a file
+    // artifact's per-version `content` is `""` by design — files defer their bytes
+    // to an object URL, and only the newest version was ever fetched — so a
+    // two-version file diffed `""` against `""` and reported "no changes" between
+    // two genuinely different spreadsheets (§14.2 #18).
+    //
+    // What it missed is that **a file is the only artifact that can ever have two
+    // versions.** A code artifact's id is a hash of its content, so re-generating
+    // it either produces the same id and the same bytes — which `mergeArtifacts`
+    // correctly treats as the same version, not a new one — or a different id,
+    // which is a different artifact. Excluding files therefore left the condition
+    // unsatisfiable: this tab could not appear, and `DiffView`, `diffLines`,
+    // `diffSummary` and all of `artifact-diff.test.ts` were unreachable from the
+    // running app. A guard that removes the last live path is indistinguishable
+    // from deleting the feature, and nothing said so out loud.
+    //
+    // Fixed by resolving each version's bytes instead of refusing to compare:
+    // `fetchVersionText` matches a version's producing message to its file. A
+    // version whose blob is gone now says so; that is the honest form of the old
+    // guard, and it fires per version rather than per kind.
+    { id: "diff", label: "Diff", shown: artifact.history.length > 1 },
   ];
   const shown = tabs.filter((t) => t.shown);
   return (
@@ -304,12 +354,75 @@ function MarkdownView({ content }: { content: string }) {
   );
 }
 
-function DiffView({ artifact }: { artifact: Artifact }) {
-  const [pos, setPos] = useState(0); // which pair to diff
+/**
+ * Compare two adjacent versions of an artifact.
+ *
+ * Two things here are deliberate and were previously wrong:
+ *
+ * **It opens on the newest pair, not the oldest.** `useState(0)` showed v1 → v2
+ * on an artifact with five versions, so the question the panel answers on open
+ * was "what changed the first time" — while the reason anyone opens it is the
+ * change that just happened. On a two-version artifact the two are the same, which
+ * is why this survived: the common case cannot tell them apart.
+ *
+ * **The bytes are resolved per version, asynchronously.** A code artifact carries
+ * its text inline, but a file artifact's versions all hold `""` and defer to an
+ * object URL, so a diff has to fetch both sides. That fetch is racy by nature —
+ * pressing the chevron twice starts two — so a cancelled flag drops the loser,
+ * the same guard `useTextToSpeech` needs for its awaited voice list. Without it
+ * the slower response wins and the panel shows a diff of a pair it is not
+ * labelling.
+ */
+function DiffView({
+  artifact,
+  fetchVersionText,
+}: {
+  artifact: Artifact;
+  fetchVersionText?: (a: Artifact, v: ArtifactVersion) => Promise<string>;
+}) {
   const versions = artifact.history;
-  const prev = versions[Math.max(0, pos)]?.content ?? "";
-  const next = versions[Math.min(versions.length - 1, pos + 1)]?.content ?? "";
-  const rows = useMemo(() => (prev !== next ? diffLines(prev, next) : []), [prev, next]);
+  // The newest pair. `max(0, …)` guards the length-1 case, which returns early
+  // below but still runs this initialiser.
+  const [pos, setPos] = useState(Math.max(0, versions.length - 2));
+  const [sides, setSides] = useState<{ prev: string; next: string } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const older = versions[pos];
+    const newer = versions[pos + 1];
+    if (!older || !newer) return;
+
+    let cancelled = false;
+    const resolve = async (v: ArtifactVersion): Promise<string> => {
+      // Inline content wins: a code artifact never needs a fetch, and a file
+      // whose bytes have already been read does not need a second one.
+      if (v.content) return v.content;
+      if (!fetchVersionText) throw new Error("Version history is unavailable here.");
+      return fetchVersionText(artifact, v);
+    };
+
+    setSides(null);
+    setLoadError(null);
+    Promise.all([resolve(older), resolve(newer)])
+      .then(([prev, next]) => {
+        if (!cancelled) setSides({ prev, next });
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setLoadError(
+          e instanceof Error ? e.message : "Could not read one of these versions.",
+        );
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [artifact, versions, pos, fetchVersionText]);
+
+  const rows = useMemo(
+    () => (sides && sides.prev !== sides.next ? diffLines(sides.prev, sides.next) : []),
+    [sides],
+  );
   const summary = useMemo(() => diffSummary(rows), [rows]);
 
   if (versions.length < 2) {
@@ -322,9 +435,13 @@ function DiffView({ artifact }: { artifact: Artifact }) {
         <History className="w-3.5 h-3.5" />
         <span>History · {versions.length} versions</span>
         <div className="flex items-center gap-1 ml-auto">
+          {/* Icon-only, so named: the neighbouring "v1 → v2" is the only thing
+              saying what these move through, and it is not part of either name. */}
           <button
             disabled={pos === 0}
             onClick={() => setPos((p) => Math.max(0, p - 1))}
+            aria-label="Compare an earlier pair of versions"
+            title="Earlier versions"
             className="p-1 rounded hover:bg-secondary disabled:opacity-30"
           >
             <ChevronLeft className="w-3.5 h-3.5" />
@@ -335,6 +452,8 @@ function DiffView({ artifact }: { artifact: Artifact }) {
           <button
             disabled={pos >= versions.length - 2}
             onClick={() => setPos((p) => Math.min(versions.length - 2, p + 1))}
+            aria-label="Compare a later pair of versions"
+            title="Later versions"
             className="p-1 rounded hover:bg-secondary disabled:opacity-30"
           >
             <ChevronRight className="w-3.5 h-3.5" />
@@ -352,7 +471,17 @@ function DiffView({ artifact }: { artifact: Artifact }) {
         {rows.map((row, i) => (
           <DiffRowView key={i} row={row} />
         ))}
-        {rows.length === 0 && (
+        {/* Three different reasons for an empty diff, and telling the user
+            "identical" for the other two is the whole family of bug this file
+            keeps hitting: a confident wrong answer beats no answer only for the
+            program. `sides === null` is still fetching; `loadError` means a
+            version's bytes are gone (a blob URL dies with its tab); identical is
+            the one case where the comparison happened and found nothing. */}
+        {loadError && <div className="p-6 text-muted-foreground">{loadError}</div>}
+        {!loadError && sides === null && (
+          <div className="p-6 text-muted-foreground">Reading both versions…</div>
+        )}
+        {!loadError && sides !== null && rows.length === 0 && (
           <div className="p-6 text-muted-foreground">Versions v{pos + 1} and v{pos + 2} are identical.</div>
         )}
       </div>

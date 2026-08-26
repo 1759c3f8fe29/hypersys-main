@@ -39,19 +39,25 @@ if (blobProto && typeof blobProto.text !== "function") {
   };
 }
 
-Object.defineProperty(window, "matchMedia", {
-  writable: true,
-  value: (query: string) => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addListener: () => {},
-    removeListener: () => {},
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    dispatchEvent: () => {},
-  }),
-});
+// Guarded on `window` because this file is the global setup for *every* test,
+// including any that declare `@vitest-environment node` — where `window` does
+// not exist and an unguarded reference here throws before the test body runs,
+// so the failure reads as a broken test rather than as a missing global.
+if (typeof window !== "undefined") {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => {},
+    }),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Element.scrollIntoView

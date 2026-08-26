@@ -725,7 +725,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
       }
       const a = document.createElement('a');
       a.href = href;
-      a.download = `novaris-image-${Date.now()}.png`;
+      a.download = `flyer-image-${Date.now()}.png`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -920,7 +920,13 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                     <RefreshCw className="w-3.5 h-3.5" /><span className="hidden sm:inline">Retry</span>
                   </button>
                 )}
+                {/* Named, because it is icon-only and it is *the* control a screen
+                    reader user reaches for: unlabelled it announced as "button".
+                    The label tracks state — one control does both, and "Read aloud"
+                    on a button that stops the audio is worse than no label. */}
                 <button type="button" onClick={handleSpeak} disabled={isTTSLoading}
+                  aria-label={isTTSLoading ? 'Preparing audio' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
+                  title={isTTSLoading ? 'Preparing audio…' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
                   className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${isSpeaking ? 'bg-primary/20 text-primary border-primary/30' : isTTSLoading ? 'bg-primary/10 text-primary border-primary/20' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
                   {isTTSLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : isSpeaking ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
                 </button>

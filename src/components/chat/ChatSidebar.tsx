@@ -915,9 +915,21 @@ export default function ChatSidebar({
               <Label htmlFor="nvidia-key" className="text-sm font-semibold text-foreground/80 flex items-center gap-1.5">
                 🧠 NVIDIA API Key
               </Label>
+              {/* `type="password"` here is masking, not a credential field: these
+                  are provider API keys, not this site's password. Without
+                  `autoComplete="off"` a browser manager treats the dialog as a
+                  login form — it will offer to fill the user's saved website
+                  password into a key field, and offer to save an API key as a
+                  password for this origin. Honest about the limit: Chrome has
+                  historically ignored `off` on password inputs in some versions,
+                  so this states the intent rather than guaranteeing the behaviour.
+                  `spellCheck` off because a key is not prose, and a red squiggle
+                  under a 70-character token is noise. */}
               <Input
                 id="nvidia-key"
                 type="password"
+                autoComplete="off"
+                spellCheck={false}
                 placeholder="nvapi-..."
                 value={nvidiaKey}
                 onChange={(e) => setNvidiaKey(e.target.value)}
@@ -931,6 +943,8 @@ export default function ChatSidebar({
               <Input
                 id="mistral-key"
                 type="password"
+                autoComplete="off"
+                spellCheck={false}
                 placeholder="Enter Mistral API Key"
                 value={mistralKey}
                 onChange={(e) => setMistralKey(e.target.value)}

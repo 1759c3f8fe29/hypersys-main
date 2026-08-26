@@ -11,8 +11,14 @@
 // and pair each with anything the file-emitting tools reported. There is no
 // model round-trip — the assistant text and the tool artifacts are both already
 // in hand, so this is a pure function of them.
+//
+// "Dependency-free" means no markdown *parser*, not a private fence rule: the
+// split comes from `chat-format`, which imports nothing itself. A private one
+// here disagreed with the renderer on the closing-fence length and broke ids
+// silently — see `extractCodeBlocks`.
 
 import type { MessageFile } from "@/components/chat/types";
+import { segmentByFence, parseFenceSegment } from "./chat-format";
 
 export type ArtifactKind = "code" | "file" | "markdown";
 
@@ -141,64 +147,46 @@ export function fileArtifactFrom(file: MessageFile, messageId: string): Artifact
 /**
  * Pull fenced code blocks out of markdown without a parser dependency.
  *
- * Handles the CommonMark fence cases that matter for model output: ``` and ~~~,
- * an optional language tag, and an unterminated fence (models do cut off).
- * Indented code blocks are intentionally ignored — they are rare in model
- * answers and ambiguous to detect robustly from prose, so rejecting them is the
- * conservative reading that keeps ordinary paragraphs out of the panel.
+ * The split comes from `chat-format`'s `segmentByFence`, deliberately the same
+ * rule the renderer, the sanitiser and the document exporter use. This function
+ * used to own a private scanner, and it disagreed with `remark` on **one line of
+ * CommonMark**: the closing fence must be *at least as long* as the opener, and
+ * the copy here required exact equality.
  *
- * Two normalisations here exist to match what the markdown renderer does, so the
- * text (and therefore the id) is the same on both sides — see `artifactIdForCode`:
- * line endings collapse to `\n`, and a fence's own indentation is removed from
- * its body. The second one matters for any fence nested in a list item, which is
- * how models format "step 2: run this": CommonMark strips up to the opening
- * fence's indentation from each line, so keeping it would both mis-identify the
- * block and show the code in the panel indented by two spaces that are not in it.
+ * That one word is enough to break artifact ids invisibly, because the id is a
+ * hash of the content and it is derived twice (see `artifactIdForCode`). Given
+ * ```` ```js … ```` closed by ` ```` `, measured against `remark`:
+ *
+ *     renderer (CodeBlock) : "const a = 1;"
+ *     this scanner         : "const a = 1;\n````\n\nOutro paragraph."
+ *
+ * So the panel held a card whose body was the code *plus the answer's trailing
+ * prose*, presented as code, with an id no rendered block would ever compute —
+ * and the swallowed tail can push a two-line snippet past `MIN_CODE_LINES`, so
+ * the card exists at all only because of the bug. Nothing errors; the canvas just
+ * docks and shows something wrong. Models close with a longer fence whenever they
+ * are quoting markdown, which they do whenever asked for a README.
+ *
+ * Indented code blocks are still intentionally ignored — they are rare in model
+ * answers and ambiguous to detect from prose, so rejecting them is the
+ * conservative reading that keeps ordinary paragraphs out of the panel.
  */
 export function extractCodeBlocks(markdown: string): Array<{
   language: string;
   content: string;
   filename?: string;
 }> {
-  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
   const blocks: Array<{ language: string; content: string; filename?: string }> = [];
 
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    const fence = line.match(/^(\s*)(```+|~~~+)\s*([^\s`~]*)?.*$/);
-    if (!fence) {
-      i++;
-      continue;
-    }
-    const indent = (fence[1] || "").length;
-    const marker = fence[2];
-    const lang = (fence[3] || "").toLowerCase();
-    // Strip at most the opening fence's indentation, per CommonMark: a line
-    // indented less than the fence keeps whatever it has rather than losing
-    // meaningful leading space.
-    const dedent = (text: string): string => {
-      let k = 0;
-      while (k < indent && (text[k] === " " || text[k] === "\t")) k++;
-      return text.slice(k);
-    };
-    const body: string[] = [];
-    let j = i + 1;
-    let closed = false;
-    while (j < lines.length) {
-      if (new RegExp(`^\\s*${marker.replace(/ /g, "\\s")}\\s*$`).test(lines[j])) {
-        closed = true;
-        break;
-      }
-      body.push(dedent(lines[j]));
-      j++;
-    }
-    // An unclosed fence takes the rest of the document as its body — a model
-    // mid-stream produces exactly this shape, and dropping it would hide the
-    // substantive block the panel exists for.
-    blocks.push({ language: lang || "text", content: body.join("\n") });
-    i = closed ? j + 1 : j;
+  for (const segment of segmentByFence(markdown.replace(/\r\n?/g, "\n"))) {
+    if (segment.kind !== "code") continue;
+    // `parseFenceSegment` owns the dedent and the fence-line removal; the two
+    // normalisations that keep this text — and therefore the id — identical to
+    // what the renderer hands `CodeBlock`.
+    const { lang, body } = parseFenceSegment(segment.text);
+    blocks.push({ language: lang.toLowerCase() || "text", content: body });
   }
+
   return blocks;
 }
 

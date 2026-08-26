@@ -10,7 +10,7 @@
 // This file is now thin on purpose: validation and the download-artifact
 // bookkeeping live here, every renderer lives in the generator.
 
-import { generateFile, SUPPORTED_FORMATS } from "@/lib/file-generator";
+import { generateFile, isSupportedFormat, SUPPORTED_FORMATS } from "@/lib/file-generator";
 import type { ToolContext, ToolResult } from "./types";
 import { asString } from "./types";
 import type { ToolSchema } from "@/lib/ai";
@@ -49,17 +49,39 @@ export const CREATE_FILE_SCHEMA: ToolSchema = {
   },
 };
 
+/**
+ * The format to build: the model's `format` argument, or the filename's own
+ * extension when that argument is missing or is not one of ours.
+ *
+ * `format` is `required` in the schema, which is not the same as present —
+ * tools/types.ts says so in as many words ("models routinely omit required
+ * fields"). The old code passed the empty string straight through and the user's
+ * "make me a q3-report.xlsx" died on *"unsupported format \"\""*, a message about
+ * an argument they never saw, when the filename beside it named the format
+ * unambiguously. Inferring is also strictly safer than defaulting: a wrong guess
+ * would be a silent substitution, so nothing is guessed — an unrecognised
+ * extension falls through and `generateFile` still reports what the model sent,
+ * which is the string it needs to correct itself.
+ */
+function resolveFormat(format: string, filename: string): string {
+  if (isSupportedFormat(format)) return format;
+  const ext = /\.([A-Za-z0-9]+)$/.exec(filename)?.[1]?.toLowerCase();
+  return ext && isSupportedFormat(ext) ? ext : format;
+}
+
 export async function executeCreateFile(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const format = (asString(args.format) || "").toLowerCase();
   const filename = asString(args.filename);
   const content = typeof args.content === "string" ? args.content : "";
 
   if (!filename) {
     return { ok: false, error: "create_file: missing `filename` argument." };
   }
+
+  // After the filename check, because it reads the filename.
+  const format = resolveFormat((asString(args.format) || "").toLowerCase(), filename);
 
   const result = await generateFile(format, filename, content);
   if (!result.ok) {

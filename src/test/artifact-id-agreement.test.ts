@@ -93,3 +93,61 @@ describe("artifact id agreement between the store and the rendered code block", 
     expect(extractCodeBlocks(md)).toHaveLength(1);
   });
 });
+
+// The divergence the oracle above was built to catch, found later and by reading:
+// the private scanner required the closing fence to be *exactly* the opener, and
+// CommonMark requires it to be **at least as long**. One word, and it only shows
+// up on input nobody thinks to try — but "quote some markdown" is not exotic, it
+// is what asking for a README produces.
+describe("the closing fence is at least as long as the opener, not equal to it", () => {
+  it("agrees when the model closes a ``` block with ````", () => {
+    // Measured against mdast before the fix:
+    //   renderer : "const a = 1;"
+    //   scanner  : "const a = 1;\n````\n\nOutro paragraph."
+    // Two failures in one: the id no rendered block can compute, so the canvas
+    // docks and shows nothing — and the card it does hold has the answer's own
+    // trailing prose inside it, set in monospace as though it were code.
+    const md = `Intro\n\n\`\`\`js\n${body}\n\`\`\`\`\n\nOutro paragraph.\n`;
+    expect(idsFromStore(md)).toEqual(idsFromRenderer(md));
+  });
+
+  it("agrees when a longer fence appears inside a shorter block", () => {
+    // Compared as a subset rather than with toEqual, and the reason is a property
+    // of the two helpers rather than of this input: `idsFromRenderer` reports
+    // *every* code node, while the store holds only the ones clearing
+    // `MIN_CODE_LINES`. This markdown ends up with a substantial block and a
+    // three-line tail, so the counts legitimately differ.
+    //
+    // The invariant that matters is the directional one anyway: **every id the
+    // store holds must be one the renderer also computes**, because the store is
+    // what "Open in canvas" looks up. A renderer id missing from the store is a
+    // block deliberately left inline.
+    const md = `Intro\n\n\`\`\`md\n${body}\n\`\`\`\`\nnested\n\`\`\`\`\n\`\`\`\n\nOutro.\n`;
+    const stored = idsFromStore(md);
+    // Paired presence assertion: a subset check alone is satisfied by an empty
+    // store, which is §14.2 #18's lesson written as a habit.
+    expect(stored).toHaveLength(1);
+    expect(idsFromRenderer(md)).toContain(stored[0]);
+  });
+
+  it("agrees on the same shape with tildes", () => {
+    const md = `Intro\n\n~~~py\n${body}\n~~~~\n\nOutro paragraph.\n`;
+    expect(idsFromStore(md)).toEqual(idsFromRenderer(md));
+  });
+
+  it("still refuses to close a ```` block at an inner ```", () => {
+    // The other direction, and the one the old rule got right — worth pinning
+    // because the fix moves this code, and a `>=` written as `<=` passes every
+    // test above while breaking exactly this.
+    const md = `\`\`\`\`md\n\`\`\`js\nx = 1\n\`\`\`\n${body}\n\`\`\`\`\n\nOutro.\n`;
+    expect(idsFromStore(md)).toEqual(idsFromRenderer(md));
+    expect(extractCodeBlocks(md)).toHaveLength(1);
+  });
+
+  it("agrees on a block the stream cut off mid-body", () => {
+    // No closing fence at all: both sides must take the rest of the text as the
+    // body, and `parseFenceSegment` must not pop a line that is not a fence.
+    const md = `Here you go:\n\n\`\`\`python\n${body}`;
+    expect(idsFromStore(md)).toEqual(idsFromRenderer(md));
+  });
+});

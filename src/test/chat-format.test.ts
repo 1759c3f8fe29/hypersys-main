@@ -20,6 +20,8 @@ import {
   withPersistedImage,
   closeUnterminatedFence,
   speechTextFromMarkdown,
+  fenceFor,
+  parseFenceSegment,
 } from "@/lib/chat-format";
 
 describe("segmentByFence", () => {
@@ -362,7 +364,7 @@ describe("speechTextFromMarkdown", () => {
 
   it("drops a closed fence, which is the case the old rule did get right", () => {
     expect(speechTextFromMarkdown(`Here you go:\n\n\`\`\`py\n${CODE}\n\`\`\`\n\nThat's it.`)).toBe(
-      "Here you go:. That's it.",
+      "Here you go: That's it.",
     );
   });
 
@@ -377,7 +379,7 @@ describe("speechTextFromMarkdown", () => {
   it("drops a fence longer than three backticks", () => {
     // Shipped: "Note:. md heading. Done." — `{1,3}` matched three of the four
     // ticks, so the fourth plus the info string plus the body all survived.
-    expect(speechTextFromMarkdown("Note:\n\n````md\n# heading\n````\n\nDone.")).toBe("Note:. Done.");
+    expect(speechTextFromMarkdown("Note:\n\n````md\n# heading\n````\n\nDone.")).toBe("Note: Done.");
   });
 
   it("drops a fence whose body contains a backtick", () => {
@@ -385,7 +387,7 @@ describe("speechTextFromMarkdown", () => {
     // early and the remainder came out as prose. JS template literals and any
     // markdown-about-markdown hit this.
     expect(speechTextFromMarkdown("Here:\n\n```js\nconst s = `${a}`;\n```\n\nDone.")).toBe(
-      "Here:. Done.",
+      "Here: Done.",
     );
   });
 
@@ -393,7 +395,7 @@ describe("speechTextFromMarkdown", () => {
     // Shipped: "Here:. ~~~py import os print(1) ~~~. Done." The markers
     // themselves were spoken, twice.
     expect(speechTextFromMarkdown("Here:\n\n~~~py\nimport os\nprint(1)\n~~~\n\nDone.")).toBe(
-      "Here:. Done.",
+      "Here: Done.",
     );
   });
 
@@ -431,5 +433,113 @@ describe("speechTextFromMarkdown", () => {
     expect(speechTextFromMarkdown("```\nprint(1)\n```")).toBe("");
     expect(speechTextFromMarkdown(`\`\`\`py\n${CODE}`)).toBe("");
     expect(speechTextFromMarkdown("")).toBe("");
+  });
+
+  it("does not double the punctuation at a paragraph break", () => {
+    // Found by reading what the button actually hands the engine, in
+    // read-aloud-wiring.test.tsx: a blank line became ". " unconditionally, and
+    // most paragraphs already end in a full stop. The three expectations above
+    // that quote "Here:. Done." were pinning this, which is why an expectation
+    // that merely records what a function does is not the same as a requirement.
+    expect(speechTextFromMarkdown("Step one is done.\n\nStep two follows.")).toBe(
+      "Step one is done. Step two follows.",
+    );
+    // A question mark and a colon are both prosody breaks the engine honours, and
+    // the colon is the one that matters: "sentence, script, sentence" is the reply
+    // shape read-aloud is used on, and its first paragraph introduces the script.
+    expect(speechTextFromMarkdown("Ready?\n\nThen go.")).toBe("Ready? Then go.");
+    expect(speechTextFromMarkdown("Save this:\n\n```py\nprint(1)\n```\n\nRun it.")).toBe(
+      "Save this: Run it.",
+    );
+  });
+
+  it("still supplies the break when the paragraph ends in a word", () => {
+    // The other half — the reason the ". " is there at all. A heading loses its
+    // `#`, so without the inserted stop it runs straight into the paragraph under
+    // it as one breathless sentence. This is the case the unconditional version
+    // was written for; it was only ever wrong about the other one.
+    expect(speechTextFromMarkdown("# Setup\n\nRun the installer")).toBe("Setup. Run the installer");
+    expect(speechTextFromMarkdown("Two things\n\nOne of them")).toBe("Two things. One of them");
+  });
+});
+
+// A fence is *built* in this app as well as read — `documents.ts` wraps every
+// notebook code cell, and the canvas's "edit this" wraps an artifact before
+// handing it back to the model. Both used a literal ``` and both had the same
+// bug: CommonMark closes at the first fence line at least as long as the opener,
+// so a body that quotes a fence closes the wrapper early and the rest of it
+// escapes as prose. The failure is silent and it lands where it hurts most —
+// the artifact most likely to be sent back for editing is a generated README,
+// which is exactly the document that contains fences.
+describe("fenceFor", () => {
+  it("uses three backticks for a body that has none", () => {
+    expect(fenceFor("print(1)\nprint(2)")).toBe("```");
+    expect(fenceFor("")).toBe("```");
+  });
+
+  it("outgrows the longest run in the body", () => {
+    // The README case: a markdown document that shows a fenced example.
+    expect(fenceFor("# Install\n\n```sh\nnpm ci\n```")).toBe("````");
+    // And one level further out, since a document quoting *this* rule exists.
+    expect(fenceFor("````md\n```js\nx\n```\n````")).toBe("`````");
+  });
+
+  it("counts a run anywhere, not only at the start of a line", () => {
+    // Deliberately conservative: an inline ``` cannot close a block, but paying
+    // one character is cheaper than a rule that has to be right about where.
+    expect(fenceFor("the ``` sequence")).toBe("````");
+    // An inline span is a run of one and must not inflate the fence.
+    expect(fenceFor("use `npm ci` first")).toBe("```");
+  });
+
+  it("round-trips through the app's own fence reader", () => {
+    // The invariant both call sites actually need, asserted end-to-end rather
+    // than by inspecting the marker: wrap a body, split it back out, get the
+    // body. Run against the README shape, which is where the literal ``` broke.
+    const body = "# Install\n\n```sh\nnpm ci\n```\n\nDone.";
+    const fence = fenceFor(body);
+    const wrapped = `${fence}md\n${body}\n${fence}`;
+
+    const segments = segmentByFence(wrapped);
+    expect(segments).toHaveLength(1);
+    expect(segments[0].kind).toBe("code");
+
+    const parsed = parseFenceSegment(segments[0].text);
+    expect(parsed.lang).toBe("md");
+    expect(parsed.body).toBe(body);
+  });
+
+  it("round-trips through the real markdown parser too", async () => {
+    // The round trip above is against this app's own reader, and two copies of one
+    // mistake agree perfectly — so the same body goes through `mdast`, the micromark
+    // pipeline react-markdown runs. This is the assertion that would catch a
+    // `fenceFor` that is self-consistently wrong.
+    const { fromMarkdown } = await import("mdast-util-from-markdown");
+    const body = "# Install\n\n```sh\nnpm ci\n```\n\nDone.";
+    const fence = fenceFor(body);
+
+    const tree = fromMarkdown(`${fence}md\n${body}\n${fence}`);
+    expect(tree.children).toHaveLength(1);
+    const node = tree.children[0];
+    expect(node.type).toBe("code");
+    // Narrowed rather than cast: `value` and `lang` only exist on a Code node.
+    if (node.type !== "code") throw new Error("unreachable");
+    expect(node.lang).toBe("md");
+    expect(node.value).toBe(body);
+  });
+
+  it("a literal three-backtick wrapper would have failed that round trip", () => {
+    // The pre-fix behaviour, pinned so the fix is not silently reverted. Measured,
+    // and the detail is worth having written down: the wrapper does *not* close at
+    // the body's ```sh — an info string disqualifies a line as a closer — it closes
+    // at the bare ``` ending the example. So the block stops mid-example, "Done."
+    // comes back as prose, and the wrapper's own closing fence is read as a new
+    // opener, leaving a third segment. Three ways wrong from one hardcoded marker.
+    const body = "# Install\n\n```sh\nnpm ci\n```\n\nDone.";
+    const wrapped = "```md\n" + body + "\n```";
+
+    const segments = segmentByFence(wrapped);
+    expect(parseFenceSegment(segments[0].text).body).toBe("# Install\n\n```sh\nnpm ci");
+    expect(segments.map((seg) => seg.kind)).toEqual(["code", "prose", "code"]);
   });
 });

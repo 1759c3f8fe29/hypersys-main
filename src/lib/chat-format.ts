@@ -195,6 +195,79 @@ export function segmentByFence(text: string): Segment[] {
   return out;
 }
 
+/**
+ * Take one `kind: "code"` segment apart: its info-string language, and its body
+ * with the fence lines removed and CommonMark's indentation stripped.
+ *
+ * `segmentByFence` deliberately answers only *where* a block starts and ends, so
+ * every consumer that also needs the language was writing its own header parse —
+ * three of them, at last count, and the third (`extractCodeBlocks`) diverged from
+ * the renderer in a way that silently broke artifact ids. This is the shared
+ * second half.
+ *
+ * Two details that are easy to get wrong and both matter to callers:
+ *
+ * - **The dedent.** CommonMark strips *up to* the opening fence's indentation
+ *   from each body line, and no more — a line indented less keeps what it has,
+ *   because that space is content. Models format "step 2, run this" as a fence
+ *   inside a numbered list constantly, so this is the common case, not an edge
+ *   one. `remark` does it, so anything hashing a block has to do it too.
+ * - **`lang` is returned verbatim, not lowercased.** `artifactIdForCode`
+ *   lowercases it as part of the id; a document exporter wants what the model
+ *   wrote. Normalising here would make one of those two wrong.
+ */
+export function parseFenceSegment(segment: string): { lang: string; body: string } {
+  const lines = segment.split("\n");
+  const open = lines[0].match(/^(\s*)(`{3,}|~{3,})\s*([^\s`~]*)?/);
+  const indent = (open?.[1] || "").length;
+  const lang = open?.[3] || "";
+
+  const body = lines.slice(1);
+  // An unterminated fence has no closing line to drop — the common shape
+  // mid-stream, and the reason this is a test rather than an unconditional pop.
+  if (body.length && /^\s*(?:`{3,}|~{3,})\s*$/.test(body[body.length - 1])) body.pop();
+
+  const dedent = (text: string): string => {
+    let k = 0;
+    while (k < indent && (text[k] === " " || text[k] === "\t")) k++;
+    return text.slice(k);
+  };
+
+  return { lang, body: body.map(dedent).join("\n") };
+}
+
+/**
+ * The opening/closing fence to wrap `body` in so the block survives a round trip.
+ *
+ * The counterpart of `parseFenceSegment`, and here for the same reason: a fence is
+ * built in this app as well as read, and a hardcoded ` ``` ` is wrong whenever the
+ * body contains one. CommonMark closes a block at the first fence line **at least
+ * as long** as the opener, so ``` ```…``` ``` around a body that quotes a fence
+ * closes early — the rest of the body escapes as prose with a stray fence in it.
+ *
+ * Both call sites hit that on ordinary input:
+ *
+ *   • `documents.ts` wraps every notebook code cell, and a cell that prints
+ *     markdown, or holds a docstring with an example in it, contains ` ``` `.
+ *   • the canvas's "edit this" wraps an artifact before handing it to the model —
+ *     and the artifact most likely to contain a fence is the one most likely to be
+ *     edited, a generated README.
+ *
+ * The rule is `mdast-util-to-markdown`'s: one more backtick than the longest run
+ * anywhere in the body, floored at three. Counting anywhere rather than only at
+ * line start is deliberately conservative — an inner ` ```py ` cannot close a
+ * block, but it costs one character to stop caring about the difference.
+ */
+export function fenceFor(body: string): string {
+  let longest = 0;
+  let run = 0;
+  for (const ch of body || "") {
+    run = ch === "`" ? run + 1 : 0;
+    if (run > longest) longest = run;
+  }
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 /** Apply a rewrite to prose only, leaving fenced blocks byte-identical. */
 function mapProse(text: string, fn: (prose: string) => string): string {
   return segmentByFence(text)
@@ -362,6 +435,20 @@ export function sanitizeAssistantText(raw: string): string {
 // ── Speech ──────────────────────────────────────────────────────────────────
 
 /**
+ * Characters a speech engine already pauses on, so a paragraph ending in one does
+ * not need the synthetic full stop that turns a blank line into a sentence break.
+ *
+ * The test is "does the engine already break here", not "is this the end of a
+ * sentence" — which is why `:` `;` and `,` are all in it. A comma is only a
+ * within-sentence pause, but a paragraph ending in one still gets that pause, and
+ * appending a period produces ",." — the same doubled punctuation this set exists
+ * to prevent. `:` is the one that matters most: "sentence, script, sentence" is
+ * the reply shape read-aloud is used on, and the sentence introducing the script
+ * ends in a colon.
+ */
+const SPEECH_PAUSE_ALREADY = /[.!?:;,…]/;
+
+/**
  * The text a read-aloud button should actually pronounce.
  *
  * This lived in `useTextToSpeech` as a private `.replace` chain whose idea of a
@@ -387,6 +474,10 @@ export function sanitizeAssistantText(raw: string): string {
  *    and it matches the `[alt](url)` *inside* `![alt](url)` — so the image strip
  *    on the next line had nothing left to match and every generated image was
  *    announced as "!Generated image".
+ *
+ * A third, smaller one, found by listening to an ordinary reply: the paragraph
+ * break becomes `". "` only when the paragraph did not already end in something
+ * the engine pauses on. See `SPEECH_PAUSE_ALREADY`.
  */
 export function speechTextFromMarkdown(raw: string): string {
   const prose = segmentByFence(raw || "")
@@ -411,13 +502,22 @@ export function speechTextFromMarkdown(raw: string): string {
       .replace(/\p{Extended_Pictographic}/gu, "")
       .replace(/‍/g, "")
       .replace(/[\u{FE00}-\u{FE0F}]/gu, "")
+      .trim()
       // A blank line is a sentence boundary to a speech engine; a single newline
       // is not. Removing a fenced block leaves the blank lines that surrounded it,
       // which is how the pause lands in the right place — but only for an
       // *interior* block. Trimming first is what stops a reply that ends in one
       // from trailing a bare "." after its last word.
-      .trim()
-      .replace(/\n{2,}/g, ". ")
+      //
+      // The period is only added when the paragraph does not already end in one.
+      // Unconditionally it doubles the punctuation on the ordinary case, because
+      // most paragraphs end in a full stop: "Here are the two steps.. Then you
+      // are done." And the reply shape this button exists for — a sentence, a
+      // script, a sentence — ends its first paragraph in a colon, so the string
+      // handed to the engine was "Save this as scheduler.py:. Then run it."
+      .replace(/(.?)\n{2,}/g, (_, prev: string) =>
+        prev && !SPEECH_PAUSE_ALREADY.test(prev) ? `${prev}. ` : `${prev} `,
+      )
       .replace(/\n/g, " ")
       .replace(/[ \t]{2,}/g, " ")
       .trim()

@@ -6,7 +6,9 @@ import {
   buildDeepThinkDirective,
   KNOWLEDGE_CUTOFFS,
   PERSONALITY_PRESETS,
+  buildArtifactEditPrompt,
 } from '@/lib/prompts';
+import { segmentByFence, parseFenceSegment } from '@/lib/chat-format';
 import { TOOL_NAMES } from '@/lib/tools';
 
 const base = { modelName: 'test-model' };
@@ -335,3 +337,34 @@ describe('the response spec fights verbosity', () => {
   });
 });
 
+// The canvas's "edit this" sends the artifact back as the version to change. It
+// lives here rather than inline in `Chat.tsx` because nothing in the suite renders
+// that file, so an expression there is checked by reading only — and this one was
+// wrong: a literal ``` closes at the first fence inside the artifact.
+describe('buildArtifactEditPrompt', () => {
+  it('keeps the instruction and the artifact separate', () => {
+    const prompt = buildArtifactEditPrompt('print(1)');
+    expect(prompt.startsWith("Here's the current version")).toBe(true);
+    expect(prompt).toContain('```\nprint(1)\n```');
+  });
+
+  it('survives an artifact that contains a fence', () => {
+    // The README case, and the one that was broken: read the prompt back with the
+    // app's own fence rule and the artifact must come out whole. A three-backtick
+    // wrapper closed at the example's own closing fence, so the model was asked to
+    // edit a document that stopped halfway and had its own tail quoted as prose
+    // after it — and would have returned exactly that as the new version.
+    const artifact = '# Flyer\n\nInstall:\n\n```sh\nnpm ci\n```\n\nThen run it.';
+    const prompt = buildArtifactEditPrompt(artifact);
+
+    const code = segmentByFence(prompt).filter((seg) => seg.kind === 'code');
+    expect(code).toHaveLength(1);
+    expect(parseFenceSegment(code[0].text).body).toBe(artifact);
+  });
+
+  it('does not inflate the fence for inline code', () => {
+    // A run of one backtick is not a fence, and paying an extra character for
+    // every artifact mentioning `npm ci` would be a different kind of wrong.
+    expect(buildArtifactEditPrompt('use `npm ci`')).toContain('```\nuse `npm ci`\n```');
+  });
+});

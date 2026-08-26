@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv, type ViteDevServer, type Plugin } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import path from "path";
+import { existsSync, statSync } from "fs";
 // Node-only, and it must stay that way: this module is also imported by
 // api/search.js and has no dependencies, so that importing it can never pull
 // server-side auth or metering code toward the browser bundle. Importing it *here*
@@ -20,6 +21,64 @@ const env = (key: string): string | undefined => PROXY_ENV[key] || process.env[k
 // during `npm run dev` so you don't need Firebase emulators running.
 // ---------------------------------------------------------------------------
 
+/**
+ * The paths this dev router actually implements.
+ *
+ * It exists because the middleware below used to claim the entire `/api/`
+ * namespace — `if (!url.startsWith("/api/")) return next()` — and answer
+ * everything it did not recognise with a JSON 404. But `/api/` is not only a
+ * route namespace in dev: it is also a *directory in the project root*, and
+ * Vite serves source modules under their path from the root. `src/lib/providers.ts`
+ * imports `../../api/_failover.js`, which the dev server therefore has to serve
+ * as `/api/_failover.js?t=…`. The middleware swallowed that request and answered
+ * `{"error":"Unknown endpoint"}` with `Content-Type: application/json`, so the
+ * import failed, `providers.ts` failed, and the whole module graph with it:
+ * `npm run dev` showed index.html's boot splash forever and never mounted React.
+ * Measured over CDP against a real Chrome, not inferred — the only console
+ * output was the 404 for that one URL and `document.querySelectorAll("button,
+ * input, textarea").length` stayed 0 for twelve seconds.
+ *
+ * Nothing caught it because nothing else uses this path: `npm run build` inlines
+ * the import at bundle time and never issues an HTTP request for it, vitest
+ * resolves it from disk, and lint and typecheck do not run the server. All four
+ * gates were green while the primary dev workflow was dead.
+ *
+ * So the rule is: own the routes we implement and hand everything else back to
+ * Vite. Falling through is also the more faithful behaviour — in production each
+ * `api/*.js` is a separate function and Vercel answers an unknown `/api/` path
+ * with its own 404, so the JSON "Unknown endpoint" body was never mirroring
+ * anything that exists.
+ */
+const DEV_API_ROUTES = new Set(["nvidia", "llm", "mistral", "pollinations", "search"]);
+
+/**
+ * Does `route` name a file that really exists under api/?
+ *
+ * The prefix check on the *resolved* path is what stops `/api/../package.json`
+ * from being handed to Vite as a file request. It is reachable: `req.url` is the
+ * raw request target, so a hand-written `GET /api/../package.json HTTP/1.1` keeps
+ * its `..` — measured over a plain socket, that spelling answers 200 with the
+ * real package.json when this line is removed and 404 when it is present. Browser
+ * clients and `fetch` normalise the path away before sending, which is exactly why
+ * the check needs a socket-level test rather than a `fetch` one.
+ *
+ * What this is not: a security boundary. Both branches end at Vite — we either
+ * call `next()` or answer 404, never read a file ourselves — so `server.fs.deny`
+ * still decides what is readable, and `.env` is 403 with or without this line
+ * (measured). The guard is here so that `/api/…` cannot quietly become a second
+ * file server for the project root under an API-shaped URL.
+ *
+ * Percent-encoded separators are not a second vector: Node does not decode
+ * `req.url`, so `/api/..%2fpackage.json` arrives as a single filename containing
+ * "%2f", which does not exist and takes the 404 path on the existsSync check.
+ */
+function isApiSourceFile(route: string): boolean {
+  const dir = path.resolve(__dirname, "api");
+  const target = path.resolve(dir, route);
+  if (target !== dir && !target.startsWith(dir + path.sep)) return false;
+  return existsSync(target) && statSync(target).isFile();
+}
+
 function localApiProxy(): Plugin {
   return {
     name: "local-api-proxy",
@@ -28,6 +87,24 @@ function localApiProxy(): Plugin {
       server.middlewares.use(async (req, res, next) => {
         const url = req.url || "";
         if (!url.startsWith("/api/")) return next();
+
+        // Strip both the query and the hash: Vite appends `?t=<mtime>` and
+        // `?import` to module URLs, and the old single-`\?` strip meant
+        // `/api/_failover.js?t=1` matched no route and fell into the 404.
+        const route = url.replace(/^\/api\//, "").replace(/[?#].*$/, "");
+        if (!DEV_API_ROUTES.has(route)) {
+          // A path that names a real file under api/ is a source module — hand it
+          // to Vite. Anything else keeps the JSON 404: falling through for those
+          // too would let Vite's SPA fallback answer a typo'd endpoint with 200
+          // and 19KB of index.html, so `await res.json()` would fail on a parse
+          // error instead of on a status. That exact confusion cost this project
+          // a debugging session over /sitemap.xml (brief §23.2); a 404 that says
+          // "no such endpoint" is strictly more informative than a 200 that lies.
+          if (isApiSourceFile(route)) return next();
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown endpoint" }));
+          return;
+        }
 
         // Origin allowlist (mirrors the production proxy). Unset in dev = allow all.
         const allowedOrigins = (env("ALLOWED_ORIGINS") || "")
@@ -65,7 +142,6 @@ function localApiProxy(): Plugin {
         let body: Record<string, unknown> = {};
         try { body = JSON.parse(rawBody); } catch { /* ignore */ }
 
-        const route = url.replace(/^\/api\//, "").replace(/\?.*$/, "");
 
         try {
           if (route === "nvidia") {
@@ -79,8 +155,11 @@ function localApiProxy(): Plugin {
           } else if (route === "search") {
             await proxySearch(req, res, body);
           } else {
+            // Unreachable while DEV_API_ROUTES and this chain agree — which is
+            // exactly what it is here to check. A name in the set with no branch
+            // here would otherwise hang the request instead of saying why.
             res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Unknown endpoint" }));
+            res.end(JSON.stringify({ error: `Route "${route}" is allowlisted but has no dev handler` }));
           }
         } catch (err: unknown) {
           console.error(`[api/${route}] error:`, err);

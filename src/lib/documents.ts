@@ -48,6 +48,7 @@
 // the `ocr_image` tool, which the model calls when it judges the image to be a
 // document. See src/lib/tools/ocr-image.ts.
 import { ocrImage } from "./ai";
+import { fenceFor } from "./chat-format";
 
 export interface ExtractedDocument {
   name: string;
@@ -818,7 +819,11 @@ async function extractNotebook(file: File): Promise<{ text: string; units: numbe
     if (cell.cell_type === "markdown" || cell.cell_type === "raw") {
       if (source) blocks.push(source);
     } else {
-      const parts = [`\`\`\`${language}\n${source}\n\`\`\``];
+      // `fenceFor`, not a literal ```: a cell that prints markdown — or holds a
+      // docstring with a fenced example in it — closes a three-backtick wrapper
+      // early, and the rest of the cell reaches the model as prose.
+      const fence = fenceFor(source);
+      const parts = [`${fence}${language}\n${source}\n${fence}`];
       for (const out of cell.outputs ?? []) {
         if (out.output_type === "error") {
           parts.push(`Output (error): ${out.ename}: ${out.evalue}`);
