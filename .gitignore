@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Electron build output — never commit binaries/AppImages/debs
+release/
+release-linux/
+release-win/
+release-mac/
+
 # Env & secrets — never commit real keys
 .env
 .env.*

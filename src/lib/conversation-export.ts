@@ -57,15 +57,17 @@ function formatStamp(iso: string | undefined): string {
 
 /** A bare (not branch-numbered) turn. Branch numbering is per-node metadata
  *  the caller already computed via linearizeForest; passing it as a flat
- *  string here keeps the serializer a pure function of message data. */
+ *  string here keeps the serializer a pure function of message data.
+ *
+ *  The heading is the speaker — "You", or the model's display name when the
+ *  reply carries one — so a separate model meta-line would repeat it. One
+ *  name per turn, in the heading, is the whole label. */
 export function formatTurn(m: ExportMessage): string {
   const head = `## ${speakerLabel(m)}`;
-  const meta: string[] = [];
-  if (m.role === "assistant" && m.modelName) meta.push(m.modelName);
   const atts = m.attachmentNames?.length
     ? `> Attached: ${m.attachmentNames.join(", ")}`
     : "";
-  return [head, ...(meta.length ? [`*${meta.join(" · ")}*`] : []), m.content, atts]
+  return [head, m.content, atts]
     .filter((part) => part !== "")
     .join("\n\n");
 }
