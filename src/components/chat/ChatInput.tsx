@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Mic, Square, Loader2, ImagePlus, X, FileText, Atom, Globe, Plus } from 'lucide-react';
+import { Send, Mic, Square, ImagePlus, X, FileText, Atom, Globe, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import { cn } from '@/lib/utils';
@@ -70,8 +70,14 @@ export default function ChatInput({
   });
 
   // Keep the recording flag name the UI already animates on.
+  //
+  // There is deliberately no processing flag beside it. Recognition runs on the live
+  // microphone stream and the browser hands back transcripts directly — no blob is uploaded
+  // and nothing is transcribed after the fact — so there is no state between "listening" and
+  // "the text is in the composer". A `const isProcessing = false` used to sit here and drive
+  // three branches that could never render: a disabled mic button, a second colour scheme,
+  // and a spinner. Branches that cannot run are not defensive, they are unreadable.
   const isRecording = isListening;
-  const isProcessing = false;
 
   const previews = useMemo(
     () => selectedFiles.map((file) => ({ file, url: URL.createObjectURL(file) })),
@@ -156,6 +162,12 @@ export default function ChatInput({
       // which loses your place on every single send. Native chat apps keep the
       // keyboard up so you can fire off consecutive messages.
       onSend(message.trim(), selectedFiles);
+      // Sending is the clearest "I am done talking" there is, so it releases the mic.
+      // Without this the engine stayed live across a send: `message` was cleared, so the
+      // button that had been reading "Stop recording" went back to reading "Start voice
+      // input" over an empty composer while the microphone was still open, and the next
+      // phrase landed after the message the user thought they had finished.
+      if (isRecording) stop();
       setMessage('');
       setSelectedFiles([]);
       if (fileInputRef.current) {
@@ -370,7 +382,13 @@ export default function ChatInput({
                         ? `Upload an image and ask ${modelName} about it...`
                         : `Ask ${modelName} anything...`
                 }
-                disabled={disabled || isRecording}
+                /* Not disabled while recording. Transcription mishears words often enough
+                   that being unable to fix one until the engine releases the mic is a dead
+                   end rather than a safeguard — and it was worse than that: the mic button
+                   used to unmount as soon as dictation produced text (see the render
+                   condition below), so no control was left to release it with. The
+                   "Listening..." placeholder above is what signals the state. */
+                disabled={disabled}
                 rows={1}
                 aria-label="Message input"
                 /* Focus target for the app-wide keyboard layer (Cmd/Ctrl+L, and
@@ -504,30 +522,30 @@ export default function ChatInput({
 
                 {/* Action buttons */}
                 <div className="flex items-center gap-1.5 flex-shrink-0">
-                  {/* Voice — browser Web Speech API (live transcription). Hidden
-                      once there's content to send, so send takes the slot. */}
-                  {isSupported && !canSend && !isLoading && (
+                  {/* Voice — browser Web Speech API (live transcription). Hidden once
+                      there's content to send, so send takes the slot — but NEVER while the
+                      engine is live, which is the whole of `isRecording ||` below.
+                      Dictating flips `canSend` on the first word (`onResult` writes into
+                      `message`), and this button is the only control that calls `stop()`, so
+                      under `!canSend` alone it unmounted mid-sentence and left the
+                      microphone open with nothing to close it. */}
+                  {isSupported && (isRecording || (!canSend && !isLoading)) && (
                 <motion.button
                   type="button"
                   onClick={handleVoiceClick}
-                  disabled={isProcessing}
                   className={`
                     relative w-9 h-9 rounded-full flex items-center justify-center
                     transition-all duration-300 overflow-hidden
                     ${isRecording
                       ? 'bg-destructive/20 text-destructive border border-destructive/30'
-                      : isProcessing
-                        ? 'bg-primary/20 text-primary border border-primary/30'
-                        : 'liquid-surface text-muted-foreground/70 hover:text-foreground border border-border/30 hover:border-primary/30'
+                      : 'liquid-surface text-muted-foreground/70 hover:text-foreground border border-border/30 hover:border-primary/30'
                     }
                   `}
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
                   aria-label={isRecording ? "Stop recording" : "Start voice input"}
                 >
-                  {isProcessing ? (
-                    <Loader2 className="w-[17px] h-[17px] animate-spin" />
-                  ) : isRecording ? (
+                  {isRecording ? (
                     <>
                       <motion.div
                         className="absolute inset-0 bg-destructive/20"

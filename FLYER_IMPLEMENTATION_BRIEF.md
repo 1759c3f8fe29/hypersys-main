@@ -2196,6 +2196,582 @@ rather than a re-read.
 failures** (from 48 / 713) · `npm run build` clean. And, for the first time, a gate that fails when
 `npm run dev` stops working.
 
+## 25. The form told the password manager it was a login while it created an account — DONE
+
+### 25.1 What Chrome was already saying
+
+The boot probe from §24 was written to prove the app mounts. It also captured, on every single load
+of `/auth`, one advisory nobody had read:
+
+```
+[log:verbose] [DOM] Input elements should have autocomplete attributes
+              (suggested: "current-password")  https://goo.gl/9p2vKq
+```
+
+That is the browser saying it cannot tell what these two fields are. Neither input had a `name`, and
+neither had `autoComplete`, so Chrome guessed from position and shape — which is exactly the guess
+that makes a password manager fail to fill, or save the wrong entry.
+
+### 25.2 Why it is not cosmetic
+
+`/auth` is **one component with two modes**: `isLogin` toggles the same form between signing in and
+creating an account (`src/pages/Auth.tsx:12`). The correct attribute is different for each, and the
+difference is behavioural, not decorative:
+
+| attribute | what it asks the browser to do |
+| --- | --- |
+| `current-password` | fill the credential saved for this origin |
+| `new-password` | do **not** fill; offer a generated password, and expect to save a new entry |
+| absent | guess |
+
+So a hardcoded `current-password` — the value Chrome itself suggested — would be a second defect
+dressed as the fix: it asks the browser to autofill an existing password into the field for an
+account that does not exist yet. The attribute has to move with the toggle.
+
+### 25.3 The other half: masked is not the same as credential
+
+`type="password"` renders dots. It does not mean "credential". `ChatSidebar.tsx` has two masked
+inputs that are not credentials at all — `id="nvidia-key"` and `id="mistral-key"`, provider API keys.
+With no `autoComplete`, a manager treats that dialog as a login form: it offers to fill this origin's
+saved password into an API-key box, and offers to save an API key as a website password. Both gained
+`autoComplete="off"` and `spellCheck={false}` — matching a pairing the file already used at 610-611,
+so this is now consistent rather than novel. The comment records honestly that Chrome has
+historically ignored `off` on password fields; `off` is still the only correct declaration, and a
+declaration the browser sometimes overrides beats no declaration at all.
+
+### 25.4 The fix
+
+```tsx
+<Input id="email"    type="email"    name="email"    autoComplete="email" … />
+<Input id="password" type="password" name="password"
+       autoComplete={isLogin ? 'current-password' : 'new-password'} … />
+```
+
+`name` is load-bearing and easy to mistake for redundancy: it is half of how a manager identifies a
+saved entry, and it is what a non-JS form submission would send.
+
+### 25.5 The test, and the thing it guards that a render cannot
+
+`src/test/auth-form-autofill.test.tsx`, 5 tests. Four render `<Auth />` and follow the toggle in both
+directions — login → sign-up → login — asserting the attribute at each step, each with a control
+assertion that the mode really changed (otherwise a test that never toggled would pass by reading the
+same state three times). The password field is found the way a manager finds it,
+`document.querySelector('input[type="password"]')`, not by a test id.
+
+The fifth is a source scan, and it exists because the render tests can only see the two inputs that
+are rendered. It walks every `.tsx` under `src/` (skipping `src/test`), matches each JSX element
+carrying `type="password"`, and fails if any lacks an explicit `autoComplete=`. That is what makes
+the class of defect stay fixed: the next masked input someone adds is caught by the suite instead of
+by a user whose password manager did something surprising. Control:
+`expect(inputsFound).toBeGreaterThanOrEqual(3)` — a walk or a regex that finds nothing would report a
+clean codebase.
+
+### 25.6 Mutation results
+
+Six mutations, each restored and verified with `md5sum -c`:
+
+| # | mutation | predicted | measured |
+| --- | --- | --- | --- |
+| N1 | drop `autoComplete="email"` | 1 | 1 |
+| N2 | hardcode `autoComplete="current-password"` | 1 | 1 |
+| N3 | drop the password `autoComplete` entirely | 4 | 4 |
+| N4 | drop `autoComplete="off"` from `nvidia-key` | 1 | 1 |
+| N5 | blind the source-scan regex | 1 | 1 |
+| N6 | swap the ternary (`isLogin ? 'new-password' : 'current-password'`) | 3 | 3 |
+
+N5's first run measured **0**, and the reason is worth recording because it is not a fact about the
+test: the `sed` expression was written with escaped quotes inside single quotes, so it matched
+nothing and the file was never mutated. A mutation that does not apply is indistinguishable in its
+output from a test that cannot fail — the only thing that separated them was grepping the file for
+the mutant string before trusting the count. The retry, addressed to the regex's line, failed as
+predicted.
+
+N3 failing 4 of 5 rather than 3 is the source scan doing its job on the same edit the render tests
+catch: with the attribute gone, `Auth.tsx` becomes an offender in the scan too.
+
+### 25.7 Measured after, in a real browser
+
+Chrome 151, headless, against `npx vite --port 5199`. The advisory is gone — the console on `/auth`
+now contains only Vite's HMR debug lines, React's DevTools notice, and two React Router v7
+future-flag warnings — with 6 interactive elements and 3 children under `#root`.
+
+And the attribute was read live, through the toggle, rather than only in jsdom:
+
+```
+LOGIN MODE : title "Sign in — Flyer AI"       email {name: email, ac: email}  password {name: password, ac: current-password}
+SIGNUP MODE: title "Create account — Flyer AI" email {name: email, ac: email}  password {name: password, ac: new-password}
+BACK       : title "Sign in — Flyer AI"       email {name: email, ac: email}  password {name: password, ac: current-password}
+```
+
+That run also measured `document.title` following the same toggle for the first time — previously
+only asserted in jsdom.
+
+### 25.8 Found, measured, and deliberately not fixed
+
+The two React Router warnings above are new to the record: the `v7_startTransition` and
+`v7_relativeSplatPath` future flags are un-opted-in, and both warn on **every** route on every load.
+The question that decides whether that is a bug is whether a user ever sees them, and it is
+answerable rather than arguable:
+
+- `node_modules/react-router/dist/index.js:933` — `warnOnce` is wrapped in
+  `if (process.env.NODE_ENV !== "production" && …)`.
+- `rg -c "Future Flag Warning" dist/assets/*.js` → no match in any of the 10 built chunks.
+
+So they are development-only and reach no user. Opting in would buy a quieter dev console — which is
+not nothing, since §24 was found by one console error in a short list — at the cost of a real
+behaviour change: `v7_startTransition` wraps route state updates in `React.startTransition`. Left
+alone on that trade. The flag worth revisiting first is `v7_relativeSplatPath`, which is inert here
+(the only splat route is `*` → `NotFound`, whose one `<Link to="/">` is absolute).
+
+### 25.9 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **50 files / 724 tests, 0
+failures** (from 49 / 719), 71.77s · `npm run build` clean, 51.74s.
+
+---
+
+---
+
+## 26. The wait had no clock on it — DONE
+
+### 26.1 What driving the app actually measured
+
+§24 fixed the dev server, so for the first time the app's primary path could be driven end to end in a
+real browser: guest mode → composer → type → Send → `200 /api/llm` → a streamed reply. It worked. The
+reply was correct and nothing in the console complained.
+
+What the same run also measured is the wait. **The first token arrived somewhere between 35 and 55
+seconds after Send**, and for the whole of that window the DOM was byte-identical to the DOM at second
+two: three pulsing dots and the words "Generating response...". A second later and thirty seconds
+later rendered the same pixels.
+
+That is the defect, and it is worth being precise about what kind. Nothing here is slow that was not
+already slow, and the fix does not make anything faster. What was missing is any way for the user to
+distinguish **a model that is thinking from one that has died**. The numbers say this is not a tail
+case:
+
+| Measured | Value | Source |
+| --- | --- | --- |
+| Cold first-token, free tier | 35–55s (observed), 50–110s (recorded earlier) | this session's browser run; `nvidia-nim-cold-start-latency` memory |
+| Warm first-token, same route | ~7–9s | the confirming run below |
+| Server's own budget | 130s | `REQUEST_TIMEOUT_MS`, `api/llm.js` |
+| Per-route first-byte cap | 22s, except the last route | `FIRST_BYTE_TIMEOUT_MS`, `api/llm.js` |
+
+The last row is the one that makes the long wait legitimate rather than a bug in the timeout logic.
+`api/llm.js` computes `const attemptMs = isLastRoute ? remaining : Math.min(FIRST_BYTE_TIMEOUT_MS, remaining);`
+— every route but the last gets 22 seconds to produce a first byte, and the last one gets whatever is
+left of the 130s budget. So a cold start that answers at 47s is the system working as designed, on the
+final route, inside its budget. The display is what was wrong, not the timing. That was checked before
+touching anything, because "the wait is too long" and "the wait is unexplained" have completely
+different fixes and only the second one is true here.
+
+### 26.2 The threshold is the design
+
+The obvious implementation — always show the elapsed time — is worse than what was there. A number
+reading `1s` under a reply that arrived in 900ms is noise on every fast response, and the app has
+plenty of those (`~7–9s` warm, and cached/short answers below that). So the counter appears only after
+`STREAM_ELAPSED_AFTER_MS = 4_000`.
+
+Four seconds is a judgement, and the reasoning is in the code rather than here so it survives: below
+it, a waiting indicator is ordinary and a number adds nothing; above it, the user has started to
+wonder, and the thing they want to know is whether anything is still happening. The counter is not a
+progress bar and does not pretend to be one — nothing in the pipeline knows how long the model will
+take — it is evidence of liveness.
+
+Elapsed time is derived from `Date.now()` deltas against a `useRef` captured at mount, not from
+counting interval ticks. That is deliberate: a background tab gets its timers throttled to roughly one
+per minute, so a tick counter would resume reading `6s` after a real 90-second wait, which is a worse
+lie than showing nothing. It also has a testing consequence — see 26.5.
+
+### 26.3 There was no live region at all
+
+Reading the markup to change it turned up a second defect that had nothing to do with time. The two
+streaming blocks were plain `<div>`s. **A screen reader was told nothing when a response started
+streaming** — no `role="status"`, no `aria-live`, nowhere. The dots are decorative animation and the
+words "Generating response..." were inert text that only announced if the user happened to navigate
+onto them.
+
+So the fix adds the live region that should always have been there, and immediately runs into the
+reason a counter cannot simply live inside it: `role="status"` announces its contents *on change*.
+A per-second number inside the region makes a screen reader read a new value aloud every second, for
+up to two minutes. That is not an accessibility improvement, it is a denial of service delivered
+politely. The text is inside the region and announced once; the number is outside it and
+`aria-hidden="true"`.
+
+### 26.4 The fix
+
+`src/components/chat/ChatMessage.tsx` had the dots-and-label markup **twice**, duplicated between two
+render branches, which is the other reason this was worth doing as a unit rather than a patch — the
+live region would otherwise have been added to one of them. Both call sites now render one
+`StreamingStatus` component:
+
+```tsx
+<StreamingStatus label={statusText || "Generating response..."} tone="primary" />   // line 1029
+<StreamingStatus label="Generating response..." tone="accent" />                    // line 1080
+```
+
+`label` matters because `Chat.tsx` swaps in "Searching the web...", "Thinking deeply..." and others;
+the counter has to attach to whichever status is showing, not to a hardcoded string. `tone` is the
+only thing the two branches ever actually differed on.
+
+`formatElapsed` lives in **`src/lib/duration.ts`**, its own module, for a reason recorded in that
+file's docblock and in 26.8. It floors rather than rounds — a clock that shows `1s` at 500ms is ahead
+of itself — and switches from `59s` to `1:00` at exactly one minute, zero-padded so the width does not
+jump under `tabular-nums`.
+
+### 26.5 The tests
+
+`src/test/streaming-elapsed.test.tsx`, 11 tests. Fake timers throughout, and **both the clock and the
+interval are faked together**: `vi.useFakeTimers({ shouldAdvanceTime: false, now: 1_700_000_000_000 })`,
+with a helper that advances them as one. Because elapsed is a `Date.now()` delta (26.2), a test that
+advanced only the interval would tick the component a hundred times and measure 0ms elapsed forever —
+it would pass against a broken component and fail against a correct one.
+
+What the tests pin, and each has a control assertion:
+
+- **Silence first.** `queryByText(/^\d+s$/)` is null at 3s, while the status text is already present
+  from the first frame — so the test cannot pass by rendering nothing at all.
+- **Appearance.** `5s` at 5s.
+- **It actually counts.** `5s` at 5s, `12s` at 12s, **and `5s` is gone** — without that second half, a
+  component rendering a frozen constant satisfies the assertion.
+- **It reads as a duration.** `1:07` at 67s, and `2:10` at 130s, which is the longest wait the app can
+  legitimately produce (26.1's budget row) — the far end of the range has to still be a duration.
+- **What a screen reader hears.** The live region's `textContent` matches the status text and **does
+  not** contain `12s`, while `12s` is nonetheless in the document. Both halves are needed: the first
+  alone passes if the counter never rendered.
+- **Hidden from the tree.** `number.closest('[aria-hidden="true"]')` is not null — written against an
+  ancestor rather than the element so the markup can be restructured without the test lying.
+- **The caller's status text.** `"Searching the web..."` is used *and* `/generating/i` is absent, plus
+  the counter still shows.
+- **`formatElapsed` boundaries directly.** 999/1000/1999ms, 59_000/60_000/61_000, and the padding
+  (`1:05`, `10:00`) — a pure function's edges are worth stating rather than reaching by advancing a
+  clock.
+
+### 26.6 Mutations: seven, all as predicted
+
+| # | Mutation | Predicted | Measured |
+| --- | --- | --- | --- |
+| P1 | `STREAM_ELAPSED_AFTER_MS` 4_000 → 0 (counter always on) | 1 | 1 |
+| P2 | `setInterval` removed (counter never updates) | 7 | 7 |
+| P3 | `formatElapsed` floor → round | 2 | 2 |
+| P4 | m:ss branch dropped (always `${total}s`) | 1 | 1 |
+| P5 | `padStart(2, "0")` removed | 1 | 1 |
+| P6 | `aria-hidden="true"` dropped from the counter | 3 | 3 |
+| P7 | counter moved inside the `role="status"` span | 1 | 1 |
+
+`ChatMessage.tsx` restored byte-identically after each (`md5sum -c`).
+
+**P5 and P6 first reported "MUTATION DID NOT APPLY", and the harness was wrong, not the mutation.**
+The verification step greps the file for the mutant string before trusting a count — the lesson from
+§25.6's N5, where a `sed` that matched nothing produced a perfect-looking measured 0. But the grep was
+`rg -q "$token"` and the tokens contained `(` and `)`, which `rg` reads as a regex group, so the
+literal text was never what was searched for. `rg -qF`. The check that exists to catch a silent no-op
+had a silent no-op of its own, which is a fair thing to have happen twice in two units and is now
+written into the memory file rather than only here.
+
+### 26.7 Measured after, in the browser
+
+Same path as 26.1, warm route this time:
+
+```
+T+2s   status: "Generating response..."   counter: []              ← below the threshold
+T+6s   status: "Generating response..."   counter: ["5s"]  aria-hidden="true"
+T+9s   reply streaming, status gone, counter gone
+```
+
+The threshold, the count, the `aria-hidden` and the teardown, all confirmed against a real model
+response rather than only against fake timers. The warm route answered in ~7–9s against the cold
+35–55s, which is itself the reason the threshold exists: on this run the counter appeared for about
+three seconds and then got out of the way.
+
+### 26.8 The lint warning that moved a function into a new file
+
+`formatElapsed` was first written in `ChatMessage.tsx` and lint said:
+
+```
+109:17  warning  Fast refresh only works when a file only exports components  react-refresh/only-export-components
+```
+
+Not cosmetic. `ChatMessage.tsx` is ~1,100 lines and the file being edited most often during UI work;
+exporting one plain function alongside the component drops the whole file out of Fast Refresh, so every
+save full-reloads the page and discards the conversation being tested. Fixed by moving the function to
+`src/lib/duration.ts` rather than by suppressing the rule, with the reason in the new module's docblock
+so it does not get merged back in.
+
+### 26.9 A gate that failed for a reason that was not the code
+
+`verify39.log` recorded `Tests 1 failed | 734 passed (735)`. It was not a regression. `pgrep` found the
+*previous* gate run's `vite build` still running (pids 118988/119518) alongside a vite dev server and a
+headless Chrome, against 51 jsdom test files on 4 cores — the starvation trap already recorded as
+`flyer-vitest-needs-a-20s-timeout`. Killed the stale processes; a quiet machine produced **735/735**
+(`verify40.log`).
+
+Two things follow, and both are process rather than product:
+
+1. **Never run two gate passes concurrently.** The second run does not just take longer, it makes the
+   first one lie.
+2. **The gate harness loses the evidence.** It filters output with `rg "Test Files|Tests |Duration"`,
+   which discards vitest's `Failed Tests` block — so *I cannot say which test flaked*, only that one
+   did. A summary line is enough for a passing run and useless for a failing one, which is the only
+   kind where it matters. Recorded as an open item rather than quietly dropped.
+
+### 26.10 Gates
+
+`npm run lint` clean · `npm run typecheck` clean · `npx vitest run` **51 files / 735 tests, 0
+failures** (from 50 / 724), 76.78s · `npm run build` clean, 38.81s.
+
+---
+
+## 27. The gate log said one test failed and could not say which — DONE
+
+### 27.1 The run that produced no evidence
+
+§26.9 recorded this as an open item rather than fixing it, so this is the fix. `verify39.log`, in
+full, on the only line that mattered:
+
+```
+=== TESTS ===
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+ Test Files  1 failed | 50 passed (51)
+      Tests  1 failed | 734 passed (735)
+```
+
+The banner is there and **the block it introduces is not**. The gate command piped every gate through
+`rg "Test Files|Tests |Duration"`, so vitest's failure detail — the test name, the file, the assertion,
+the stack — was discarded before anything was written to disk. That filter is exactly sufficient for a
+run that passes and produces nothing usable for a run that does not, which is the only kind where a log
+is worth keeping. The failure turned out to be CPU starvation rather than a regression (§26.9), but
+that was established by inspecting live processes, not from the log; **the identity of the test that
+failed is permanently lost.**
+
+The second half of the same story is that the starvation was self-inflicted: a previous invocation's
+`vite build` was still running. Nothing prevented two gate passes from overlapping, and when they do,
+the first one does not merely run slower — it reports a failure that is not real, which is worse than
+no result at all.
+
+### 27.2 `scripts/gates.mjs`
+
+One command that runs the four gates, and:
+
+- **writes the full output of every gate to its own file** and prints the path, so nothing is filtered
+  before it is stored — filtering is a display decision, not a storage one;
+- **prints the failure detail on failure only**: for `test`, the names of the failed tests as
+  `file > group > name`; for `typecheck`/`build`, the `path(line,col): error TSxxxx` diagnostics; for
+  `lint`, the error/warning split, because only one of those two fails the gate;
+- **refuses to start next to another run.** An `O_EXCL` lockfile, plus a `ps` scan for `vite build`,
+  `vitest` or `tsc -p` belonging to anything else. Stale locks are recovered by checking whether the
+  pid in them is alive, because a killed run must not block the machine forever;
+- **exits with the number of failed gates**, so it composes.
+
+`npm run gates` runs all four; `node scripts/gates.mjs lint test` runs a subset in the order given;
+`--force` skips the lock and the process scan.
+
+It runs `npx vite build` rather than `npm run build`, because `npm run build` is
+`tsc -p … && tsc -p … && vite build` and the `typecheck` gate is those same two `tsc` passes. Paying
+for them twice cost ~21s of the run, which matters more than usual here precisely because the harness
+now refuses to run concurrently with anything.
+
+### 27.3 What is tested, and why it could be
+
+The extraction is **pure functions over captured text** — `parseVitestCounts`, `parseFailedTestNames`,
+`parseEslintProblems`, `parseTscErrors`, `stripAnsi`, `summarise` — rather than string handling tangled
+into the spawn logic. That is the only reason a report harness can be tested at all without running a
+76-second suite to produce input for it.
+
+The vitest fixtures in `src/test/gates-report.test.ts` are **not invented**. They were captured by
+writing a deliberately failing test file, running `npx vitest run` on it, and copying the output. Which
+is how the parser's one real subtlety was found rather than guessed: vitest names each failure **twice,
+in two different formats**.
+
+```
+   × a group > fails on purpose 20ms                                    ← per-file list, no path
+ FAIL  src/test/__fixture-fail.test.ts > a group > fails on purpose     ← detail block, with path
+```
+
+Those two strings are not equal, so a merged list deduped by name reports every failure twice — once
+without the file it lives in. `parseFailedTestNames` therefore prefers `FAIL` lines and falls back to
+the bare markers only when the run died before printing the detail block, which is a real case: a
+collection error exits non-zero with no `FAIL` line at all, and `summarise` says so out loud rather
+than printing a count with nothing attached, since printing nothing is how the evidence was lost in the
+first place.
+
+Parsers work on ANSI-stripped text. Vitest colours its diff even when stdout is a file, so a `Tests`
+summary can arrive with a CSI bold sequence wrapped around the label and a red one around `1 failed`,
+and it must still parse — there is a test that feeds exactly that. Nothing is anchored to the
+`⎯⎯⎯ Failed Tests N ⎯⎯⎯` banner: that decoration is terminal-width- and version-dependent, and a report
+that stops working when vitest changes a glyph is a report that silently stops reporting.
+
+27 tests, each matcher with a control — including the one that matters most for a parser:
+`parseVitestCounts("the runner exploded")` must return `{files: null, tests: null}` and **not** a
+zeroed object, because zeros would turn a crashed runner into a clean-looking report. That is the same
+lesson as §23.5 and §21.3 from a new direction: a parser that matches nothing is indistinguishable from
+a clean run unless something asserts the difference.
+
+### 27.4 Mutations: ten, one of which found dead code
+
+| # | Mutation | Predicted | Measured |
+| --- | --- | --- | --- |
+| Q1 | `parseFailedTestNames` merges both formats instead of preferring `FAIL` | 1 | 1 |
+| Q2 | `stripAnsi` becomes the identity function | 2 | 2 |
+| Q3 | `parseVitestCounts` returns zeros instead of `null` on no match | 1 | 1 |
+| Q4 | trailing-duration strip removed from the test name | 2 | 2 |
+| Q5 | `summarise` prints a failure count instead of the names | 1 | 1 |
+| Q6 | self-exclusion dropped from `competingProcesses` | 1 | **0** |
+| Q6b | `competingProcesses` matcher widened to match every process | 2 | 2 |
+| Q7 | stale-lock recovery removed from `acquireLock` | 1 | 1 |
+| Q8 | `build` gate switched back to `npm run build` | 1 | 1 |
+| Q9 | `competingProcesses` stops excluding the caller's own pid | 1 | 1 |
+
+`scripts/gates.mjs` restored byte-identically throughout (`md5sum -c`).
+
+**Q6 is the interesting one, and the mutation was applied.** `competingProcesses` had a line skipping
+other `scripts/gates.mjs` processes, and removing it changed nothing, because a gate wrapper's own
+command line contains none of `vite build`, `vitest` or `tsc -p` — so the line had never matched
+anything. It was dead code that read as a guard. Deleted, along with the assertion that could not fail;
+the reason is now a comment in `competingProcesses` so it does not get written again. What is actually
+worth reporting about a second gate run is its *children*, and those match on their own terms.
+
+Q6b replaced it and is the honest control for that matcher: widen it to match everything and two tests
+fail, including the one that says a login shell must not read as a competing build. A guard nobody has
+tried to break is not known to work.
+
+### 27.5 Gates, run through the new harness
+
+```
+PASS  lint        8.4s
+PASS  typecheck   21.4s
+PASS  test        762 passed, 0 failed of 762 tests in 52 files   68.6s
+PASS  build       clean
+```
+
+**762 tests in 52 files** (from 735 / 51). The `test` line is the point of the unit: on a failing run
+that line is followed by the name of each casualty, and the full log is on disk either way.
+
+## 28. The mic button was the trap and it unmounted its own kill switch — DONE
+
+### 28.1 The defect, walked in order
+
+`useSpeechToText.ts` and the mic button in `ChatInput.tsx` had no test between them, and the composer
+turned out to contain a trap that is obvious the moment anything walks the states in order and
+completely invisible from reading either file alone:
+
+  1. Press the mic. `isListening` goes true, and the textarea is `disabled` while it is.
+  2. Say a word. `onResult` writes it into `message`, so `canSend` flips true.
+  3. The mic button is rendered under `!canSend`, so **it unmounts** — and it was the only control
+     that calls `stop()`.
+
+The microphone is now live with no button to stop it and a disabled textarea you cannot correct the
+transcript in. The only way out was to send the message, which did not stop recognition either — it
+cleared `message`, `canSend` went false, and the button reappeared reading "Start voice input" over an
+empty composer while the engine was **still open**.
+
+Four separate defects chained to make that:
+
+  - **The unmounting kill switch** (`ChatInput.tsx`). The mic button is the only control that calls
+    `stop()`, and it rendered under `{isSupported && !canSend && !isLoading && (…)}`. Dictating flips
+    `canSend` on the first word, so the button took itself off screen mid-sentence.
+  - **The disabled textarea**. `disabled={disabled || isRecording}` made it impossible to fix a
+    misheard word while the engine held the mic — transcription is wrong often enough that this is a
+    dead end, not a safeguard.
+  - **The hot mic across a send**. `submitMessage()` cleared `message` and the selection but never
+    called `stop()`, so sending left the microphone live and the next phrase landed after the message
+    the user thought they had finished.
+  - **The dead `isProcessing` constant** (`ChatInput.tsx` line 74). `const isProcessing = false;`
+    drove three branches that could never render — a disabled mic button, a second colour scheme, and
+    a `Loader2` spinner — because the Web Speech API returns transcripts directly from the live
+    stream: there is no upload and no after-the-fact transcription, so there is no state between
+    "listening" and "the text is in the composer".
+
+And one hook-level bug underneath it: `useSpeechToText.ts` built the transcript with
+`finalText += result[0].transcript` — no separator. Chrome batches, so one `onresult` event can carry
+several settled results, and two final phrases delivered together glued into "helloworld": a
+transcript nobody said, from a code path that only shows up when the speaker does not pause.
+
+### 28.2 The four fixes
+
+  - **The hook joins instead of concatenates.** Final phrases are collected and `join(" ")`-ed, with
+    the reason written in as a comment.
+  - **The mic button stays mounted while recording.** The render condition became
+    `isSupported && (isRecording || (!canSend && !isLoading))`. The button hands its slot to Send
+    only when there is typed content and the engine is idle — never while the engine is live.
+  - **The textarea is editable while dictating.** `disabled={disabled}` only; the "🎤 Listening..."
+    placeholder is what signals the recording state.
+  - **Sending releases the mic.** `submitMessage()` calls `stop()` when `isRecording` — sending is the
+    clearest "I am done talking" there is.
+  - **`isProcessing` is deleted**, along with its `Loader2` import it had all to itself.
+
+### 28.3 The tests, written red first
+
+`src/test/voice-input.test.tsx` (19 tests). The `FakeRecognition` is a real stand-in for Web Speech,
+not a mock of the hook — it implements the shape the hook actually reads, including the two members the
+hook's own header calls out as the reason those types are hand-declared: a
+`SpeechRecognitionResult` is **array-like, not an array** (`result[0].transcript` correct, `.map` /
+spread wrong), and `results` is re-walked from `resultIndex`. A fake built on plain arrays would have
+let `result[0].transcript` pass while the real API is indexed differently.
+
+The six tests that failed before any production change, each for the reason it names:
+
+  - `puts a space between two final phrases that arrive in one event` (the `+=` bug)
+  - `keeps the stop control on screen once dictation produces text` (the unmounting kill switch)
+  - `actually stops the engine from that control` (the control's press reaching the engine)
+  - `lets you correct a misheard word while the microphone is still open` (the disabled textarea)
+  - `appends the next phrase after what is already typed, with a space` (the overwrite)
+  - `releases the microphone when the message is sent` (the hot mic)
+
+The other thirteen are controls: both API spellings and neither, interim results ignored, `resultIndex`
+dedup, double-start guard, `onend` flag, error-code passthrough, `not-supported`, unmount teardown, and
+on the composer side — "hides the mic once there is something to send and nothing is being dictated",
+"offers no mic at all in a browser that cannot dictate", "does not disable the mic button".
+
+### 28.4 Twelve mutations, one test that could not fail, fixed by measuring it
+
+| # | Mutation | Predicted | Measured | Test that killed it |
+|---|----------|-----------|----------|---------------------|
+| M1 | `join('')` instead of `join(' ')` | 1 | 1 | puts a space between two final phrases |
+| M2 | drop the `isFinal` check | 1 | 1 | delivers a final phrase and ignores interim |
+| M3 | walk from 0 instead of `resultIndex` | 1 | 1 | starts from resultIndex |
+| M4 | remove the double-start guard | 1 | 1 | does not start a second recognition |
+| M5 | fall `isListening` to false on `stop()` instead of `onend` | 1 | **0** | stays listening until the engine says it ended |
+| M6 | leave unmount handlers attached | 1 | 1 | detaches the handlers and stops on unmount |
+| M7 | mic back to `!canSend` only | 2 | 2 | keeps stop control + actually stops |
+| M8 | textarea disabled while recording again | 2 | **1** | correct a misheard word |
+| M9 | send no longer releases the mic | 1 | 1 | releases the microphone when sent |
+| M10 | `onResult` overwrites instead of appends | 1 | 1 | appends after typed text |
+| M11 | mic always rendered when supported | 1 | 1 | hides the mic once sendable |
+| M12 | mic rendered regardless of support | 1 | 1 | offers no mic when unsupported |
+
+M5 predicted 1 and **measured 0 — and the mutation had applied**. The test "stays listening until the
+engine says it ended" asserted `isListening` was `false` after `end()`, but said nothing about the
+instant after `stop()` — so it passed just as happily with `setIsListening(false)` moved into
+`stop()`. It asserted its own name and nothing else. The middle assertion was missing. Adding
+`expect(result.current.isListening).toBe(true)` *after* `stop()` and *before* `end()` makes the
+mutation fail as predicted. A flag that drops early would unmount the Stop button while the engine is
+still delivering phrases — the same trap in miniature. This is the same lesson as the Q6 dead code in
+§27: a test that reads as a test can fail to fail, and the only fix is to predict, measure, and close
+the gap honestly rather than leave a green check that cannot fail.
+
+Two of the test files' own comments were corrected by the same adversarial pass: the
+"appends the next phrase" test originally implied the disabled-textarea claim was its to make, when
+jsdom delivers a programmatic change to a disabled textarea anyway — the `not.toBeDisabled()`
+assertion in the adjacent test is what actually holds that line. The comment now says so.
+
+M8 predicted 2 and **measured 1 — an overprediction, not a silent pass**. Re-enabling
+`disabled={disabled}` on the textarea was predicted to fail both "correct a misheard word" (the
+change) and "appends the next phrase" (also the change), but jsdom delivers a programmatic
+`fireEvent.change` to a disabled textarea and React applies it, so the second test's change-portion
+passes either way. Only the misheard-word test failed, on `not.toBeDisabled()`. The overprediction
+was kept rather than papered over: the row reads 2 | 1, and the disabled-textarea line is held by
+`not.toBeDisabled()` alone — which is why that assertion, not the change event, is the one the
+mutation check credited.
+
+### 28.5 Gates
+
+`npm run gates` — **all 4 gates clean**: `PASS lint 21.0s` · `PASS typecheck 33.8s` ·
+`PASS test 781 passed, 0 failed of 781 tests in 53 files 110.7s` · `PASS build 44.9s`
+(from 762 / 52). The production files were hash-verified to match the fixed state before and after
+the mutation sweep.
+
+
 ---
 
 ## 12. Definition of done (still the gate)
@@ -2680,3 +3256,251 @@ is real, small, and belongs to the next unit.
 
 Gates: lint clean · typecheck clean · **49 files / 719 tests, 0 failures** · build clean. One of those
 tests now fails if `npm run dev` stops working.
+
+### 36. The form told the password manager it was a login while it created an account
+
+§35's boot probe was written to answer one question — does the app mount — and it answered a second
+one on the way past. Every load of `/auth` logged `[DOM] Input elements should have autocomplete
+attributes (suggested: "current-password")`. That advisory had presumably been there since the page
+was written; nothing had ever read the console on that route.
+
+The interesting part is that Chrome's own suggestion would have been a bug. `/auth` is one component
+with an `isLogin` toggle, so the same password input is a credential field in one mode and a
+new-account field in the other, and `current-password` versus `new-password` is the difference between
+"fill the saved password" and "do not fill; offer a generated one". Hardcoding the suggested value
+asks the browser to autofill an existing password into a field for an account that does not exist yet.
+The attribute had to move with the toggle: `autoComplete={isLogin ? 'current-password' :
+'new-password'}`, plus the `name` attributes that are the other half of how a manager identifies an
+entry.
+
+The same reasoning found a second instance nobody was looking for. `type="password"` means masked, not
+credential, and `ChatSidebar`'s two provider API-key inputs were bare masked fields — so a manager
+would offer to fill this origin's saved password into an API-key box, and to save an API key as a
+website password. Both now declare `autoComplete="off"` and `spellCheck={false}`.
+
+`src/test/auth-form-autofill.test.tsx` (5 tests) pins it: four render the form and walk the toggle in
+both directions with a control assertion at each step that the mode really changed, and the fifth is a
+source scan over every `.tsx` under `src/` that fails if any element carrying `type="password"` lacks
+an explicit `autoComplete`. The scan is the part that makes the class stay fixed rather than the two
+instances — the render tests can only see inputs that are currently rendered.
+
+Six mutations, all matching prediction (1/1/4/1/1/3) — but N5 measured 0 on its first run, and the
+cause was mine, not the test's: the `sed` used escaped quotes inside single quotes, matched nothing,
+and never mutated the file. **A mutation that silently fails to apply produces exactly the output of a
+test that cannot fail.** Grepping the file for the mutant string before trusting the count is what
+separated them, and it is now the habit. This is the second time in two units that the mutation step
+found something a re-read would not have: §35's M3 found a hole in the test, and this one found a hole
+in the method.
+
+Measured after, in Chrome 151 rather than jsdom: the advisory is gone, 6 interactive elements, and the
+attributes read `current-password` → `new-password` → `current-password` across a real toggle. That
+run also confirmed `document.title` follows the same toggle in a real browser for the first time.
+
+Found, measured, and deliberately not fixed: two React Router v7 future-flag warnings
+(`v7_startTransition`, `v7_relativeSplatPath`) fire on every route on every load. Whether that is a
+bug turns on whether a user sees it, which is measurable rather than arguable: `warnOnce` is guarded
+by `process.env.NODE_ENV !== "production"`, and the string appears in none of the 10 built chunks in
+`dist/assets/`. Dev-only, so left alone — opting in trades a quieter dev console for
+`v7_startTransition` wrapping route state updates in `React.startTransition`, which is a behaviour
+change. Recorded with the numbers in §25.8.
+
+Gates: lint clean · typecheck clean · **50 files / 724 tests, 0 failures** (from 49 / 719) · build
+clean.
+
+### 37. The wait had no clock on it
+
+§24's dev-server fix made it possible to drive the app's primary path in a real browser for the first
+time: guest mode → composer → Send → `200 /api/llm` → a streamed reply. It worked. It also measured the
+thing worth fixing — **the first token arrived 35–55 seconds after Send, and for that entire window the
+DOM was byte-identical to the DOM at second two**: three pulsing dots and "Generating response...".
+
+Nothing here is slow that was not already slow, and the fix makes nothing faster. What was missing is
+any way to tell a model that is thinking from one that has died. The timing itself was verified as
+correct before touching it: `api/llm.js` gives every route 22s to produce a first byte and the *last*
+route the remainder of its 130s budget (`isLastRoute ? remaining : Math.min(FIRST_BYTE_TIMEOUT_MS, remaining)`),
+so a cold free-tier start answering at 47s is the system working as designed. The display was the bug.
+
+**A second defect fell out of reading the markup: there was no live region at all.** Both streaming
+blocks were plain `<div>`s, so a screen reader was told nothing when a response began. Adding
+`role="status"` then forces the design question that keeps the counter from being an accessibility
+regression — the region announces its contents *on change*, so a per-second number inside it reads a
+new value aloud every second for up to two minutes. The text is in the region and announced once; the
+number sits outside it and is `aria-hidden="true"`.
+
+**The threshold is the feature.** `STREAM_ELAPSED_AFTER_MS = 4_000`, because `1s` under a reply that
+arrived in 900ms is noise on every fast response. Elapsed comes from `Date.now()` deltas rather than
+from counting ticks, so a throttled background tab resumes with the truth instead of reporting `6s`
+after ninety real seconds — which is also why the tests fake the clock and the interval together, since
+advancing only the interval measures 0ms elapsed forever and would pass against a broken component.
+
+The dots-and-label markup existed **twice**, duplicated across two render branches; both now render one
+`StreamingStatus`, which is the reason the live region got added to both instead of one. `formatElapsed`
+lives in its own `src/lib/duration.ts` because exporting a plain function beside a component tripped
+`react-refresh/only-export-components` and would have dropped the 1,100-line `ChatMessage.tsx` out of
+Fast Refresh — moved rather than suppressed, with the reason in the new file's docblock.
+
+**Eleven tests, seven mutations, every count as predicted** (1/7/2/1/1/3/1), `ChatMessage.tsx` restored
+byte-identically. Each matcher branch carries a control: the counting test asserts `5s` is *gone* at
+12s (a frozen constant satisfies the positive half alone), and the screen-reader test asserts `12s` is
+in the document *and* absent from the live region.
+
+**P5 and P6 reported "MUTATION DID NOT APPLY" and the harness was wrong, not the mutation.** The
+pre-check greps for the mutant string before trusting a count — §25.6's lesson — but used `rg -q` on
+tokens containing `(` and `)`, so it searched for a regex group and never found the literal text.
+`rg -qF`. The guard against a silent no-op had a silent no-op of its own.
+
+Live confirmation, warm route: `T+2s` no counter · `T+6s` `counter: ["5s"]` with `aria-hidden="true"` ·
+`T+9s` reply streaming, counter gone.
+
+**And a gate that failed for a reason that was not the code.** `verify39.log` said `1 failed | 734
+passed`; `pgrep` found the previous run's `vite build` and a headless Chrome competing with 51 jsdom
+files on 4 cores. A quiet machine gave 735/735. Two process items follow: never run two gate passes
+concurrently, and **the gate harness discards vitest's `Failed Tests` block** — so I cannot name the
+test that flaked, only report that one did. Open, not quietly dropped.
+
+Gates: lint clean · typecheck clean · **51 files / 735 tests, 0 failures** (from 50 / 724) · build
+clean, 38.81s.
+
+### 38. The gate log said one test failed and could not say which
+
+§26.9 left this as an open item, so it is now §27. `verify39.log` recorded
+`Tests 1 failed | 734 passed (735)` under vitest's `⎯ Failed Tests 1 ⎯` banner **with the block that
+banner introduces missing** — the gate command piped every gate through
+`rg "Test Files|Tests |Duration"`, so the test name, the file, the assertion and the stack were
+discarded before anything reached disk. Enough output for a run that passes, nothing usable for the
+only kind of run where a log matters. The starvation cause was found by inspecting live processes, not
+from the log; the identity of the failing test is permanently lost.
+
+`scripts/gates.mjs` (`npm run gates`) replaces it: full output of every gate to its own file with the
+path printed, failure detail extracted *only* on failure — failed test names as `file > group > name`,
+`path(line,col): error TSxxxx` diagnostics for tsc, the error/warning split for eslint — and an exit
+code equal to the number of failed gates. Filtering is now a display decision instead of a storage one.
+
+**It also refuses to run next to another gate pass**, which was the other half of §26.9: an `O_EXCL`
+lock plus a `ps` scan for `vite build`, `vitest` or `tsc -p` belonging to anything else. Two concurrent
+runs do not merely take longer — the first reports a failure that is not real. Stale locks are
+recovered by checking whether the pid inside is alive, so a killed run cannot block the machine. The
+`build` gate runs `npx vite build` rather than `npm run build`, since `npm run build` repeats the two
+`tsc` passes the `typecheck` gate already paid ~21s for.
+
+The extraction is pure functions over captured text, which is the only reason a report harness is
+testable without producing a 76-second run to feed it. **The fixtures are real output**, captured by
+running a deliberately failing test file — which is how the one subtlety was found rather than guessed:
+vitest names each failure twice, as `× group > name` in the per-file list and as
+`FAIL  path > group > name` in the detail block. Those strings are not equal, so a merged dedup reports
+every failure twice, once without its file. Prefer `FAIL`; fall back to the bare marker only when the
+run died before the detail block, and say so out loud when a non-zero exit named no test at all.
+
+**Ten mutations, nine as predicted, and the tenth found dead code.** Q6 removed a line in
+`competingProcesses` that skipped other `scripts/gates.mjs` processes; predicted 1, **measured 0**, and
+the mutation had applied. A gate wrapper's own command line contains none of `vite build`, `vitest` or
+`tsc -p`, so the line had never matched anything — a guard that read as a guard and was dead. Deleted,
+with the assertion that could not fail, and the reason left as a comment. Q6b replaced it with the
+honest control: widen the matcher to match every process and two tests fail, including the one saying a
+login shell must not read as a competing build.
+
+Gates, run through the new harness: `PASS lint 8.4s` · `PASS typecheck 21.4s` ·
+`PASS test 762 passed, 0 failed of 762 tests in 52 files 68.6s` · `PASS build 41.8s` ·
+**all 4 gates clean** (from 735 / 51).
+
+
+### 39. The mic button was the trap and it unmounted its own kill switch
+
+`useSpeechToText` and the mic button in `ChatInput` had no test between them, and the composer
+contained a trap invisible to reading either file alone: the mic button is the only control that calls
+`stop()`, and it rendered under `!canSend`, while dictating writes the transcript into `message` — which
+is exactly what flips `canSend`. The first word the user spoke unmounted the Stop button mid-sentence,
+leaving the microphone live with nothing to close it and a disabled textarea they could not correct the
+transcript in. Three defects chained to it: `disabled={disabled || isRecording}` blocked corrections;
+`submitMessage()` never called `stop()` so a send left the mic hot; and `const isProcessing = false` was
+a dead constant driving three unreachable branches. Underneath, the hook glued batched final phrases
+with `+=` into "helloworld".
+
+Fixed (§28): join with a space; render the button on `isSupported && (isRecording || (!canSend &&
+!isLoading))`; edit the textarea while recording; `stop()` on send; delete `isProcessing` and its
+`Loader2`. Wrote `src/test/voice-input.test.tsx` (19 tests, a red-first `FakeRecognition` that is
+array-like, not an array) before touching production code. Twelve mutations, ten as predicted; M5
+predicted 1 and measured 0 — the test asserted `isListening false after end()` with nothing on the
+instant after `stop()`, so moving the flag-drop into `stop()` survived. The middle assertion went in.
+M8 predicted 2 and measured 1 — jsdom delivers a programmatic change to a disabled textarea, so only
+the `not.toBeDisabled()` test failed; the overprediction is recorded as 2 | 1 in the §28.4 table.
+New memory: [[a-kill-switch-unmounted-by-its-own-effect]].
+
+Gates: **all 4 clean** — lint, typecheck, 781 passed in 53 files (from 762 / 52), build.
+
+### 40. Five extractors counted a separator that a join never inserts
+
+`src/lib/documents.ts` guards every long format with the same shape: push a block, add its length to a
+running `size`, break when `size` passes `MAX_CHARS_PER_DOC`, then `join("\n\n")` the array and let the
+caller's `truncate()` decide whether to set `truncated: true`. The running total exists because
+`blocks.join("\n\n").length` inside the loop is quadratic and the whole point is that this runs on
+500-page files. All five copies — pdf, spreadsheet, pptx, epub, ipynb — accumulated
+`size += block.length + 2` from `size = 0`, which models N separators for N blocks. **A join of N
+blocks inserts N−1.** The accumulator therefore read exactly 2 too high, forever, in every format.
+
+Two is invisible except at the boundary, and at the boundary it inverts the meaning of the flag. A
+break that fires with the accumulator on `MAX_CHARS_PER_DOC + 1` leaves the joined text on
+`MAX_CHARS_PER_DOC - 1` — one char under the cap — so `truncate()` returns `truncated: false` for a
+document whose tail units were dropped on the floor. Three consumers read that field and each repeated
+the claim: `buildDocumentContext`'s "truncated to fit the context window" note never appeared, the
+system prompt's honesty promise (`prompts.ts:150`) was told the file was complete, and `Chat.tsx:902`
+withheld the toast. A user attaching a 300-slide deck was told the model had read all of it.
+
+`let size = -2` in all five loops makes `size` equal the joined length exactly, so `size > cap` fires
+precisely when `truncate()` would flag it. Still O(1) per push.
+
+**Three more defects surfaced while fixing it.** `extractPdf` passed `lastPage` — the *planned* scan
+bound — to `pdfCoverageNotices`, not `lastPageRead`, the page the loop actually stopped on, so the
+closing notice named a wider unread range than the truth; the loop already tracked the right value.
+`extractNotebook` updated `size` by re-reading the last pushed block rather than adding the block it
+had just pushed, so a code cell with empty source but non-empty outputs — which pushes nothing —
+counted the *previous* block a second time, inflating `size` past the cap early and truncating
+notebooks that had not reached it. And the pdf body could consume the cap so completely that
+`truncate()` cut the coverage notices off the tail: the one string saying "pages 201-640 were not
+read" was the first thing the cap ate. `PDF_NOTICE_RESERVE = 256` and a **pre**-push break keep body +
+notices under the cap so `truncate()` never fires for a PDF at all.
+
+That break is where the test design turned. `documents.test.ts` has no `vi.mock` and never loads
+pdfjs, so `extractPdf` is unreachable from the suite and the reserve arithmetic had nowhere to be
+pinned. Extracted as an exported pure predicate, `pdfBodyWouldExceedCap(accumulated, blockLength)`,
+next to the existing `pdfCoverageNotices` — same precedent, same reason. Its edge is
+`120_000 - 256 = 119_744`, pinned from both sides.
+
+**Nine tests.** Three on the predicate (`119_744` exactly → `false`, one char over → `true`, plus a
+small-value control), one per format for the four constructible extractors, and one control assertion
+per matcher branch. Each boundary fixture is one giant unit sized so the **old** accumulator lands on
+`cap + 1` and the new one on `cap - 1`, then a `MARKER` unit and a `NEVER-READ` unit: red pair is
+`truncated === true` plus the giant unit's text present, controls are `NEVER-READ` absent (the break
+still guards the tail) and the giant text present (the reader really read it, rather than the flag
+being set by something unrelated). The per-format arithmetic comes off the real block format — pptx
+prepends a 16-char `--- Slide 1 ---\n` header, epub pushes raw `htmlToText()` with no header, an ipynb
+markdown cell pushes its trimmed source unfenced, and a sheet block carries a 22-char
+`--- Sheet: Sheet1 ---\n`.
+
+**The spreadsheet fixture needed two measurements rather than one guess, and the first attempt threw.**
+`XLSX.write` refuses a cell over 32,767 characters, so the giant sheet is four rows, not one; and
+`sheet_to_csv` joins single-column rows with `\n` and emits *no* trailing newline, so
+`csv.length = sum(cells) + rows - 1`. Both facts are asserted in the test body — the row split and the
+32,767 bound — so a fixture that stops producing a 119,999-char block fails loudly instead of quietly
+testing a different boundary.
+
+Mutations, six, **all as predicted**: `size = -2` → `0` in pptx/epub/ipynb killed exactly those three
+tests (3); the same in spreadsheet killed the xlsx test (1); dropping `- PDF_NOTICE_RESERVE` from the
+predicate killed the "trips the first page" test and left the other two green (1) — the honest split,
+since the `119_744` case is *supposed* to stay `false` under a wider cap. `documents.ts` restored and
+grep-verified after each.
+
+**One mutation deliberately reported as a survivor.** `&& false` on all four post-push breaks left
+every boundary test green. That is correct, not a hole: these fixtures are built so the break is
+reached on unit 2 of 3 while the cap is already crossed, so the assertions are about the *flag*, and
+the `NEVER-READ` control only proves the tail is absent — which a disabled break still satisfies here
+because `truncate()` cuts it off anyway. The break's own job (not unzipping the remaining 297 slides)
+is a performance property, and no assertion in this file measures work avoided. Recorded rather than
+patched with a test that would assert a timing.
+
+New memories: [[an-accumulator-that-models-a-join-it-is-not]],
+[[the-planned-bound-passed-where-the-reached-value-was-meant]],
+[[an-accumulator-updated-from-a-stale-location]].
+
+
+Gates: **all 4 clean** — `lint 0/0` · `tsc 0` · `PASS test 788 passed, 0 failed of 788 tests in 53 files 189.3s` · `PASS build 95s` (from 781 / 53 at §39; the +7 are the four boundary tests and three predicate tests of this section).

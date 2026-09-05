@@ -97,6 +97,15 @@ const OCR_PAGE_BUDGET = 10;
 // every text layer in a 2000-page file to find them all empty.
 const MAX_PDF_PAGES_SCANNED = 200;
 
+// Room left at the end of a PDF's text for the closing coverage notices. The
+// caller's truncate() cuts the tail first, and the notices are appended to
+// exactly that tail — without reserved headroom, the one string saying "pages
+// 201-640 were not read" is the first thing the cap eats. 256 comfortably holds
+// the worst pair of notices (a 3-digit unread-scan count plus a 6-digit page
+// range, wider than any real PDF) and their separators; pinned by the reserve
+// test in documents.test.ts.
+const PDF_NOTICE_RESERVE = 256;
+
 // How much of a file is examined to decide whether it is text. Read from a
 // `slice`, never from the whole file: the point of this path is that it runs on
 // things like a 700 MB disk image, and answering "is this text" does not require
@@ -448,6 +457,23 @@ export function pdfCoverageNotices(
   return notices;
 }
 
+/**
+ * Whether the PDF body must stop before pushing the next page block, so the
+ * closing coverage notices survive. The caller's truncate() cuts the tail
+ * first, and the notices are appended to exactly that tail — without headroom
+ * reserved for them, "pages 201-640 were not read" is the first string the cap
+ * eats. `accumulated` is the exact joined length so far (see the -2 init in
+ * extractPdf), so this predicts the joined length pushing `blockLength` would
+ * produce. Exported pure, like pdfCoverageNotices, because the test suite
+ * never loads pdfjs — pinned by the reserve test in documents.test.ts.
+ */
+export function pdfBodyWouldExceedCap(
+  accumulated: number,
+  blockLength: number,
+): boolean {
+  return accumulated + blockLength + 2 > MAX_CHARS_PER_DOC - PDF_NOTICE_RESERVE;
+}
+
 async function extractPdf(file: File): Promise<{ text: string; units: number }> {
   // Vite needs the worker resolved explicitly; without this pdf.js tries to
   // fetch a worker path that does not exist in the built bundle.
@@ -461,13 +487,25 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
   const pages: string[] = [];
   // Tracked rather than recomputed: `pages.join(...).length` inside the loop is
   // quadratic, and the whole point of the early break is that this runs on
-  // 500-page files.
-  let size = 0;
+  // 500-page files. Initialised to -2 because join("\n\n") inserts N-1
+  // separators, not N — so `size` equals the joined length exactly, and
+  // `size > MAX_CHARS_PER_DOC` fires exactly when the caller's truncate() would
+  // set truncated: true. Under the old `size = 0` init, a break with minimal
+  // overshoot left the joined text one char under the cap: a partially-read
+  // document that truncate() reported as complete, defeating the "NEVER invent
+  // content" promise in the system prompt.
+  let size = -2;
   let ocrBudget = OCR_PAGE_BUDGET;
   // Scanned pages reached after the budget ran out. Counted rather than flagged
   // so the closing notice can say how many pages went unread — and so a scan that
   // fits entirely inside the budget produces no notice at all.
   let unreadScanPages = 0;
+  // The last page whose text was actually pushed — not the planned bound. The
+  // break page is excluded (its parse was discarded); blank pages are included
+  // (they were opened and reported honestly as empty). Passing the planned
+  // `lastPage` here instead used to silence the page-range notice for exactly
+  // the case it exists for: a ≤200-page PDF stopped early by the char cap.
+  let lastPageRead = 0;
   const lastPage = Math.min(doc.numPages, MAX_PDF_PAGES_SCANNED);
 
   for (let i = 1; i <= lastPage; i++) {
@@ -503,19 +541,25 @@ async function extractPdf(file: File): Promise<{ text: string; units: number }> 
     }
 
     if (block) {
+      // Pre-push break, with room reserved for the closing notices: they are
+      // appended to exactly the tail that the caller's tail-first truncate()
+      // would slice away, so the body must stop short of the cap to keep them
+      // alive. `size` is the exact joined length so far, so this is the joined
+      // length that pushing this block would produce. The check runs before
+      // the push, so the body always ends on a block boundary (never cut
+      // mid-sentence by the cap) and this page's parse is simply discarded.
+      if (pdfBodyWouldExceedCap(size, block.length)) break;
       pages.push(block);
       size += block.length + 2;
     }
 
-    // Stop early on very long PDFs; the cap would discard the rest anyway and
-    // parsing every page of a 500-page file just to throw it away is wasteful.
-    if (size > MAX_CHARS_PER_DOC) break;
+    lastPageRead = i;
   }
 
   // Say what was left out, so the model reports "I read the first ten scanned
   // pages" instead of implying it saw the whole file. Each notice is omitted when
   // its count is zero — see pdfCoverageNotices for why that matters.
-  pages.push(...pdfCoverageNotices(unreadScanPages, lastPage, doc.numPages));
+  pages.push(...pdfCoverageNotices(unreadScanPages, lastPageRead, doc.numPages));
 
   return { text: pages.join("\n\n"), units: doc.numPages };
 }
@@ -533,7 +577,13 @@ async function extractSpreadsheet(file: File): Promise<{ text: string; units: nu
   const wb = XLSX.read(buffer, { type: "array" });
 
   const sheets: string[] = [];
-  let size = 0;
+  // -2 so `size` equals the joined length exactly (join inserts N-1 separators,
+  // the loop adds N). `size > cap` then fires exactly when the caller's
+  // truncate() sets truncated: true, instead of a break with minimal overshoot
+  // landing one char under the cap — a partially-read workbook that three
+  // downstream consumers (the context note, the system prompt's "NEVER invent
+  // content" promise, the toast) all reported as complete.
+  let size = -2;
   for (const name of wb.SheetNames) {
     // CSV rather than JSON: it carries the same information in far fewer
     // tokens, which matters when the whole point is fitting in a context window.
@@ -583,7 +633,10 @@ async function extractPptx(file: File): Promise<{ text: string; units: number }>
     });
 
   const slides: string[] = [];
-  let size = 0;
+  // -2 so `size` equals the joined length exactly (join inserts N-1 separators,
+  // the loop adds N) — the post-push break below then fires exactly when the
+  // caller's truncate() flags truncated: true, not one char shy of it.
+  let size = -2;
   for (let i = 0; i < slidePaths.length; i++) {
     const xml = await zip.files[slidePaths[i]].async("string");
     const text = decodeXmlEntities(
@@ -712,7 +765,10 @@ async function extractEpub(file: File): Promise<{ text: string; units: number }>
   }
 
   const chapters: string[] = [];
-  let size = 0;
+  // -2 so `size` equals the joined length exactly (join inserts N-1 separators,
+  // the loop adds N) — the post-push break below then fires exactly when the
+  // caller's truncate() flags truncated: true, not one char shy of it.
+  let size = -2;
   for (const path of ordered) {
     const html = await zip.files[path].async("string");
     const text = htmlToText(html);
@@ -810,14 +866,24 @@ async function extractNotebook(file: File): Promise<{ text: string; units: numbe
   const flatten = (s: string | string[] | undefined) => (Array.isArray(s) ? s.join("") : s ?? "");
 
   const blocks: string[] = [];
-  let size = 0;
+  // -2 so `size` equals the joined length exactly (join inserts N-1 separators,
+  // the pushes add N) — `size > cap` then fires exactly when the caller's
+  // truncate() sets truncated: true. Updated per push below, not from
+  // blocks[last] after the fact: that old line re-counted the previous block on
+  // every iteration that pushed nothing new (a code cell whose source was empty
+  // but whose outputs were not), inflating `size` past the cap early and
+  // truncating notebooks that had not actually reached it.
+  let size = -2;
   for (let i = 0; i < cells.length; i++) {
     const cell = cells[i];
     const source = flatten(cell.source).trim();
     if (!source && !cell.outputs?.length) continue;
 
     if (cell.cell_type === "markdown" || cell.cell_type === "raw") {
-      if (source) blocks.push(source);
+      if (source) {
+        blocks.push(source);
+        size += source.length + 2;
+      }
     } else {
       // `fenceFor`, not a literal ```: a cell that prints markdown — or holds a
       // docstring with a fenced example in it — closes a three-backtick wrapper
@@ -840,9 +906,10 @@ async function extractNotebook(file: File): Promise<{ text: string; units: numbe
           if (kinds.length) parts.push(`Output: [${kinds.join(", ")}]`);
         }
       }
-      blocks.push(parts.join("\n\n"));
+      const block = parts.join("\n\n");
+      blocks.push(block);
+      size += block.length + 2;
     }
-    size = blocks[blocks.length - 1] ? size + blocks[blocks.length - 1].length + 2 : size;
     if (size > MAX_CHARS_PER_DOC) break;
   }
 

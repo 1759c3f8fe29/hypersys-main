@@ -134,12 +134,20 @@ export function useSpeechToText({ onResult, onError }: UseSpeechToTextOptions = 
     recognition.lang = navigator.language || 'en-US';
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-      let finalText = '';
+      // One event can carry several settled results — the engine batches when speech
+      // arrives faster than it commits phrases — and the transcripts come with no
+      // surrounding whitespace of their own. Appending them with `+=` produced
+      // "helloworld" for two phrases delivered together: a transcript nobody said, from
+      // a code path that only shows up when the speaker does not pause. Joined instead,
+      // so the separator is stated rather than hoped for.
+      const phrases: string[] = [];
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
-        if (result.isFinal) finalText += result[0].transcript;
+        // Interim results are excluded on purpose: they are revised in place, and
+        // streaming them into the composer would rewrite text the user may be editing.
+        if (result.isFinal) phrases.push(result[0].transcript.trim());
       }
-      const trimmed = finalText.trim();
+      const trimmed = phrases.filter(Boolean).join(' ').trim();
       if (trimmed) onResultRef.current?.(trimmed);
     };
 

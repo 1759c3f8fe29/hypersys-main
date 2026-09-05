@@ -15,6 +15,7 @@ import { extractFirstMarkdownImage, sanitizeAssistantText, stripMarkdownImages }
 import { artifactIdForCode, isSubstantialCodeBlock } from '@/lib/artifacts';
 import { openCodeArtifact, openFileArtifact, useHasArtifact } from '@/components/artifacts/ArtifactProvider';
 import { LOGO_URL } from '@/lib/assets';
+import { formatElapsed } from '@/lib/duration';
 import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource } from './types';
 import { RunButton, RunOutput } from './CodeRunner';
 import { isRunnableLanguage, useCodeRunner } from './use-code-runner';
@@ -70,6 +71,73 @@ function hostOf(link: string): string {
 // One-tap follow-up questions shown under a grounded reply. The questions come
 // from the search provider's "related" list, so they cost nothing extra to
 // surface and keep the conversation moving the way Gemini/Perplexity do.
+/**
+ * The pre-first-token wait, with a clock on it.
+ *
+ * WHY THIS EXISTS
+ * Measured on the real thing (§26): a cold NVIDIA NIM route took **between 35 and 55
+ * seconds** to produce its first token, and for that entire window the app showed three
+ * pulsing dots and the words "Generating response..." — a display that is byte-identical
+ * at second 2 and at second 55. The user cannot tell a slow model from a hung one, so the
+ * rational move is to give up and press Stop on a request that was about to succeed. The
+ * ceiling is not 55s either: the server's own budget is 130s (`api/llm.js`
+ * REQUEST_TIMEOUT_MS), and a free-tier cold start has been measured at 50-110s.
+ *
+ * An elapsed counter is the whole fix. It does not make anything faster; it makes waiting
+ * legible, which is the difference between "still working" and "broken".
+ *
+ * THE THRESHOLD IS THE DESIGN
+ * Nothing is shown for the first `AFTER_MS`. A counter that flicks on at 0s and reads "1s"
+ * for a response that arrives in 900ms is noise on the common path, and a number that
+ * appears only once the wait is unusual is also a signal in itself.
+ *
+ * ACCESSIBILITY
+ * `role="status"` wraps the *text only*. That announces "Generating response..." once,
+ * which a screen reader previously never heard at all — the old markup had no live region.
+ * The counter is deliberately outside it and `aria-hidden`, because a live region
+ * containing a per-second tick announces a new number every second, which is worse than
+ * silence.
+ *
+ * The interval lives in this component rather than in the parent, so it is mounted exactly
+ * as long as the dots are: the caller renders this only while streaming and before the
+ * first token, so unmount is the reset and there is no per-message bookkeeping to get
+ * wrong. `Date.now()` deltas rather than a tick count, so a throttled background tab
+ * resumes with the true elapsed time instead of a number that fell behind.
+ */
+const STREAM_ELAPSED_AFTER_MS = 4_000;
+
+function StreamingStatus({ label, tone }: { label: string; tone: "primary" | "accent" }) {
+  const startedAt = useRef(Date.now());
+  const [elapsedMs, setElapsedMs] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setElapsedMs(Date.now() - startedAt.current), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const dot = tone === "primary" ? "bg-primary" : "bg-accent";
+  const text = tone === "primary" ? "text-primary/90" : "text-accent/80";
+
+  return (
+    <div className="flex items-center gap-3 py-2">
+      <div className="flex gap-1.5">
+        {[0, 1, 2].map((i) => (
+          <motion.span key={i} className={`w-2 h-2 rounded-full ${dot}`}
+            animate={{ scale: [1, 1.4, 1], opacity: [0.5, 1, 0.5] }}
+            transition={{ duration: 0.7, repeat: Infinity, delay: i * 0.15 }}
+          />
+        ))}
+      </div>
+      <span role="status" className={`text-xs ${text} font-medium tracking-wide`}>{label}</span>
+      {elapsedMs >= STREAM_ELAPSED_AFTER_MS && (
+        <span aria-hidden="true" className="text-xs text-muted-foreground/50 font-mono tabular-nums">
+          {formatElapsed(elapsedMs)}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function FollowUpChips({ followUps, onFollowUp }: { followUps: string[]; onFollowUp: (q: string) => void }) {
   return (
     <div className="mt-4 pt-3 border-t border-border/30">
@@ -958,19 +1026,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   </ReactMarkdown>
                 </div>
               ) : (isStreaming && !isArenaMode) ? (
-                <div className="flex items-center gap-3 py-2">
-                  <div className="flex gap-1.5">
-                    {[0, 1, 2].map((i) => (
-                      <motion.span key={i} className="w-2 h-2 rounded-full bg-primary"
-                        animate={{ scale: [1, 1.4, 1], opacity: [0.5, 1, 0.5] }}
-                        transition={{ duration: 0.7, repeat: Infinity, delay: i * 0.15 }}
-                      />
-                    ))}
-                  </div>
-                  <span className="text-xs text-primary/90 font-medium tracking-wide">
-                    {statusText || "Generating response..."}
-                  </span>
-                </div>
+                <StreamingStatus label={statusText || "Generating response..."} tone="primary" />
               ) : null}
 
               {isStreaming && content && (
@@ -1021,17 +1077,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                       {arenaText}
                     </ReactMarkdown>
                   ) : isStreaming ? (
-                    <div className="flex items-center gap-3 py-2">
-                      <div className="flex gap-1.5">
-                        {[0, 1, 2].map((i) => (
-                          <motion.span key={i} className="w-2 h-2 rounded-full bg-accent"
-                            animate={{ scale: [1, 1.4, 1], opacity: [0.5, 1, 0.5] }}
-                            transition={{ duration: 0.7, repeat: Infinity, delay: i * 0.15 }}
-                          />
-                        ))}
-                      </div>
-                      <span className="text-xs text-accent/80 font-medium">Generating response...</span>
-                    </div>
+                    <StreamingStatus label="Generating response..." tone="accent" />
                   ) : null}
                 </div>
               </div>

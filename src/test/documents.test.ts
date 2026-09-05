@@ -15,6 +15,7 @@ import {
   canExtract,
   isImageFile,
   pdfCoverageNotices,
+  pdfBodyWouldExceedCap,
   identifyBinary,
   scavengeText,
   type ExtractedDocument,
@@ -58,6 +59,19 @@ async function zipOf(entries: Record<string, string>, name: string, type = ""): 
   const zip = new JSZip();
   for (const [path, content] of Object.entries(entries)) zip.file(path, content);
   return new File([await zip.generateAsync({ type: "arraybuffer" })], name, { type });
+}
+
+/** Build a single-column .xlsx: each sheet holds one row with the given cell. */
+async function xlsxOf(sheets: Record<string, string[]>, name = "book.xlsx"): Promise<File> {
+  const XLSX = await import("xlsx");
+  const wb = XLSX.utils.book_new();
+  for (const [sheetName, cells] of Object.entries(sheets)) {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cells.map((c) => [c])), sheetName);
+  }
+  const bytes = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+  return new File([new Uint8Array(bytes)], name, {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
 }
 
 describe("file triage", () => {
@@ -608,5 +622,133 @@ describe("pdfCoverageNotices", () => {
 
   it("reports both shortfalls when both happened", () => {
     expect(pdfCoverageNotices(190, 200, 640)).toHaveLength(2);
+  });
+});
+
+describe("pdfBodyWouldExceedCap", () => {
+  // The pure, testable face of the pdf early-break — extractPdf never loads in
+  // this suite (no pdfjs), so the boundary the reserve test can reach is this
+  // predicate. It must keep a page the notices will still fit after, and drop
+  // the first one they will not. The reserve is 256, so the true/false edge is
+  // 120_000 - 256 = 119_744.
+  it("keeps a page while the notice headroom still fits", () => {
+    // accumulated + blockLength + 2 is the joined length one more page would
+    // produce; the +2 is the separator join inserts for each page past the first.
+    expect(pdfBodyWouldExceedCap(119_740, 2)).toBe(false); // 119_744 exactly
+  });
+
+  it("trips the first page past the notice headroom", () => {
+    expect(pdfBodyWouldExceedCap(119_740, 3)).toBe(true); // 119_745
+  });
+
+  it("never trips for a small document", () => {
+    expect(pdfBodyWouldExceedCap(0, 10)).toBe(false);
+    expect(pdfBodyWouldExceedCap(100, 100)).toBe(false);
+  });
+});
+
+describe("extractDocument truncates honestly at the exact cap", () => {
+  // A five-way fix shared by pdf/spreadsheet/pptx/epub/ipynb: the size
+  // accumulator used to start at 0 and add block.length + 2 per push, while
+  // join("\n\n") inserts N-1 separators — so the accumulator read 2 too high,
+  // and a break fired just short of the cap. The joined text sat one char under
+  // MAX_CHARS_PER_DOC, so truncate() reported truncated: false while the tail
+  // units were silently dropped — "the model read your file" when it had not.
+  // Init at -2 makes `size` equal the joined length exactly. Each test builds
+  // one first unit sized so the *old* accumulator lands on the cap + 1 (the
+  // lie), then asserts the honest flag plus a control that the reader really
+  // read the huge unit and stopped before the never-read one.
+
+  it("flags a .pptx whose next slide would cross the cap", async () => {
+    // A slide block is `--- Slide N ---\n${text}`; the "--- Slide 1 ---\n"
+    // header is 16 chars, so text of 119_983 makes the block exactly 119_999.
+    // Old `size = 0` read 120_001 after that push (> cap), broke, and joined one
+    // 119_999-char body → truncated: false. `size = -2` keeps it 119_999, reads
+    // slide 2, and trips the cap for real.
+    const giant = "SLIDE-ONE" + "x".repeat(119_983 - "SLIDE-ONE".length);
+    expect(giant.length).toBe(119_983); // the premise: a block of exactly 119_999
+    const file = await pptxOf({
+      "slide1.xml": [giant],
+      "slide2.xml": ["MARKER"],
+      "slide3.xml": ["NEVER-READ"],
+    });
+    const doc = await extractDocument(file);
+    expect(doc.truncated).toBe(true); // the lie, corrected: old code says false
+    expect(doc.text).toContain("SLIDE-ONE"); // the huge slide really made it in
+    expect(doc.text).not.toContain("NEVER-READ"); // and the break still guards the tail
+  });
+
+  it("flags an .epub whose next chapter would cross the cap", async () => {
+    // A chapter block is the raw htmlToText() of the body — no header — so a
+    // body of 119_999 makes the block exactly 119_999.
+    const giant = "CHAPTER-ONE" + "y".repeat(119_999 - "CHAPTER-ONE".length);
+    expect(giant.length).toBe(119_999);
+    const file = await zipOf(
+      {
+        mimetype: "application/epub+zip",
+        "OEBPS/chap1.xhtml": `<html><body><p>${giant}</p></body></html>`,
+        "OEBPS/chap2.xhtml": "<html><body><p>MARKER</p></body></html>",
+        "OEBPS/chap3.xhtml": "<html><body><p>NEVER-READ</p></body></html>",
+      },
+      "book.epub",
+      "application/epub+zip",
+    );
+    const doc = await extractDocument(file);
+    expect(doc.truncated).toBe(true);
+    expect(doc.text).toContain("CHAPTER-ONE");
+    expect(doc.text).not.toContain("NEVER-READ");
+  });
+
+  it("flags a notebook whose next cell would cross the cap", async () => {
+    // A markdown/raw cell pushes its flattened, trimmed source with no fence, so
+    // a source of 119_999 makes the block exactly 119_999.
+    const notebook = (cells: unknown[]) =>
+      fileOf(
+        "analysis.ipynb",
+        JSON.stringify({ cells, metadata: { kernelspec: { language: "python" } }, nbformat: 4 }),
+      );
+    const giant = "NOTEBOOK-ONE" + "z".repeat(119_999 - "NOTEBOOK-ONE".length);
+    expect(giant.length).toBe(119_999);
+    const doc = await extractDocument(
+      notebook([
+        { cell_type: "markdown", source: giant },
+        { cell_type: "markdown", source: "MARKER" },
+        { cell_type: "markdown", source: "NEVER-READ" },
+      ]),
+    );
+    expect(doc.truncated).toBe(true);
+    expect(doc.text).toContain("NOTEBOOK-ONE");
+    expect(doc.text).not.toContain("NEVER-READ");
+  });
+
+  it("flags a .xlsx whose next sheet would cross the cap", async () => {
+    // A sheet block is `--- Sheet: ${name} ---\n${csv.trim()}`. Two measured
+    // facts shape the fixture: sheet_to_csv joins single-column rows with "\n"
+    // and emits no trailing newline (so csv.length = sum(cells) + rows - 1), and
+    // the xlsx writer refuses a cell over 32767 chars — hence four rows rather
+    // than one giant one. The header is 22 chars, so a csv of 119_977 makes the
+    // block exactly 119_999: old `size = 0` read 120_001 after one push, broke,
+    // and joined a 119_999-char body that slid under the cap as truncated: false.
+    const HEADER = "--- Sheet: Sheet1 ---\n".length;
+    const TARGET_CSV = 119_999 - HEADER;
+    const ROWS = 4;
+    const per = Math.floor((TARGET_CSV - (ROWS - 1)) / ROWS);
+    const cells = Array.from({ length: ROWS }, () => "q".repeat(per));
+    cells[0] = "SHEET-ONE" + "q".repeat(per - "SHEET-ONE".length);
+    cells[ROWS - 1] = "q".repeat(TARGET_CSV - (ROWS - 1) - per * (ROWS - 1));
+    // The premise, asserted rather than trusted: the csv this produces is the
+    // length that puts the block one char under the cap.
+    expect(cells.reduce((n, c) => n + c.length, 0) + ROWS - 1).toBe(TARGET_CSV);
+    expect(Math.max(...cells.map((c) => c.length))).toBeLessThan(32_767);
+
+    const file = await xlsxOf({
+      Sheet1: cells,
+      Sheet2: ["MARKER"],
+      Sheet3: ["NEVER-READ"],
+    });
+    const doc = await extractDocument(file);
+    expect(doc.truncated).toBe(true); // the lie, corrected: old code says false
+    expect(doc.text).toContain("SHEET-ONE"); // the giant sheet really made it in
+    expect(doc.text).not.toContain("NEVER-READ"); // and the break still guards the tail
   });
 });
