@@ -59,7 +59,7 @@ npm run dev          # default model bhejo — /api/llm route ab dev me bhi kaam
 ```
 
 `npm run verify:models` **zaroor chalao** — `providers.ts` me model IDs
-(mistral-large-latest, kimi-k2.6, minimax-m3) provider catalogs se
+(mistral-large-latest, kimi-k3, minimax-m3) provider catalogs se
 verify hone chahiye. Jo available na ho, wo route hata do warna wo model 404 dega.
 
 ---

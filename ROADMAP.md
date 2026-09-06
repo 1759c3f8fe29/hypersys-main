@@ -253,7 +253,7 @@ P1.5 branching (data model!) → P1.4 memory → P1.6 sharing → P1.8 artifacts
 ## Do imaandaar baatein
 
 **1. Model registry me kuch IDs shaq paida karti hain.**
-`ai.ts:32-45` me `deepseek-v4-pro`, `kimi-k2.6`, `minimax-m3`, `nemotron-3-ultra-550b`,
+`ai.ts:32-45` me `deepseek-v4-pro`, `kimi-k3`, `minimax-m3`, `nemotron-3-ultra-550b`,
 `step-3.7-flash` listed hain. Comment kehta hai "Verified live", lekin kuch entries aisi
 hain jo already fallback kar rahi hain — `minimax-m2.7` actually `llama-3.1-8b` pe jaata hai,
 aur `qwen-3-next-80b` `llama-3.1-70b` pe. Matlab user ek model select karta hai aur doosra

@@ -4,6 +4,7 @@ import { auth } from "./firebase";
 import {
   getModel,
   PROVIDERS,
+  UTILITY_MODEL_ID,
   isImageModel as catalogueIsImage,
   isVisionModel as catalogueIsVision,
   supportsVision as catalogueSupportsVision,
@@ -37,149 +38,33 @@ export function apiPath(p: string): string {
   return API_BASE ? `${API_BASE}${p}` : p;
 }
 
-// ---------------------------------------------------------------------------
-// Legacy model → provider ID mapping
-// ---------------------------------------------------------------------------
-//
-// DEPRECATED. src/lib/providers.ts is the model catalogue; this table only
-// still exists for the direct /api/nvidia and /api/mistral proxies, which the
-// router has not fully replaced yet. Add models to MODELS in providers.ts.
-//
-// Three entries were removed rather than migrated: "llama-4-maverick" and
-// "qwen-3-next-80b" both pointed at meta/llama-3.1-70b-instruct, and
-// "minimax-m2.7" at meta/llama-3.1-8b-instruct. The picker offered them under
-// those names and a different model answered. Renaming weights is lying to the
-// user about what produced their answer, so the names are gone; the legacy id
-// map in providers.ts resolves any persisted ones to the model that genuinely
-// replied.
-export const MODEL_REGISTRY: Record<
-  string,
-  { nvidiaId: string; kind: 'Chat' | 'Vision' | 'Image'; provider?: 'nvidia' | 'mistral'; mistralId?: string }
-> = {
-  // ── Mistral Models (Mistral API — MISTRAL_API_KEY) ──
-  "Flyer AI":             { nvidiaId: "", provider: "mistral", mistralId: "mistral-large-latest", kind: "Chat" },
-  "mistral-large-latest": { nvidiaId: "", provider: "mistral", mistralId: "mistral-large-latest", kind: "Chat" },
-  "mistral-large":        { nvidiaId: "", provider: "mistral", mistralId: "mistral-large-latest", kind: "Chat" },
-  "mistral-medium":       { nvidiaId: "", provider: "mistral", mistralId: "mistral-medium-latest",kind: "Chat" },
-  "mistral-small":        { nvidiaId: "", provider: "mistral", mistralId: "mistral-small-latest", kind: "Chat" },
-  // pixtral-12b was removed here in 3.6: Mistral retired pixtral-12b-2409, so
-  // the id now resolves to nemotron-vision via LEGACY_MODEL_IDS in providers.ts
-  // and must not route to a dead Mistral upstream through this legacy registry.
-  "codestral-latest":     { nvidiaId: "", provider: "mistral", mistralId: "codestral-latest",     kind: "Chat" },
-  "devstral-latest":      { nvidiaId: "", provider: "mistral", mistralId: "devstral-latest",      kind: "Chat" },
-  "ministral-8b":         { nvidiaId: "", provider: "mistral", mistralId: "ministral-8b-latest",  kind: "Chat" },
-
-  // ── Verified NVIDIA NIM Chat / Reasoning Models ──
-  "kimi-k2.6":          { nvidiaId: "moonshotai/kimi-k2.6",                    kind: "Chat" },
-  "minimax-m3":        { nvidiaId: "minimaxai/minimax-m3",                     kind: "Chat" },
-  "llama-3.3-70b":     { nvidiaId: "meta/llama-3.3-70b-instruct",             kind: "Chat" },
-  "llama-70b":         { nvidiaId: "meta/llama-3.3-70b-instruct",             kind: "Chat" },
-  "llama-8b":          { nvidiaId: "meta/llama-3.1-8b-instruct",              kind: "Chat" },
-  "nemotron-3-ultra-550b": { nvidiaId: "nvidia/nemotron-3-ultra-550b-a55b", kind: "Chat" },
-  "nemotron-super-49b":{ nvidiaId: "nvidia/llama-3.3-nemotron-super-49b-v1",  kind: "Chat" },
-  "nemotron-nano-9b":  { nvidiaId: "nvidia/llama-3.1-nemotron-nano-8b-v1",   kind: "Chat" },
-  "step-3.7-flash":    { nvidiaId: "stepfun-ai/step-3.7-flash",               kind: "Chat" },
-
-  // ── Vision (image understanding engines) ──────
-  // NOTE: these are NVIDIA NIM catalog ids and must exist in the NIM catalog.
-  // "vision-engine" previously pointed at the bare string "pixtral-12b", which
-  // is a Mistral id, not a NIM one — NIM answered every such call with a 404.
-  "vision-engine":     { nvidiaId: "meta/llama-3.2-90b-vision-instruct",      kind: "Vision" },
-  "vision-engine-2":   { nvidiaId: "meta/llama-3.2-11b-vision-instruct",      kind: "Vision" },
-  "vision-engine-3":   { nvidiaId: "microsoft/phi-3-vision-128k-instruct",    kind: "Vision" },
-
-  // ── Image Generation Models (Pollinations) ──
-  // NVIDIA NIM's genai image ids (sana, sdxl-turbo) were removed in 3.6: the
-  // /v1/genai/* endpoint 404s for every model, so the only live image backend
-  // is keyless Pollinations. The ids resolve via LEGACY_MODEL_IDS in
-  // providers.ts, so nothing here points at a dead NVIDIA route.
-  "flux":              { nvidiaId: "pollinations",                             kind: "Image" },
-  "turbo":             { nvidiaId: "pollinations",                             kind: "Image" },
-  "stable-diffusion":  { nvidiaId: "pollinations",                             kind: "Image" },
-};
-
-/**
- * The provider-side NVIDIA id for a model, or undefined if we do not know it.
- *
- * Returns undefined rather than defaulting. This used to fall back to
- * meta/llama-3.1-8b-instruct for *any* unrecognised id, so a typo or a stale
- * persisted id produced a confident answer from an 8B model labelled as
- * whatever the user had picked. Callers must surface the failure instead.
- */
-export function getNvidiaId(modelId: string): string | undefined {
-  return MODEL_REGISTRY[modelId]?.nvidiaId || undefined;
-}
-
-
-// The internal vision-capable model any non-vision chat model routes through when an image is attached.
-// Mistral retired pixtral-12b (verified in 3.6), so this is the live NVIDIA
-// vision engine; persisted "pixtral-12b" ids still resolve to it via
-// LEGACY_MODEL_IDS in providers.ts.
+// The internal vision-capable model any non-vision chat model routes through
+// when an image is attached. Mistral retired pixtral-12b (verified in 3.6), so
+// this is the live NVIDIA vision engine.
 export const VISION_ENGINE_MODEL = "nemotron-vision";
 
 // Tried in order by generateVisionResponse. The catalogue vision engine first,
 // then Mistral's multimodal chat engines so an outage or a missing NVIDIA key
-// still resolves to an answer. The old "vision-engine*" aliases all resolve to
-// nemotron-vision via LEGACY_MODEL_IDS now, so naming them here would be
-// redundant.
+// still resolves to an answer. All ids are live catalogue ids — there is no
+// alias layer to lean on.
 export const VISION_ENGINE_FALLBACKS = [
   "nemotron-vision",
   "mistral-medium",
-  "mistral-large-latest",
-];
-
-// Models that actually accept image input. Verified live against the provider
-// catalogs: every current Mistral *chat* model is multimodal, but the code
-// models (codestral / devstral) and the audio models (voxtral) are not, so a
-// blanket "is it Mistral?" test would route images into a model that rejects them.
-const VISION_CAPABLE_IDS = new Set([
-  "Flyer AI",
-  "mistral-large-latest",
   "mistral-large",
-  "mistral-medium",
-  "mistral-small",
-  "pixtral-12b",
-  "ministral-8b",
-]);
-
-/**
- * Whether a legacy id belongs to Mistral.
- *
- * An empty id returns false. It used to return true, so a missing or unset
- * model id routed silently to Mistral and answered as mistral-large — a caller
- * bug turning into a wrong-model reply. An empty id is now nobody's model and
- * the caller has to deal with it.
- */
-export function isMistralModel(modelId: string): boolean {
-  if (!modelId) return false;
-  const lower = modelId.toLowerCase();
-  if (
-    lower.includes("mistral") ||
-    lower.includes("pixtral") ||
-    lower.includes("codestral") ||
-    lower.includes("devstral") ||
-    lower.includes("flyer") ||
-    modelId === "Flyer AI"
-  ) {
-    return true;
-  }
-  return MODEL_REGISTRY[modelId]?.provider === "mistral";
-}
+];
 
 export function isVisionCapableModel(modelId: string): boolean {
   if (catalogueSupportsVision(modelId)) return true;
-  if (VISION_CAPABLE_IDS.has(modelId)) return true;
   return isVisionModel(modelId);
 }
 
-// The catalogue in providers.ts is authoritative; the legacy registry is only
-// consulted for ids that predate it.
+// The catalogue in providers.ts is the single authority for what a model is.
 export function isVisionModel(modelId: string): boolean {
-  return catalogueIsVision(modelId) || MODEL_REGISTRY[modelId]?.kind === "Vision";
+  return catalogueIsVision(modelId);
 }
 
 export function isImageModel(modelId: string): boolean {
-  return catalogueIsImage(modelId) || MODEL_REGISTRY[modelId]?.kind === "Image";
+  return catalogueIsImage(modelId);
 }
 
 // ---------------------------------------------------------------------------
@@ -311,24 +196,22 @@ export async function generateChatResponse(
   signal?: AbortSignal,
   opts?: { deepThink?: boolean },
 ) {
-  // Models in the multi-provider catalogue go through the unified /api/llm
-  // router, which walks that model's provider chain and streams from the first
-  // one that answers. Every route in a chain serves the SAME model, so failing
-  // over changes who served the reply, never what model produced it.
+  // The catalogue in providers.ts is the single source of truth: a known id
+  // goes through the unified /api/llm router, which walks that model's
+  // provider chain and streams from the first one that answers. Every route
+  // in a chain serves the SAME model, so failing over changes who served the
+  // reply, never what model produced it.
   if (getModel(modelId)) {
     await generateRoutedResponse(messages, modelId, onChunk, signal, opts);
     return;
   }
 
-  // Legacy ids not yet migrated to the catalogue keep their direct proxies.
-  // A failure surfaces as an error rather than being answered by a different
-  // model — a silent substitution hides outages and misattributes the reply.
-  if (isMistralModel(modelId)) {
-    await generateMistralResponse(messages, modelId, onChunk, signal, opts);
-    return;
-  }
-
-  await generateNvidiaChatResponse(messages, modelId, onChunk, signal, opts);
+  // No legacy alias layer any more: an id that is not in the catalogue is
+  // failed visibly, never answered by a stand-in model. A silent substitution
+  // hides outages and misattributes the reply.
+  throw new Error(
+    `"${modelId}" isn't a model we recognise any more. Pick another model from the list.`,
+  );
 }
 
 /**
@@ -470,135 +353,6 @@ export async function fetchAsUser(
   }
 
   return { response, errText };
-}
-
-/**
- * Turn a router failure into something a user can act on. The router reports
- * *why* the whole chain failed, which is a different situation from one
- * provider being down and needs a different message.
- */
-function routerError(status: number, errText: string): string {
-  try {
-    const parsed = JSON.parse(errText);
-    if (parsed.error === "sign_in_required") {
-      return "Please sign in to continue.";
-    }
-    // Reached only when the refresh-and-retry above also came back expired, so the
-    // client has done everything it can. Says what happened and what fixes it, and
-    // never mentions an API key: the previous behaviour fell through to
-    // friendlyHttpError(401), whose text is "check your API key" — advice for a
-    // BYOK failure, given to a signed-in user on the shared pool who has no key to
-    // check. Wrong diagnosis, and unactionable.
-    if (parsed.error === "token_expired") {
-      return "Your session expired and could not be renewed. Reload the app, or sign in again.";
-    }
-    if (parsed.error === "invalid_token") {
-      return "Your sign-in is no longer valid. Please sign out and sign in again.";
-    }
-    // Neither of the two above, and the distinction is worth the extra branch: the
-    // token was never actually judged, because the service that judges it was
-    // unreachable. Answering this with the `invalid_token` text would send someone
-    // with a perfectly good session to sign out and back in over a network blip that
-    // fixes itself — and they would, because the message told them to.
-    if (parsed.error === "auth_unavailable") {
-      return "Couldn't verify your sign-in just now — that check is temporarily unreachable. Your session is fine; try again in a moment.";
-    }
-    // A deployment fault, not a user fault. Distinguished because the user can do
-    // nothing at all about this one and should not be sent to re-authenticate:
-    // the server is holding a token it has no project id to verify against.
-    if (parsed.error === "auth_not_configured") {
-      return "The server is not configured for sign-in right now. This is a server-side problem, not yours — try again shortly.";
-    }
-    if (parsed.error === "quota_exceeded") {
-      return parsed.detail || "You've reached today's message limit.";
-    }
-    if (parsed.error === "all_providers_rate_limited") {
-      return "All providers are busy right now. Try again in a moment, or add your own API key in Settings for unlimited use.";
-    }
-    if (parsed.error === "no_provider_configured") {
-      return "No AI provider is configured on the server.";
-    }
-    // Every route answered 404. Since 3.11 that is a *capacity* reading first and
-    // an identity reading second — NVIDIA 404s a route that is merely unserved at
-    // that moment (evidence in api/_failover.js) — so the advice is "try again",
-    // not "that model is gone".
-    if (parsed.error === "model_unavailable") {
-      return "This model isn't being served right now. That's usually temporary — try again in a moment, or pick another model.";
-    }
-    // Every route answered 410 Gone. The opposite advice to the 404 branch above,
-    // and the pairing is the point: 404 says retry because the id may well answer
-    // in a minute, 410 must not, because it will not. Telling someone to retry a
-    // retired model sends them round a loop that reads as an app bug rather than a
-    // provider decision.
-    if (parsed.error === "model_retired") {
-      return "This model has been retired by its provider. Pick another model — your conversation is unaffected.";
-    }
-    // Nothing refused the request — every route in the chain went quiet. Worth
-    // its own message because the generic one reads as "your request was wrong",
-    // and the useful advice here is the opposite: retry, or pick another model.
-    if (parsed.error === "all_providers_timed_out") {
-      return "The model didn't respond in time. Try again, or switch to another model — some large models are slow to wake up.";
-    }
-    if (typeof parsed.detail === "string" && parsed.detail) return parsed.detail;
-  } catch {
-    // Not JSON — fall through to the generic message.
-  }
-  return friendlyHttpError(status, "the model service");
-}
-
-async function generateNvidiaChatResponse(
-  messages: ChatMessage[],
-  modelId: string,
-  onChunk: (text: string) => void,
-  signal?: AbortSignal,
-  opts?: { deepThink?: boolean },
-) {
-  const nvidiaModel = getNvidiaId(modelId);
-
-  // Fail rather than guess. This path used to default an unknown id to
-  // llama-3.1-8b, so a stale or misspelled id produced a confident answer from
-  // a small model wearing the requested model's name.
-  if (!nvidiaModel) {
-    throw new Error(
-      `"${modelId}" isn't a model we recognise any more. Pick another model from the list.`,
-    );
-  }
-
-  const userKey = getUserNvidiaApiKey();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (userKey) headers["X-Nvidia-Api-Key"] = userKey;
-
-  const response = await fetch(apiPath("/api/nvidia"), {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: nvidiaModel,
-      messages,
-      stream: true,
-      // Lower temperature in DeepThink so careful reasoning isn't derailed by
-      // sampling noise, and raise the ceiling so long derivations aren't cut off.
-      temperature: opts?.deepThink ? 0.3 : 0.7,
-      top_p: 0.95,
-      max_tokens: opts?.deepThink ? 8192 : 4096,
-    }),
-    signal,
-  });
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => "");
-    console.error("NVIDIA proxy error:", response.status, errText);
-
-    try {
-      const parsed = JSON.parse(errText);
-      if (parsed.detail) throw new Error(parsed.detail);
-      if (parsed.error && typeof parsed.error === "string") throw new Error(parsed.error);
-    } catch (e) {
-      if (e instanceof Error && e.message !== errText) throw e;
-    }
-    throw new Error(friendlyHttpError(response.status, "NVIDIA NIM"));
-  }
-
-  await pumpOpenAiStream(response, onChunk);
 }
 
 // ---------------------------------------------------------------------------
@@ -778,51 +532,6 @@ export async function ocrImage(imageDataUrl: string, signal?: AbortSignal): Prom
   return flattenOcrResponse(await res.json());
 }
 
-async function generateMistralResponse(
-  messages: ChatMessage[],
-  modelId: string,
-  onChunk: (text: string) => void,
-  signal?: AbortSignal,
-  opts?: { deepThink?: boolean },
-) {
-  const mistralModel = MODEL_REGISTRY[modelId]?.mistralId || "mistral-large-latest";
-
-  const userKey = getUserMistralApiKey();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (userKey) headers["X-Mistral-Api-Key"] = userKey;
-
-  const response = await fetch(apiPath("/api/mistral"), {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: mistralModel,
-      messages,
-      stream: true,
-      // See generateNvidiaChatResponse — DeepThink trades creativity for care.
-      temperature: opts?.deepThink ? 0.3 : 0.7,
-      top_p: 0.95,
-      max_tokens: opts?.deepThink ? 8192 : 4096,
-    }),
-    signal,
-  });
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => "");
-    console.error("Mistral proxy error:", response.status, errText);
-    try {
-      const parsed = JSON.parse(errText);
-      if (parsed.detail) throw new Error(typeof parsed.detail === "string" ? parsed.detail : JSON.stringify(parsed.detail));
-      if (parsed.error && typeof parsed.error === "string") throw new Error(parsed.error);
-    } catch (e) {
-      if (e instanceof Error && e.message !== errText) throw e;
-    }
-    throw new Error(friendlyHttpError(response.status, "Mistral"));
-  }
-
-  // The Mistral API is OpenAI-compatible on the wire, so the same SSE pump works.
-  await pumpOpenAiStream(response, onChunk);
-}
-
 /**
  * Which accumulator slot a streamed tool-call fragment belongs to.
  *
@@ -978,6 +687,80 @@ export async function pumpOpenAiStream(
   }
 
   return { toolCalls, finishReason, sawContent };
+}
+
+/**
+ * Turn a router failure into something a user can act on. The router reports
+ * *why* the whole chain failed, which is a different situation from one
+ * provider being down and needs a different message.
+ */
+function routerError(status: number, errText: string): string {
+  try {
+    const parsed = JSON.parse(errText);
+    if (parsed.error === "sign_in_required") {
+      return "Please sign in to continue.";
+    }
+    // Reached only when the refresh-and-retry above also came back expired, so the
+    // client has done everything it can. Says what happened and what fixes it, and
+    // never mentions an API key: the previous behaviour fell through to
+    // friendlyHttpError(401), whose text is "check your API key" — advice for a
+    // BYOK failure, given to a signed-in user on the shared pool who has no key to
+    // check. Wrong diagnosis, and unactionable.
+    if (parsed.error === "token_expired") {
+      return "Your session expired and could not be renewed. Reload the app, or sign in again.";
+    }
+    if (parsed.error === "invalid_token") {
+      return "Your sign-in is no longer valid. Please sign out and sign in again.";
+    }
+    // Neither of the two above, and the distinction is worth the extra branch: the
+    // token was never actually judged, because the service that judges it was
+    // unreachable. Answering this with the `invalid_token` text would send someone
+    // with a perfectly good session to sign out and back in over a network blip that
+    // fixes itself — and they would, because the message told them to.
+    if (parsed.error === "auth_unavailable") {
+      return "Couldn't verify your sign-in just now — that check is temporarily unreachable. Your session is fine; try again in a moment.";
+    }
+    // A deployment fault, not a user fault. Distinguished because the user can do
+    // nothing at all about this one and should not be sent to re-authenticate:
+    // the server is holding a token it has no project id to verify against.
+    if (parsed.error === "auth_not_configured") {
+      return "The server is not configured for sign-in right now. This is a server-side problem, not yours — try again shortly.";
+    }
+    if (parsed.error === "quota_exceeded") {
+      return parsed.detail || "You've reached today's message limit.";
+    }
+    if (parsed.error === "all_providers_rate_limited") {
+      return "All providers are busy right now. Try again in a moment, or add your own API key in Settings for unlimited use.";
+    }
+    if (parsed.error === "no_provider_configured") {
+      return "No AI provider is configured on the server.";
+    }
+    // Every route answered 404. Since 3.11 that is a *capacity* reading first and
+    // an identity reading second — NVIDIA 404s a route that is merely unserved at
+    // that moment (evidence in api/_failover.js) — so the advice is "try again",
+    // not "that model is gone".
+    if (parsed.error === "model_unavailable") {
+      return "This model isn't being served right now. That's usually temporary — try again in a moment, or pick another model.";
+    }
+    // Every route answered 410 Gone. The opposite advice to the 404 branch above,
+    // and the pairing is the point: 404 says retry because the id may well answer
+    // in a minute, 410 must not, because it will not. Telling someone to retry a
+    // retired model sends them round a loop that reads as an app bug rather than a
+    // provider decision.
+    if (parsed.error === "model_retired") {
+      return "This model has been retired by its provider. Pick another model — your conversation is unaffected.";
+    }
+    // Nothing refused the request — every route in the chain went quiet. Worth
+    // its own message because the generic one reads as "your request was wrong",
+    // and the useful advice here is the opposite: retry, or pick another model.
+    if (parsed.error === "all_providers_timed_out") {
+      return "The model didn't respond in time. Try again, or switch to another model — some large models are slow to wake up.";
+    }
+    if (typeof parsed.detail === "string" && parsed.detail) return parsed.detail;
+  } catch {
+    // Not JSON — fall through to the generic message.
+  }
+  return friendlyHttpError(status, "the model service");
 }
 
 function friendlyHttpError(status: number, providerLabel: string): string {
@@ -1349,7 +1132,8 @@ export function cleanGeneratedTitle(raw: string): string | null {
 
 /**
  * Smart Short Title Generator for Chat Conversations (ChatGPT-style).
- * Strictly uses Mistral 8B (ministral-8b) via Mistral API to generate a concise 2 to 4 word summary title.
+ * Uses the hidden utility model (fast-small / Flyer Mini) via the /api/llm
+ * router to generate a concise 2 to 4 word summary title.
  */
 export async function generateSmartChatTitle(
   firstMessage: string,
@@ -1369,10 +1153,12 @@ export async function generateSmartChatTitle(
     ];
 
     let titleText = "";
-    // Strictly invoke Mistral 8B (ministral-8b) on Mistral API
-    await generateMistralResponse(
+    // The hidden utility model (Flyer Mini / fast-small) via the unified
+    // router — its chain has an NVIDIA nemotron-nano route and a Mistral
+    // ministral-8b route, so a title still arrives when either is down.
+    await generateRoutedResponse(
       prompt,
-      "ministral-8b",
+      UTILITY_MODEL_ID,
       (chunk) => { titleText += chunk; },
       signal,
     );
@@ -1381,7 +1167,7 @@ export async function generateSmartChatTitle(
     if (cleaned) return cleaned;
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") throw err;
-    console.warn("Mistral 8B title generation fallback:", err);
+    console.warn("Smart title generation fallback:", err);
   }
 
   // Clean fallback: Extract 2-4 clean words from user message

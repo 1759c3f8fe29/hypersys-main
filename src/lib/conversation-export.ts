@@ -92,6 +92,11 @@ export function conversationToMarkdown(
  *  not at all, and a 200-char slug is plenty for a list row title. */
 export function exportFilename(title: string, ext: "md" | "pdf"): string {
   const slug = (title || "New Chat")
+    // The control-char class is the point of this regex — stripping C0 codes
+    // from user text that is about to become a filename. no-control-regex
+    // exists for regexes that accidentally *match* control chars; this one
+    // deliberately matches them, to delete them.
+    // eslint-disable-next-line no-control-regex
     .replace(/[\\/:*?"<>|\x00-\x1f]/g, " ")
     .replace(/\s+/g, "-")
     .replace(/^-+|-+$/g, "")

@@ -12,6 +12,7 @@ import {
   serverTimestamp,
   writeBatch,
   setDoc,
+  deleteField,
   type FieldValue
 } from 'firebase/firestore';
 import { db } from './firebase';
@@ -49,6 +50,15 @@ export interface FirestoreConversation {
   /** ISO-8601; normalized on read. Sorted on descending for the sidebar. */
   updatedAt: string;
   modelId?: string; // the model selected when active/updated
+  /** Server timestamp (ms) of the most recent pin, or undefined when the
+   *  conversation was never pinned. A timestamp rather than a boolean: pins
+   *  keep a stable recency order among themselves (most recently pinned
+   *  first), and unpinning is a field delete rather than a write of false —
+   *  a doc that never carried the field reads the same as one that was
+   *  unpinned, so there is no third state to mishandle. Absent on documents
+   *  written before pinning shipped, which is the same "never pinned"
+   *  state as far as any reader is concerned. */
+  pinnedAt?: number;
 }
 
 // One persisted fact about the user (Part F.2). `source` distinguishes facts
@@ -123,7 +133,14 @@ export const firestoreDb = {
           userId: data.userId,
           createdAt: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
           updatedAt: data.updatedAt?.toDate?.()?.toISOString() || new Date().toISOString(),
-          modelId: data.modelId
+          modelId: data.modelId,
+          // Timestamps come back as Firestore Timestamp objects with a
+          // toMillis(); the bare-number case covers documents written by a
+          // client that serialized it as a plain number. Both read as
+          // undefined when the field is absent — which is "never pinned".
+          pinnedAt: typeof data.pinnedAt?.toMillis === 'function'
+            ? data.pinnedAt.toMillis()
+            : (typeof data.pinnedAt === 'number' ? data.pinnedAt : undefined)
         };
       });
       // Sort client-side to avoid needing a composite index
@@ -354,6 +371,29 @@ export const firestoreDb = {
     await updateDoc(doc(db, 'conversations', conversationId), {
       title: title.slice(0, 60),
       updatedAt: serverTimestamp(),
+    });
+  },
+
+  // ── Pin (§8 Part F conversation management) ──
+  //
+  // Pin and unpin write the field rather than the whole document, so a
+  // concurrent title change or model switch can never be clobbered by a pin.
+  // Deliberately NOT touching `updatedAt`: that field feeds the sidebar's date
+  // grouping and the list's recency sort, and moving a conversation to "Today"
+  // because the user pinned it would silently re-file every row the user
+  // navigates by date. A pin is a label, not activity — the conversation did
+  // not become recent, it became important.
+
+  async pinConversation(conversationId: string): Promise<void> {
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      pinnedAt: serverTimestamp(),
+    });
+  },
+
+  async unpinConversation(conversationId: string): Promise<void> {
+    // deleteField rather than a false write, per the note on FirestoreConversation.pinnedAt.
+    await updateDoc(doc(db, 'conversations', conversationId), {
+      pinnedAt: deleteField(),
     });
   },
 

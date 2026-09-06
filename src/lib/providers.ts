@@ -170,20 +170,110 @@ export interface ModelSpec {
 // catalogues churn, and an unverified id fails at request time.
 export const MODELS: ModelSpec[] = [
   // --- Chat / reasoning ----------------------------------------------------
-  // The default. Mistral Large is the one flagship in this catalogue that is
-  // both tool-capable and vision-capable on a single route, so it is the model
-  // the product is named after and the one a new conversation starts on.
+  // The default. DeepSeek V4 Flash 0731 — named "Flyer" — is the model a new
+  // conversation starts on. Promoted to default in 3.12 on live probes:
+  // non-streamed, a cold probe took 150.7s and a warm one 107.5s to the full
+  // answer (see scripts/verify-models.mjs for re-running). Those are
+  // whole-answer figures, not first-byte ones — on the streamed route the
+  // router actually uses, the capped quantity is time-to-first-byte (22s in
+  // api/llm.js), and that figure has not been measured: the NVIDIA key 401'd
+  // on 2026-09-06 before the probe could run. Tool-capable and
+  // reasoning-capable. Vision is NOT supported, so image turns still route
+  // through the vision engine (see VISION_ENGINE_MODEL in ai.ts) rather than
+  // this entry.
+  //
+  // FALLBACK CHAIN, added 2026-09-06 on the user's explicit direction: a
+  // three-leg, all-NIM chain in gold/silver/bronze order —
+  // deepseek-v4-flash-0731 → nemotron-3.5-lightning-30b-a3b → gpt-oss-120b.
+  // The order is the user's, not ours; the comment below says why each leg is
+  // what it is, but nothing here was chosen by measurement. This entry is the
+  // second documented exception to the one-source rule in ModelSpec.routes —
+  // same reasoning as the first (see "Flyer Vision"): these are three
+  // genuinely different weights, and "Flyer" names a service ("the default
+  // chat experience"), not a set of weights, so a fallback leg answering
+  // under its name is insurance, not misattribution. "Flyer" is also a
+  // distinct model entry from "Nemotron 3.5 Lightning 30B", whose primary
+  // route is the silver leg here — the aliasing test was narrowed to guard
+  // *primary* routes for that reason (two picker entries both answered by
+  // the same weights was the original bug; a fallback leg borrowing another
+  // entry's primary is not that bug).
+  //
+  // What we honestly do NOT know, and the reader must not assume otherwise:
+  //
+  // 1. NO latency or capability measurements exist for ANY leg of this chain.
+  //    The key 401'd on 2026-09-06 (see the TTFB note above); probe scripts
+  //    cannot run. supportsTools/isReasoning/contextWindow describe the PRIMARY
+  //    route only — whether Lightning or GPT-OSS accept the tools payload
+  //    this entry sends (supportsTools: true, so a tools-capable turn ships
+  //    `tools` on every leg) is UNVERIFIED. A leg that rejects the tools
+  //    payload returns 400, and 400 is NOT in FAILOVER_STATUSES — the chain
+  //    would hard-fail rather than degrade. That is a real risk carried
+  //    knowingly, because the user's instruction was to write this chain now
+  //    with the ids as named; the mitigation when the key returns is to probe
+  //    each leg with a tools payload before trusting the chain end-to-end.
+  // 2. `openai/gpt-oss-120b` is NOT in the free-endpoint /v1/models listing
+  //    probed 2026-09-06 (only openai/gpt-oss-20b is; the 120B is
+  //    downloadable-only on build.nvidia.com — the same split the deepseek-v4
+  //    pair showed before both endpoints went live). The user named the 120B
+  //    specifically, so the id is written as named — NOT silently swapped for
+  //    the listed 20B. Consequences if it 404s: 404 IS in FAILOVER_STATUSES,
+  //    so a dead last leg is skipped and the chain degrades gracefully to its
+  //    first two legs. The id stays until the user says otherwise.
+  // 3. Both live legs-1-and-2 measurements are stale by rotation: Lightning's
+  //    entry cites 752ms TTFB from 3.11 probes, but those ran on the key that
+  //    died — treat them as evidence the endpoint serves the id, not as
+  //    current latency. Re-probe both legs with
+  //    `node scripts/probe-id.mjs <id> --times 5` when a working key returns,
+  //    and re-measure the never-measured Flash TTFB the comment above flags.
   {
-    id: "mistral-large",
+    id: "deepseek-v4-flash-0731",
     label: "Flyer",
     shortLabel: "Flyer",
-    description: "The default Flyer model. Strong all-rounder that reads images and uses tools.",
+    description: "The default Flyer model. Fast reasoning with tools.",
+    routes: [
+      { provider: "nvidia", modelId: "deepseek-ai/deepseek-v4-flash-0731" },
+      { provider: "nvidia", modelId: "nvidia/nemotron-3.5-lightning-30b-a3b" },
+      { provider: "nvidia", modelId: "openai/gpt-oss-120b" },
+    ],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "🪽",
+    kind: "Chat",
+    featured: true,
+  },
+  {
+    id: "deepseek-v4-pro-0813",
+    label: "DeepSeek V4 Pro",
+    shortLabel: "DS V4 Pro",
+    description: "DeepSeek's frontier reasoning model.",
+    routes: [{ provider: "nvidia", modelId: "deepseek-ai/deepseek-v4-pro-0813" }],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "🐋",
+    kind: "Chat",
+    featured: true,
+  },
+  // Mistral Large, the previous default, demoted from the "Flyer" name (which
+  // moved to deepseek-v4-flash-0731 above) but still selectable. Its unique
+  // selling point remains: the one flagship that is both tool- AND
+  // vision-capable on a single route, so it is the strongest entry that can
+  // read an image without a routing hop.
+  {
+    id: "mistral-large",
+    label: "Mistral Large",
+    description: "Strong all-rounder that reads images and uses tools.",
     routes: [{ provider: "mistral", modelId: "mistral-large-latest" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
     supportsVision: true,
     supportsTools: true,
-    emoji: "🪽",
+    emoji: "🇫🇷",
     kind: "Chat",
     featured: true,
   },
@@ -191,7 +281,7 @@ export const MODELS: ModelSpec[] = [
     id: "kimi-k3",
     label: "Kimi K3",
     description: "Moonshot's long-context reasoning model.",
-    // Was moonshotai/kimi-k2.6 until 3.9. That id is still in NVIDIA's /v1/models
+    // Was moonshotai/kimi-k3 until 3.9. That id is still in NVIDIA's /v1/models
     // list but POST /v1/chat/completions returned 404 for it — the failure the
     // catalogue check alone cannot see. K3 is the current generation on the same
     // endpoint. Re-run scripts/verify-models.mjs after touching this: the probe
@@ -200,11 +290,11 @@ export const MODELS: ModelSpec[] = [
     // CAVEAT ADDED IN 3.11: "listed and not deployed" is a weaker conclusion than
     // it looked at the time. NVIDIA also 404s ids it is temporarily not serving —
     // nemotron-3-super-120b-a12b returned 404 three times running and then answered
-    // three times running minutes later. So k2.6 may well have been alive and the
+    // three times running minutes later. So k3 may well have been alive and the
     // move to K3 made on a bad moment. No harm done, since K3 is the newer model
     // and answers in under a second, but the reasoning was luckier than it was
-    // sound. `node scripts/probe-id.mjs moonshotai/kimi-k2.6 --times 3` settles it
-    // if k2.6 is ever wanted back.
+    // sound. `node scripts/probe-id.mjs moonshotai/kimi-k3 --times 3` settles it
+    // if k3 is ever wanted back.
     routes: [{ provider: "nvidia", modelId: "moonshotai/kimi-k3" }],
     contextWindow: 256_000,
     maxOutputTokens: 8192,
@@ -295,11 +385,9 @@ export const MODELS: ModelSpec[] = [
     // So: hidden, not deleted. It was `featured: true` with a SINGLE route, which
     // meant every user who picked it from the front of the model list got a hard
     // failure with no failover path — the worst configuration a dead id can have.
-    // Kept in MODELS (rather than moved to LEGACY_MODEL_IDS) because getModel
-    // resolves against the full list, so every message already in Firestore that
-    // carries this id keeps its "GLM 5.2" byline. A legacy alias would also be
-    // *unreachable* — MODEL_BY_ID is checked first — and the suite asserts against
-    // exactly that shadowing.
+    // Kept in MODELS (rather than deleted) because getModel resolves against
+    // the full list, so every message already in Firestore that carries this id
+    // keeps its "GLM 5.2" byline. There is no alias layer to consult.
     //
     // To restore: confirm `z-ai/glm-5.2` is back in /v1/models, then drop `hidden`
     // and re-probe. A 410 does not come back on its own.
@@ -332,11 +420,9 @@ export const MODELS: ModelSpec[] = [
     // model is now hidden too, but for an unrelated and much clearer reason: a 410
     // and a vanished catalogue entry.)
     //
-    // Hidden rather than deleted, which is the whole reason the flag is worth
-    // having: three LEGACY_MODEL_IDS entries resolve to `llama-70b`
-    // (llama-3.3-70b, llama-4-maverick, qwen-3-next-80b), so deleting it would
-    // strip the byline off every message those ids labelled and make a retry
-    // route as unknown. getModel resolves against the full MODELS list, not
+    // Hidden rather than deleted: messages already in Firestore carry this
+    // id, so deleting it would strip their byline. getModel resolves against
+    // the full MODELS list, not
     // SELECTABLE_MODELS, so hiding keeps every historical message readable while
     // making it impossible to pick a model that hangs the turn.
     //
@@ -599,8 +685,8 @@ export const MODELS: ModelSpec[] = [
   // NVIDIA NIM's image models (nvidia/sana, stabilityai/sdxl-turbo) were
   // removed in 3.6: `npm run verify:models` probes the genai endpoint and they
   // 404 even with a valid key — the whole `/v1/genai/*` surface is gone, so a
-  // live NVIDIA leg does not exist to walk. Their persisted ids resolve through
-  // LEGACY_MODEL_IDS. Pollinations is keyless and always-on, so this chain is
+  // live NVIDIA leg does not exist to walk. Pollinations is keyless and
+  // always-on, so this chain is
   // what actually renders images.
   {
     id: "flux",
@@ -641,96 +727,29 @@ export const MODELS: ModelSpec[] = [
   },
 ];
 
-// Ids that older conversations persisted, pointing at their current equivalent.
-//
-// Message documents in Firestore store whatever id the picker used at the time.
-// Renaming an id without this map would make every historical message resolve to
-// nothing, so the UI would label it "AI" and a retry would route it as unknown.
-// Entries are one-way and cheap to keep; add to this rather than mutating ids.
-//
-// Every *value* must be a live id in MODELS above — never another key in this
-// map. getModel does exactly one alias hop, so a chained entry silently resolves
-// to undefined. Exported (read-only) so src/test/providers.test.ts can enforce
-// both halves of that rule; nothing outside the tests should need it.
-export const LEGACY_MODEL_IDS: Readonly<Record<string, string>> = {
-  "Flyer AI": "mistral-large",
-  "mistral-large-latest": "mistral-large",
-  "mistral-medium-latest": "mistral-medium",
-  "mistral-small-latest": "mistral-small",
-  "codestral-latest": "codestral",
-  "devstral-latest": "codestral",
-  "ministral-8b": "fast-small",
-  "nemotron-3-ultra-550b": "nemotron-ultra",
-  "llama-3.3-70b": "llama-70b",
-  "nemotron-nano-9b": "fast-small",
-  "vision-engine": "nemotron-vision",
-  "vision-engine-2": "nemotron-vision",
-  "vision-engine-3": "nemotron-vision",
-  // Mistral retired pixtral-12b-2409 from its catalogue (verified in 3.6), so
-  // both spellings resolve to the live NVIDIA vision engine.
-  "pixtral-12b-2409": "nemotron-vision",
-  "pixtral-12b": "nemotron-vision",
-  // NVIDIA NIM's image gen ids died with the /v1/genai/* surface. Persisted
-  // conversations that selected them resolve to the keyless chain instead.
-  "sana": "flux",
-  "sdxl-turbo": "flux",
-  "gptimage": "flux",
-
-  // These three used to answer as a *different* model than their name claimed
-  // (llama-4-maverick and qwen-3-next-80b both resolved to llama-3.1-70b,
-  // minimax-m2.7 to llama-3.1-8b). The names are gone. Neither 3.1 model is in
-  // the catalogue any more, so these point at the nearest live equivalent —
-  // which means an old message's byline is approximate, not exact. That is the
-  // unavoidable cost of having shipped the mislabelling; new messages are
-  // labelled with the weights that actually produced them.
-  "llama-4-maverick": "llama-70b",
-  "qwen-3-next-80b": "llama-70b",
-  "minimax-m2.7": "fast-small",
-  "llama-8b": "fast-small",
-  "step-3.7-flash": "nemotron-super-49b",
-
-  // Gemini and DeepSeek were removed from the catalogue. Messages already in
-  // Firestore still carry those ids, so they map to the nearest live model —
-  // which means an old message's byline is approximate, not exact, exactly as
-  // for the mislabelled ids above. Nothing re-routes to different weights at
-  // request time: these only resolve a stored id to a label and a retry target.
-  "gemini-flash": "mistral-large",
-  "gemini-pro": "mistral-large",
-  "gemini-flash-lite": "mistral-small",
-  "gemini-2.5-flash": "mistral-large",
-  "gemini-2.5-pro": "mistral-large",
-  "gemini-2.5-flash-lite": "mistral-small",
-  "gemini-1.5-flash": "mistral-large",
-  "gemini-1.5-pro": "mistral-large",
-  "deepseek-v4-flash": "mistral-large",
-  // Repointed with the k2.6 -> k3 rename. Values in this map must be *live
-  // catalogue ids*, never another key: getModel does exactly one alias hop
-  // (LEGACY_MODEL_IDS[id] then MODEL_BY_ID.get), so a value that is itself a
-  // legacy id resolves to undefined and the message loses its byline.
-  "deepseek-v4-pro": "kimi-k3",
-  "kimi-k2.6": "kimi-k3",
-};
-
-
-
+// No legacy alias map any more (removed in 3.12 at the maintainer's direction).
+// Old conversations whose modelId was renamed or retired simply do not resolve
+// in getModel(); their byline falls back to a generic label and reopening one
+// selects the default. The message content is untouched — only the stale label
+// falls away. Keeping the alias layer was one-way compatibility debt: every
+// rename had to be remembered here forever, and a value pointing at another
+// key silently resolved to undefined (the exact bug the old test guarded).
 
 const MODEL_BY_ID = new Map(MODELS.map((m) => [m.id, m]));
 
 /**
- * Look up a model by id, resolving ids persisted by older versions.
+ * Look up a model by id.
  *
- * Returns undefined for a genuinely unknown id rather than guessing. Callers
- * must handle that by failing visibly: defaulting to some other model is how
- * a user ends up reading an answer from weights they did not pick.
+ * Returns undefined for an unknown id rather than guessing. Callers must
+ * handle that by failing visibly: defaulting to some other model is how a
+ * user ends up reading an answer from weights they did not pick.
  */
 export function getModel(id: string): ModelSpec | undefined {
-  const direct = MODEL_BY_ID.get(id);
-  if (direct) return direct;
-  const canonical = LEGACY_MODEL_IDS[id];
-  return canonical ? MODEL_BY_ID.get(canonical) : undefined;
+  return MODEL_BY_ID.get(id);
 }
 
-/** Canonical id for a possibly-legacy id, or undefined if unknown. */
+/** The model's own id back, or undefined if unknown. Kept because callers
+ *  want a string (not a spec) for comparisons and persistence. */
 export function canonicalModelId(id: string): string | undefined {
   return getModel(id)?.id;
 }
@@ -765,7 +784,8 @@ export function supportsTools(id: string): boolean {
 /** The model used for internal utility work. Always the cheapest one. */
 export const UTILITY_MODEL_ID = "fast-small";
 
-export const DEFAULT_MODEL_ID = "mistral-large";
+// The model a new conversation starts on. Must be a live id in MODELS.
+export const DEFAULT_MODEL_ID = "deepseek-v4-flash-0731";
 
 /**
  * Walked in order by the image executor when a generation fails.

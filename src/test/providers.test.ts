@@ -23,7 +23,6 @@ import {
   DEFAULT_IMAGE_MODEL_ID,
   DEFAULT_VISION_MODEL_ID,
   IMAGE_FALLBACK_CHAIN,
-  LEGACY_MODEL_IDS,
   getModel,
   canonicalModelId,
   isImageModel,
@@ -53,21 +52,73 @@ describe("model catalogue", () => {
   // THE aliasing bug: "llama-4-maverick" and "qwen-3-next-80b" were distinct
   // picker entries that both resolved to meta/llama-3.1-70b-instruct. Two names
   // for one set of weights means at least one of them is lying about what
-  // answered. A model may have several routes (same model, different provider),
-  // but two *different* models must never share an upstream id.
-  it("never points two models at the same upstream model id", () => {
+  // answered. A model may have several routes — same weights on another
+  // provider, or (since 2026-09-06) a fallback leg as insurance, as on the
+  // default model's NIM chain — but two different models must never share an
+  // upstream id as each other's *primary*. A fallback leg borrowing another
+  // entry's primary answers under a service name ("Flyer" names the default
+  // experience, not weights), so it is not the lie this test exists to catch:
+  // the lie is a weights-named entry whose own first answer comes from weights
+  // wearing a different entry's name.
+  it("never points two models at the same upstream model id as primary", () => {
     const owner = new Map<string, string>();
     for (const model of MODELS) {
-      for (const route of model.routes) {
-        const key = `${route.provider}:${route.modelId}`;
-        const existing = owner.get(key);
-        expect(
-          existing ?? model.id,
-          `${key} is claimed by both "${existing}" and "${model.id}"`,
-        ).toBe(model.id);
-        owner.set(key, model.id);
-      }
+      const route = model.routes[0];
+      const key = `${route.provider}:${route.modelId}`;
+      const existing = owner.get(key);
+      expect(
+        existing ?? model.id,
+        `${key} is claimed by both "${existing}" and "${model.id}"`,
+      ).toBe(model.id);
+      owner.set(key, model.id);
     }
+    // CONTROL: the loop above must actually walk the catalogue. An emptied
+    // loop would leave this test green on a pass-through run (the seeded
+    // control below passes on its own) — found by mutation-check on
+    // 2026-09-06, where `for (const model of [])` survived 15/15. A passing
+    // run has all primaries distinct, so owner holds one claim per model.
+    expect(owner.size, "the guard must walk every model in the catalogue").toBe(
+      MODELS.length,
+    );
+    // CONTROL: this matcher has teeth. A catalogue seeded with the original
+    // shape of the bug — two weights-named entries sharing one primary — must
+    // still trip it, or the narrowing above went too far. This is exactly the
+    // 3.10 bug: two distinct picker names, one set of weights answering for
+    // both.
+    const seeded = [
+      { id: "llama-4-maverick", routes: [{ provider: "nvidia", modelId: "meta/llama-3.1-70b-instruct" }] },
+      { id: "qwen-3-next-80b", routes: [{ provider: "nvidia", modelId: "meta/llama-3.1-70b-instruct" }] },
+    ];
+    const seededOwner = new Map<string, string>();
+    let tripped = false;
+    for (const model of seeded) {
+      const route = model.routes[0];
+      const key = `${route.provider}:${route.modelId}`;
+      const existing = seededOwner.get(key);
+      if (existing && existing !== model.id) {
+        tripped = true;
+        break;
+      }
+      seededOwner.set(key, model.id);
+    }
+    expect(tripped, "seeded alias catalogue must trip the primary-route guard").toBe(true);
+  });
+
+  // The default model's chain, pinned on 2026-09-06 when the user directed a
+  // three-NIM fallback in gold/silver/bronze order. Order is the promise here —
+  // the user named which model answers first — so the assertion is an exact
+  // array, not a set: a permutation would pass a membership check and silently
+  // re-order the answer every request walks.
+  it("walks the default model's fallback chain in the user's medal order", () => {
+    const spec = getModel(DEFAULT_MODEL_ID)!;
+    expect(spec.routes.map((r) => r.modelId)).toEqual([
+      "deepseek-ai/deepseek-v4-flash-0731",
+      "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "openai/gpt-oss-120b",
+    ]);
+    // All legs on NIM by the same instruction — a Mistral leg smuggled in here
+    // would re-open the cross-provider duplication the header rule bans.
+    expect(spec.routes.map((r) => r.provider)).toEqual(["nvidia", "nvidia", "nvidia"]);
   });
 
   it("gives every model the presentation fields the picker needs", () => {
@@ -130,53 +181,13 @@ describe("getModel", () => {
     expect(canonicalModelId("not-a-model")).toBeUndefined();
   });
 
-  it("resolves ids persisted by older versions", () => {
-    // Conversations in Firestore still carry these.
-    expect(canonicalModelId("mistral-large-latest")).toBe("mistral-large");
-    expect(canonicalModelId("nemotron-3-ultra-550b")).toBe("nemotron-ultra");
-    expect(canonicalModelId("Flyer AI")).toBe("mistral-large");
-  });
-
-  it("resolves the retired mislabelled ids to a real model", () => {
-    // The names are gone from the picker, but old messages must still render.
-    for (const retired of ["llama-4-maverick", "qwen-3-next-80b", "minimax-m2.7"]) {
-      expect(getModel(retired), `${retired} should still resolve`).toBeDefined();
-      expect(SELECTABLE_MODELS.some((m) => m.id === retired)).toBe(false);
-    }
-  });
-
-  // getModel does exactly ONE alias hop: LEGACY_MODEL_IDS[id], then a single
-  // MODEL_BY_ID lookup. So an alias whose value is itself another alias key
-  // resolves to undefined — the message loses its byline and a retry routes as
-  // unknown, which is the precise failure the map exists to prevent.
-  //
-  // This is not hypothetical. Renaming "kimi-k2.6" to "kimi-k3" left
-  // "deepseek-v4-pro" -> "kimi-k2.6" pointing at a dead key, and nothing in the
-  // type system objects: Record<string, string> is perfectly happy. Caught by
-  // hand that time; caught here from now on.
-  it("points every legacy alias at a live catalogue id, never at another alias", () => {
-    const liveIds = new Set(MODELS.map((m) => m.id));
-    for (const [legacy, target] of Object.entries(LEGACY_MODEL_IDS)) {
-      expect(
-        liveIds.has(target),
-        `"${legacy}" -> "${target}", which is not a model in MODELS` +
-          (LEGACY_MODEL_IDS[target] ? " (it is another legacy alias — chains do not resolve)" : ""),
-      ).toBe(true);
-      // And the alias must actually be reachable through the public accessor.
-      expect(canonicalModelId(legacy), `"${legacy}" does not resolve`).toBe(target);
-    }
-  });
-
-  it("has no legacy alias shadowed by a live id of the same name", () => {
-    // getModel checks MODEL_BY_ID first, so such an entry can never fire. It is
-    // dead weight that reads like an active redirect — worse than absent.
-    const liveIds = new Set(MODELS.map((m) => m.id));
-    for (const legacy of Object.keys(LEGACY_MODEL_IDS)) {
-      expect(
-        liveIds.has(legacy),
-        `"${legacy}" is both a live model id and a legacy alias; the alias is unreachable`,
-      ).toBe(false);
-    }
+  // The legacy alias map (LEGACY_MODEL_IDS) was removed in 3.12: an id that is
+  // not in the catalogue resolves to nothing, by design. This pins that no
+  // alias-layer resurrection slips back in under a different name.
+  it("does not resolve ids from the removed legacy alias layer", () => {
+    expect(getModel("mistral-large-latest")).toBeUndefined();
+    expect(getModel("Flyer AI")).toBeUndefined();
+    expect(getModel("pixtral-12b")).toBeUndefined();
   });
 });
 

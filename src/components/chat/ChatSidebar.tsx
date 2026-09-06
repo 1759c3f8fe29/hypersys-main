@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, Sparkles, Bot, ChevronDown, ChevronUp, Search, History, Settings, Brain, Pencil, Copy, AlertTriangle, RotateCw, X } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, Sparkles, Bot, ChevronDown, ChevronUp, Search, History, Settings, Brain, Pencil, Copy, AlertTriangle, RotateCw, X, Pin, Download, FileDown } from 'lucide-react';
+import { matchesConversation, countBodyHits, type SearchableMessage } from '@/lib/conversation-search';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import { format, isToday, isYesterday, differenceInCalendarDays } from 'date-fns';
@@ -60,6 +61,9 @@ interface Conversation {
   title: string;
   created_at: string;
   updated_at: string;
+  // Pin state, mirrored from Chat.tsx's Conversation. Undefined = never pinned;
+  // see the note on the same field there for why a number, not a boolean.
+  pinnedAt?: number;
 }
 
 interface ChatSidebarProps {
@@ -86,6 +90,24 @@ interface ChatSidebarProps {
    * simply gets no Rename item in the context menu, rather than one that fails.
    */
   onRenameConversation?: (id: string, title: string) => void | Promise<void>;
+  // Pin/unpin (§8 Part F). One callback with the target state rather than two —
+  // the sidebar already knows which to offer from `pinnedAt`, and the parent's
+  // handler is the same either way: flip the field, roll back on failure.
+  onTogglePinConversation?: (id: string, pinned: boolean) => void | Promise<void>;
+  // Export (§8 Part F). Two formats, one callback: the parent fetches the
+  // conversation's messages once and serializes via conversation-export.ts.
+  onExportConversation?: (id: string, format: 'md' | 'pdf') => void | Promise<void>;
+  /**
+   * Body search (§8 Part F): fetch one conversation's messages so the history
+   * filter can look past titles. The sidebar calls this lazily, only for
+   * conversations still in the running after the title pass and only while a
+   * needle is live, and caches the result per conversation id — a second query
+   * that overlaps the same chats must not re-fetch them. Maps to Firestore's
+   * getMessages via a thin adapter in Chat.tsx; anything returning [] is
+   * treated as "no body hits", the same as never-fetched, so an optional prop
+   * degrades the filter to title-only rather than breaking it.
+   */
+  fetchConversationBodies?: (id: string) => Promise<SearchableMessage[]>;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   selectedModel: string;
@@ -153,6 +175,8 @@ export default function ChatSidebar({
   conversations, conversationsStatus = 'ready', onRetryConversations,
   activeConversationId, onSelectConversation,
   onNewConversation, onDeleteConversation, onRenameConversation, isCollapsed, onToggleCollapse,
+  onTogglePinConversation, onExportConversation,
+  fetchConversationBodies,
   selectedModel, onSelectModel,
   onMemoriesChanged, onInstructionsChanged,
 }: ChatSidebarProps) {
@@ -164,6 +188,72 @@ export default function ChatSidebar({
   // model picker's. Separate state because they are separate fields serving separate
   // lists; sharing one would mean typing a model name silently hid every chat.
   const [historyQuery, setHistoryQuery] = useState('');
+  // Body-search state (§8 Part F). `bodyHits` is per-conversation, computed once
+  // per (conversation, needle) fetch and kept for the field's lifetime: re-typing
+  // the query must not re-fetch bodies already in hand — the *hit count* for a
+  // new needle is recomputed from the cached messages, not from a new fetch. The
+  // cache holds the SearchableMessage[] (not the count) for exactly that reason.
+  // The map is React state (not a ref) because a resolved fetch has to re-render
+  // the list — a ref would fetch, count, and never repaint.
+  const [bodyCache, setBodyCache] = useState<Record<string, SearchableMessage[]>>({});
+  // Race guard: an increment per in-flight fetch effect. A needle typed while
+  // bodies are loading invalidates the earlier effect's results, exactly like
+  // the conversation-load guard in Chat.tsx — without it, a slow first query's
+  // late resolve would overwrite the cache mid-second-query.
+  const bodyFetchGen = useRef(0);
+  const historyNeedle = historyQuery.trim();
+  const bodyHits = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const [id, messages] of Object.entries(bodyCache)) {
+      map[id] = countBodyHits(messages, historyNeedle);
+    }
+    return map;
+  }, [bodyCache, historyNeedle]);
+
+  // Lazy body fetch. Runs only when a needle is live and the parent supplied
+  // the adapter; fetches every still-uncached conversation — not just the ones
+  // the title pass has *not* matched. A title match already shows the row for
+  // this needle, so fetching its bodies looks wasted; it is not: the next
+  // keystroke can kill the title match (typing past what a short title can
+  // contain, or fixing a typo), and the row then flips to body-matched with
+  // the bodies already in hand instead of flashing out and back. A rejected
+  // or empty fetch caches [] so it is never retried within this field's
+  // lifetime — a missing conversation would otherwise re-fetch on every
+  // keystroke. Generation-guarded: only the newest effect's results enter
+  // the cache.
+  useEffect(() => {
+    if (!historyNeedle || !fetchConversationBodies) return;
+    const gen = ++bodyFetchGen.current;
+    const candidates = conversations.filter(
+      (c) => !Object.prototype.hasOwnProperty.call(bodyCache, c.id),
+    );
+    if (candidates.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      for (const c of candidates) {
+        if (cancelled) break;
+        try {
+          const messages = await fetchConversationBodies(c.id);
+          if (bodyFetchGen.current !== gen) return;
+          // Functional set: this fetch's own result, never a clobber of a
+          // later one's. The hasOwnProperty guard above plus the generation
+          // check keep two fetches of the same conversation from racing.
+          setBodyCache((prev) => ({ ...prev, [c.id]: messages }));
+        } catch {
+          if (bodyFetchGen.current !== gen) return;
+          setBodyCache((prev) => ({ ...prev, [c.id]: [] }));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // conversations is deliberately excluded: refetches on list refresh would
+    // only ever find candidates already covered, and including it would
+    // re-run the whole loop on every background sync. bodyCache is excluded
+    // by the same logic — the effect's own writes would retrigger it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyNeedle, fetchConversationBodies]);
   // Which match the keyboard is currently on, as an index into the *displayed*
   // order (see `flatMatches` below). -1 means "nowhere yet", which is the state
   // the field is in as you type — the first ArrowDown is what commits to a row.
@@ -303,23 +393,44 @@ export default function ChatSidebar({
   // periods the query matched nothing in, and a "Yesterday" label with no rows
   // under it reads as a rendering fault.
   //
-  // Substring match on the title, case-insensitive, no fuzzy ranking. Titles here
-  // are model-generated summaries of the first message, so the user is recalling a
-  // phrase they saw rather than guessing at one — and a fuzzy matcher that surfaces
-  // "Trip to Rome" for the query "tor" makes a short list feel unpredictable, which
-  // is the opposite of what a filter field is for. Ranking would also fight the date
-  // grouping below, which is the organising principle users actually navigate by.
-  const historyNeedle = historyQuery.trim().toLowerCase();
-  const matchingConversations = historyNeedle
-    ? conversations.filter((c) => c.title.toLowerCase().includes(historyNeedle))
-    : conversations;
+  // Substring match on the title OR the message bodies, case-insensitive, no
+  // fuzzy ranking. Titles here are model-generated summaries of the first
+  // message, so a user recalling a phrase from mid-conversation has been
+  // failing the title match since the field existed — that is what the body
+  // pass is for (§8 Part F). The predicate itself lives in
+  // conversation-search.ts; the hit counts arrive asynchronously, so a
+  // conversation whose bodies have not landed yet is filtered as if they had
+  // no hits and appears when the fetch resolves — the filter tightens live
+  // rather than blocking the keystroke. No fuzzy ranking for the same reason
+  // as before: a matcher that surfaces "Trip to Rome" for "tor" makes a short
+  // list unpredictable, and ranking would fight the date grouping below,
+  // which is the organising principle users actually navigate by.
+  const matchingConversations = conversations.filter((c) =>
+    matchesConversation(c.title, bodyHits[c.id] ?? 0, historyNeedle),
+  );
 
-  const groupedConversations = GROUP_ORDER
-    .map((label) => ({
-      label,
-      items: matchingConversations.filter((c) => groupLabel(c.updated_at) === label),
-    }))
-    .filter((g) => g.items.length > 0);
+  // Pins first (§8 Part F). A pinned row leaves its date group and joins a
+  // "Pinned" section above "Today", sorted by most-recently-pinned — the pin
+  // is what the user decided to keep at hand, and burying a pin back inside
+  // "Older" because the chat itself is months stale would defeat the point of
+  // pinning it. Sorting on pinnedAt (desc) rather than updatedAt: pinning an
+  // old conversation must not reorder the pins ahead of it, and updatedAt is
+  // the field the rest of the list is sorted on, which would conflate "chat
+  // I pinned in March and used today" with "chat I pinned just now".
+  const pinned = matchingConversations
+    .filter((c) => typeof c.pinnedAt === 'number')
+    .sort((a, b) => (b.pinnedAt! - a.pinnedAt!));
+  const unpinned = matchingConversations.filter((c) => typeof c.pinnedAt !== 'number');
+
+  const groupedConversations = [
+    ...(pinned.length > 0 ? [{ label: 'Pinned', items: pinned }] : []),
+    ...GROUP_ORDER
+      .map((label) => ({
+        label,
+        items: unpinned.filter((c) => groupLabel(c.updated_at) === label),
+      }))
+      .filter((g) => g.items.length > 0),
+  ];
 
   // The rows in the order they are painted, which is the order the arrow keys have
   // to walk. Flattening the groups rather than using `matchingConversations` is the
@@ -694,8 +805,9 @@ export default function ChatSidebar({
                 </div>
                 <p className="text-sm font-medium text-sidebar-foreground/60">No chats match</p>
                 <p className="text-xs text-sidebar-foreground/35 mt-1 max-w-[15rem] break-words">
-                  Nothing titled &ldquo;{historyQuery.trim()}&rdquo;. Titles are written
-                  from the first message, so try a word you actually typed.
+                  Nothing matches &ldquo;{historyQuery.trim()}&rdquo; in titles or message
+                  contents. Titles come from the first message, so a phrase you typed
+                  mid-chat is the more likely place to find it.
                 </p>
                 <Button
                   variant="ghost"
@@ -807,7 +919,17 @@ export default function ChatSidebar({
                                     className="w-full bg-sidebar-accent/60 border border-primary/40 rounded px-1.5 py-0.5 text-sm font-medium text-sidebar-foreground outline-none"
                                   />
                                 ) : (
-                                  <p className="text-sm truncate font-medium">{conv.title}</p>
+                                  <p className="text-sm truncate font-medium flex items-center gap-1.5">
+                                    {conv.title}
+                                    {/* Pin glyph beside the title, so a pinned row is
+                                        distinguishable from its unpinned neighbours by
+                                        something other than its position in the Pinned
+                                        group — needed once the row is in a viewport
+                                        where group headers have scrolled away. */}
+                                    {typeof conv.pinnedAt === 'number' && (
+                                      <Pin className="w-3 h-3 flex-shrink-0 text-primary/60" aria-label="Pinned" />
+                                    )}
+                                  </p>
                                 )}
                                 <p className="text-[11px] text-sidebar-foreground/40">{format(new Date(conv.updated_at), 'MMM d, h:mm a')}</p>
                               </div>
@@ -839,6 +961,26 @@ export default function ChatSidebar({
                                     F2 branch in onKeyDown. */}
                                 <span className="ml-auto text-[10px] text-muted-foreground/50">F2</span>
                               </ContextMenuItem>
+                            )}
+                            {onTogglePinConversation && (
+                              <ContextMenuItem
+                                onSelect={() => onTogglePinConversation(conv.id, typeof conv.pinnedAt !== 'number')}
+                              >
+                                <Pin className="mr-2 h-3.5 w-3.5" />
+                                {typeof conv.pinnedAt === 'number' ? 'Unpin' : 'Pin to top'}
+                              </ContextMenuItem>
+                            )}
+                            {onExportConversation && (
+                              <>
+                                <ContextMenuItem onSelect={() => onExportConversation(conv.id, 'md')}>
+                                  <Download className="mr-2 h-3.5 w-3.5" />
+                                  Export as Markdown
+                                </ContextMenuItem>
+                                <ContextMenuItem onSelect={() => onExportConversation(conv.id, 'pdf')}>
+                                  <FileDown className="mr-2 h-3.5 w-3.5" />
+                                  Export as PDF
+                                </ContextMenuItem>
+                              </>
                             )}
                             <ContextMenuItem
                               onSelect={() => {

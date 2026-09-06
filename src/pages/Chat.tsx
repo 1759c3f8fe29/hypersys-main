@@ -3,6 +3,14 @@ import { Link } from 'react-router-dom';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { useAuth } from '@/hooks/useAuth';
 import { firestoreDb, type FirestoreMemory, type UserSettings } from '@/lib/firestore-db';
+import {
+  conversationToMarkdown,
+  exportFilename,
+  type ExportConversation,
+  type ExportMessage,
+} from '@/lib/conversation-export';
+import type { SearchableMessage } from '@/lib/conversation-search';
+import { generateFile } from '@/lib/file-generator';
 import ChatSidebar, { AI_MODELS } from '@/components/chat/ChatSidebar';
 import {
   DEFAULT_MODEL_ID,
@@ -100,9 +108,14 @@ interface Conversation {
   created_at: string;
   updated_at: string;
   modelId?: string;
+  // Pin state (§8 Part F). Undefined = never pinned; the number is the
+  // server-timestamp ms of the most recent pin, used both to sort pinned
+  // rows among themselves (latest pin first) and to know which menu item
+  // ("Pin" vs "Unpin") the row should offer.
+  pinnedAt?: number;
 }
 
-// The large NIM models (nemotron-ultra, minimax-m3, kimi-k2.6)
+// The large NIM models (nemotron-ultra, minimax-m3, kimi-k3)
 // and the Mistral large/medium tiers cold-start 60-100s before the first token,
 // then stream fine. The base timeout must clear that window or those models
 // always error. Verified worst-case first-token was ~100s on 2026-07-21.
@@ -184,6 +197,24 @@ const compressImage = (file: File, maxWidth = 1024, maxHeight = 1024, quality = 
     };
   });
 };
+
+// Anchor-click download, the same browser contract ChatMessage and
+// ArtifactCanvas already use (append → click → remove). Extracted here so the
+// two export paths (md blob, pdf blob) share one saving path instead of
+// open-coding it twice in the same function.
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Outlives the click by a tick: revoking synchronously can cancel the
+  // download in Safari. 4s is what ChatMessage already uses for the same
+  // reason.
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
 
 const fileToDataUrl = (file: File): Promise<string> => {
   if (file.type.startsWith('image/')) {
@@ -550,7 +581,8 @@ export default function Chat() {
         title: c.title,
         created_at: c.createdAt,
         updated_at: c.updatedAt,
-        modelId: c.modelId
+        modelId: c.modelId,
+        pinnedAt: c.pinnedAt
       })));
       setConversationsStatus('ready');
     } catch (error) {
@@ -1899,6 +1931,98 @@ export default function Chat() {
     }
   };
 
+  // Pin/unpin (§8 Part F). Optimistic set + rollback, same shape as rename:
+  // the sidebar re-groups on the next render, so the row visibly moves to/from
+  // the Pinned section the instant the click lands — a pin that only took
+  // effect after a round-trip would look like the menu item did nothing.
+  // Date.now() locally rather than serverTimestamp(): the sidebar sorts pins
+  // by pinnedAt, and the server stamp only exists after the read-back.
+  const handleTogglePinConversation = async (id: string, pinned: boolean) => {
+    const previous = conversations.find((c) => c.id === id)?.pinnedAt;
+    setConversations((prev) => prev.map((c) => (
+      c.id === id ? { ...c, pinnedAt: pinned ? Date.now() : undefined } : c
+    )));
+    try {
+      if (pinned) {
+        await firestoreDb.pinConversation(id);
+      } else {
+        await firestoreDb.unpinConversation(id);
+      }
+    } catch {
+      // Roll back the optimistic move; the row returns to where it was, which
+      // is the honest report that the pin did not take.
+      setConversations((prev) => prev.map((c) => (
+        c.id === id ? { ...c, pinnedAt: previous } : c
+      )));
+      toast.error(pinned ? 'Could not pin this conversation' : 'Could not unpin this conversation');
+    }
+  };
+
+  // Export (§8 Part F). Markdown and PDF come from the same serializer; the
+  // PDF path is that Markdown through file-generator's jsPDF engine, so one
+  // fetch serves both and there is exactly one document shape to maintain.
+  const handleExportConversation = async (id: string, format: 'md' | 'pdf') => {
+    const conv = conversations.find((c) => c.id === id);
+    if (!conv) return;
+    try {
+      const rows = await firestoreDb.getMessages(id);
+      // Linearize the tree to the active branch so the exported document is
+      // the conversation as it reads on screen — regenerations that were
+      // abandoned are not "more information", they are the drafts the user
+      // already rejected, and interleaving them would rewrite the history
+      // the export is supposed to preserve.
+      const linear = linearizeForest(buildMessageForest(toTreeMessages(rows)));
+      const messages: ExportMessage[] = linear.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        modelName: m.modelName,
+        attachmentNames: m.attachments?.map((a) => a.name),
+      }));
+      const meta: ExportConversation = {
+        title: conv.title,
+        updatedAt: conv.updated_at,
+        modelId: conv.modelId,
+      };
+      const markdown = conversationToMarkdown(meta, messages);
+
+      if (format === 'md') {
+        // text/markdown rather than text/plain so the OS offers to open the
+        // file in a Markdown-aware app rather than a plain text editor.
+        const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+        downloadBlob(blob, exportFilename(conv.title, 'md'));
+        toast.success('Exported as Markdown');
+      } else {
+        const built = await generateFile('pdf', exportFilename(conv.title, 'pdf'), markdown);
+        if (!built.ok) throw new Error(built.error);
+        downloadBlob(built.blob, built.filename);
+        toast.success('Exported as PDF');
+      }
+    } catch (e) {
+      console.error('[chat] export failed', e);
+      // One toast for both formats: the user asked for a file and did not get
+      // one, which is the only fact they can act on — which format failed and
+      // why is console detail.
+      toast.error('Could not export this conversation');
+    }
+  };
+
+  // Body search (§8 Part F): the sidebar's lazy per-conversation fetch. A
+  // useCallback-stable adapter because the sidebar's fetch effect keys on
+  // this reference — an inline arrow would re-run the whole fetch loop on
+  // every render of this page, which is every streaming token. The messages
+  // arrive in tree order from Firestore but the search predicate is
+  // order-blind (countBodyHits scans contents), so no linearization pass
+  // here — branching means a message can appear twice in the export path's
+  // forest walk and never here.
+  const fetchConversationBodies = useCallback(
+    async (id: string): Promise<SearchableMessage[]> => {
+      const rows = await firestoreDb.getMessages(id);
+      return rows.map((m) => ({ id: m.id, content: m.content }));
+    },
+    [],
+  );
+
   const selectedModelMeta = AI_MODELS.find((model) => model.id === selectedModel) || AI_MODELS[0];
 
   return (
@@ -1951,6 +2075,9 @@ export default function Chat() {
           onNewConversation={handleNewConversation}
           onDeleteConversation={handleDeleteConversation}
           onRenameConversation={handleRenameConversation}
+          onTogglePinConversation={handleTogglePinConversation}
+          onExportConversation={handleExportConversation}
+          fetchConversationBodies={fetchConversationBodies}
           isCollapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
           selectedModel={selectedModel}

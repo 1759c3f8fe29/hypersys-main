@@ -50,7 +50,7 @@
  * nvidia/nemotron-3-super-120b-a12b returned http-404 on three consecutive probes,
  * then answered on three consecutive probes minutes later (8268ms, 6682ms, 4571ms),
  * same id and same key both times. So **NVIDIA serves 404 for transient
- * unavailability**, not only for ids it does not host. (moonshotai/kimi-k2.6, the
+ * unavailability**, not only for ids it does not host. (moonshotai/kimi-k3, the
  * id benched in 3.9 for "listed and not deployed", is very likely the same story.)
  *
  * That made 404 the *worst* status to be excluded, not the safest. A transiently
@@ -61,7 +61,9 @@
  * What the exclusion was protecting is still worth something, and is now kept
  * somewhere better. The worry was a genuinely wrong model id quietly working via a
  * backup. But every model's routes are the *same model* on different providers
- * (ModelSpec.routes enforces it, with one documented exception), so failing over is
+ * (ModelSpec.routes enforces it, with two documented exceptions: "Flyer
+ * Vision" and the default model's NIM fallback chain, both argued in
+ * providers.ts), so failing over is
  * not substituting different weights — and a genuinely unknown id 404s on every leg
  * and still fails the chain loudly. The place to catch a wrong id is
  * scripts/verify-models.mjs, which probes repeatedly over time and can therefore
