@@ -16,6 +16,7 @@ import {
   DEFAULT_MODEL_ID,
   canonicalModelId,
   supportsTools,
+  getModel,
 } from '@/lib/providers';
 import ChatMessage from '@/components/chat/ChatMessage';
 import ChatInput from '@/components/chat/ChatInput';
@@ -119,8 +120,32 @@ interface Conversation {
 // and the Mistral large/medium tiers cold-start 60-100s before the first token,
 // then stream fine. The base timeout must clear that window or those models
 // always error. Verified worst-case first-token was ~100s on 2026-07-21.
+// Added 2026-09-07: an entry whose LAST leg is a measured 144s-TTFB model
+// (deepseek-v4-flash on the default chain) can legally spend that long before
+// its first byte — the server's last-route relaxation lets it — so a fixed
+// 130s client guard would kill a healthy answer one route deep. The budget now
+// scales per model: 130s flat, plus the longest extra first-byte allowance any
+// of its non-primary routes declares (the server spends the same allowance, so
+// the client always stays ahead of the chain it is guarding). See
+// FIRST_BYTE_TIMEOUT_MS in api/llm.js for the server half of this contract.
 const REQUEST_TIMEOUT_MS = 130_000;
 const SLOW_REQUEST_TIMEOUT_MS = 130_000;
+/** Per-route extra first-byte headroom a model's chain may spend beyond the
+ *  22s cap. Last-leg entries get the whole remaining chain budget server-side,
+ *  so their allowance here is what keeps the client's guard ahead of it. */
+const FIRST_BYTE_ALLOWANCE_MS = 90_000;
+/** A model's total cold-start budget: flat base plus its declared extras. */
+function requestBudgetMs(modelId: string): number {
+  const spec = getModel(modelId);
+  if (!spec) return REQUEST_TIMEOUT_MS;
+  return (
+    REQUEST_TIMEOUT_MS +
+    Math.max(
+      0,
+      ...spec.routes.slice(1).map((r) => r.firstByteAllowanceMs ?? 0),
+    )
+  );
+}
 // How long a stream may sit silent between chunks before we treat the
 // connection as dead. Distinct from REQUEST_TIMEOUT_MS, which guards only the
 // cold-start wait (cleared on the first token). This one arms AFTER streaming
@@ -1118,7 +1143,7 @@ export default function Chat() {
 
     const timeoutMs = isImageGen
       ? SLOW_REQUEST_TIMEOUT_MS
-      : REQUEST_TIMEOUT_MS;
+      : requestBudgetMs(selectedModel);
 
     let timeoutReached = false;
     let stalledMidStream = false;

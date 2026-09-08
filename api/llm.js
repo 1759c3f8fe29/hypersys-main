@@ -37,6 +37,18 @@ const PROVIDER_ENDPOINTS = {
     byokHeader: "x-mistral-api-key",
     supportsTools: true,
   },
+  // TokenRouter: an OpenAI-compatible aggregate of hosted open models. Probed
+  // live on 2026-09-07 — the /v1/chat/completions surface streams glm-5.3-free
+  // in ~2.9s and accepts a tools payload (2.2s with tools), which is what
+  // qualifies it to carry the default model. An Anthropic /v1/messages surface
+  // also exists (1.3s in the same probe); we use the OpenAI one so the single
+  // request-shape and SSE parser in this file cover it with no translation.
+  tokenrouter: {
+    url: "https://api.tokenrouter.com/v1/chat/completions",
+    envKeys: ["TOKENROUTER_API_KEY", "VITE_TOKENROUTER_API_KEY"],
+    byokHeader: "x-tokenrouter-api-key",
+    supportsTools: true,
+  },
   // The keyless final fallback, and — since api/pollinations.js was deleted — the
   // only way into Pollinations on this surface.
   //
@@ -135,10 +147,16 @@ const BACKOFF_MS = [600, 1500];
 // CHAIN_DEADLINE_MS above ~55s therefore does nothing until maxDuration goes up
 // with it (Pro allows 300).
 //
+// 2026-09-07: the pin went up with this change — 60 → 200 — because the new
+// default model's LAST leg (deepseek-v4-flash, measured 144s streamed bare
+// TTFB) is unreachable inside 50s. 200 is the Hobby ceiling per Vercel's
+// Fluid-compute docs as of this change; if a deploy rejects it, the plan is
+// not on Fluid compute and the pin must come back down with CHAIN_DEADLINE_MS.
+//
 // This bounds the *whole* invocation including streaming, so a very long answer
 // can still be cut off by the platform. That is a plan limit, not something this
 // file can fix.
-const CHAIN_DEADLINE_MS = 50_000;
+const CHAIN_DEADLINE_MS = 190_000;
 export { CHAIN_DEADLINE_MS };
 
 // Per-attempt cap on time-to-first-byte, applied only when another route is left

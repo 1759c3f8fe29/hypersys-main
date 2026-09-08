@@ -25,7 +25,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  const requestedModel = model || "mistral-large-latest";
+  const requestedModel = model || "mistral-large-2512";
 
   // Attempt Mistral API if key is available
   if (key) {

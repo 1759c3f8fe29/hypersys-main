@@ -43,7 +43,7 @@ const flag = (name, fallback) => {
 };
 
 const providerName = flag("provider", "mistral");
-const modelId = flag("model", "mistral-large-latest");
+const modelId = flag("model", "mistral-large-2512");
 
 const provider = PROVIDERS.find((p) => p.id === providerName);
 if (!provider) {

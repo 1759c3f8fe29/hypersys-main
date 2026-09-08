@@ -2820,7 +2820,8 @@ Landing order (parts removed from the body once they work):
 2. **Part 2 catalogue** — single source of truth in `providers.ts`; sidebar derives from `MODELS`; silent aliases killed; `getNvidiaId` returns `undefined` on unknown ids.
 3. **Part 3 tool loop** — `src/lib/agent.ts` (`MAX_STEPS`, abort, `{ok:false}` results, parallel-within-step) behind `AGENT_TOOLS_ENABLED`; `src/lib/tools/{web-search,generate-image,create-file}.ts`; `generateRoutedResponse` exported with tools; fragmented tool-call deltas reassembled.
 4. **Part 4 system prompt** — `src/lib/prompts.ts` with `buildFlyerSystemPrompt`, `buildFlyerThinkingPrompt`, `buildVisionSystemPrompt`, `buildDeepThinkDirective`, and ready `memories`/`custom_instructions` slots. Fidelity choice: same structure as the reference, real tools only.
-5. **Model purge** — Gemini + DeepSeek removed everywhere; default is `mistral-large-latest` named "Flyer"; legacy ids resolve through `LEGACY_MODEL_IDS`.
+5. **Model purge** — Gemini + DeepSeek removed everywhere; default is `mistral-large-2512
+` named "Flyer"; legacy ids resolve through `LEGACY_MODEL_IDS`.
 6. **3.6 verify-models image check** — the script classifies routes by `kind` and probes image ids live, which established that NVIDIA hosts no text-to-image model. `14 verified, 0 missing, 4 unchecked`. Stale `pixtral-12b` → `mistral/pixtral-12b-2409` legacy entry removed.
 7. **3.7 delete `functions/`** — dead third backend and cross-provider key leak gone; Vercel is the only backend surface.
 8. **3.8 model additions** — `glm-5.2` added (NVIDIA route, `isReasoning`, hosted but unresponsive at probe time); `minimax-m3` confirmed already present and live (200 in 13s). Established the Downloadable-vs-Free-Endpoint rule that explains which build.nvidia.com models are callable: `stable-diffusion-3.5-large`, `nemotron-ocr-v2`, and `qwen-image-edit` are Downloadable-only and therefore not reachable on the hosted API. Live hosted OCR is `nvidia/nemotron-parse`. Pollinations' `model` param proven a no-op by fixed-seed byte comparison.
@@ -3605,3 +3606,49 @@ The gates.mjs wrapper itself could not be invoked this session (the sandbox clas
 on every `node scripts/…` form), so the four gates were run individually and all passed — the
 one deviation from the brief's "gates via gates.mjs" norm, recorded here rather than papered over.
 New memories: [[flyer-two-agent-failures-then-red-first]], [[sidebar-body-cache-must-hold-messages-not-counts]].
+
+
+### 43. The default model got a faster default — and a dead weight was measured off the island
+
+The user's complaint was precise: "the same model responds within a few seconds on the DeepSeek
+app." The streamed-TTFB probes proved their instinct right, but not in the direction it pointed —
+NVIDIA NIM serves `deepseek-v4-flash-0731` with a 144s time-to-first-byte (HTTP 200, healthy,
+just glacial), and with a tools payload it wedged past 300s on five consecutive probes, one in
+the exact production five-tool shape. The DeepSeek app is fast because it is not this endpoint.
+Speed here had to come from somewhere else, so the user supplied it: a TokenRouter key and
+`z-ai/glm-5.3-free`, measured at 2.9s bare / 2.2s with tools. The default chain is now
+glm-5.3-free → `open-mistral-nemo` (user-directed second) → flash LAST. "Last" is load-bearing:
+only the last route gets the whole remaining chain budget, and 144s of it needs a bigger budget —
+CHAIN_DEADLINE_MS 50s → 190s, vercel.json `maxDuration` 60 → 200, and a new
+`ModelRoute.firstByteAllowanceMs` so Chat.tsx can size the client's REQUEST_TIMEOUT_MS to stay
+ahead of the server chain it is guarding. The gpt-oss-120b leg measured 410 Gone on 2026-09-07
+and was dropped from the chain — dead weight that FAILOVER_STATUSES would skip anyway, but
+skipping costs nothing only if you know it is dead; now the catalogue records why. The
+alias-guard test was re-pinned to the new order (exact arrays, medal order is the promise).
+gpt-oss-120b stays selectable as its own entry. 814/814 tests, 56/56 files, typecheck clean,
+production build clean.
+
+Also this unit: a crashed background agent (the model_not_found 404 from entry 42's first agent,
+on `me/z-ai/glm-5.3-free`) had left unterminated string literals — a newline inside
+`"mistral-large-2512↵"` — across seven files: providers.ts, providers.test.ts, conversation-export.test.ts,
+api/mistral.js, vite.config.ts, and three scripts. Six of the seven were inert (the 70-line chain
+test still passed because the corrupted line was in an assertion it never ran... it was the 15th
+test that failed, honest at last); vite.config.ts's was live — the dev-api-router suite could not
+even load its config, esbuild refusing the unterminated literal. All seven repaired, gate re-run
+green. New memory: [[flyer-default-chain-glm53-first]].
+
+
+### 44. "Flyer" became the default model's picker name, which is what the naming rule said it was all along
+
+One-line change on the user's direction, but it lands a naming story the catalogue had been
+telling in comments since the alias-guard was written: the default entry (id `glm-5.3-free`,
+unchanged — ids are the stable key for stored selections) now shows `label: "Flyer"` in the
+picker instead of "GLM 5.3 Free". The alias-guard test's rationale — "'Flyer' names the default
+experience, not weights, so a fallback leg answering under its name is insurance, not
+misattribution" — is now literally the picker's view: the user picks "Flyer" and any leg of
+GLM 5.3 → Mistral Nemo → DeepSeek Flash may answer, which is the documented promise. The
+description was rewritten to carry the weights ("GLM 5.3 reasoning with tools, backed by a
+Mistral and DeepSeek fallback chain") so the picker row itself discloses what answers. No
+test asserted the old label; the sidebar picker is a projection of ModelSpec so the rename
+propagated without touching ChatSidebar. Providers 15/15, typecheck clean, production build
+clean.

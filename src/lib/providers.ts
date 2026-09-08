@@ -26,7 +26,7 @@
 // import ships three sets of integers to the browser and nothing else.
 import { FAILOVER_STATUSES } from "../../api/_failover.js";
 
-export type ProviderId = "nvidia" | "mistral" | "pollinations";
+export type ProviderId = "nvidia" | "mistral" | "pollinations" | "tokenrouter";
 
 export interface ProviderMeta {
   id: ProviderId;
@@ -75,6 +75,16 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
     supportsVision: true,
     freeTier: "Free experimentation tier on La Plateforme.",
   },
+  tokenrouter: {
+    id: "tokenrouter",
+    label: "TokenRouter",
+    baseUrl: "https://api.tokenrouter.com/v1/chat/completions",
+    envKey: "TOKENROUTER_API_KEY",
+    byokHeader: "x-tokenrouter-api-key",
+    supportsTools: true,
+    supportsVision: false,
+    freeTier: "Hosted open models (glm-5.3-free). Both OpenAI and Anthropic surfaces.",
+  },
   pollinations: {
     id: "pollinations",
     label: "Pollinations",
@@ -87,7 +97,12 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
   },
 };
 
-export const PROVIDER_ORDER: ProviderId[] = ["nvidia", "mistral", "pollinations"];
+export const PROVIDER_ORDER: ProviderId[] = [
+  "nvidia",
+  "mistral",
+  "tokenrouter",
+  "pollinations",
+];
 
 
 // ---------------------------------------------------------------------------
@@ -98,6 +113,16 @@ export interface ModelRoute {
   provider: ProviderId;
   /** The exact model id this provider expects. */
   modelId: string;
+  /**
+   * Extra time-to-first-byte headroom this route is known to need beyond the
+   * router's per-attempt cap (FIRST_BYTE_TIMEOUT_MS in api/llm.js). The router
+   * already gives a *last* route the whole remaining chain budget, so this
+   * field exists for the client: Chat.tsx adds the largest declared allowance
+   * on any non-primary route to REQUEST_TIMEOUT_MS so its abort never fires
+   * while a healthy slow leg is still answering. Declare it only from a
+   * measured figure (see the default model's flash leg), never a guess.
+   */
+  firstByteAllowanceMs?: number;
 }
 
 export interface ModelSpec {
@@ -170,17 +195,17 @@ export interface ModelSpec {
 // catalogues churn, and an unverified id fails at request time.
 export const MODELS: ModelSpec[] = [
   // --- Chat / reasoning ----------------------------------------------------
-  // The default. DeepSeek V4 Flash 0731 — named "Flyer" — is the model a new
-  // conversation starts on. Promoted to default in 3.12 on live probes:
-  // non-streamed, a cold probe took 150.7s and a warm one 107.5s to the full
-  // answer (see scripts/verify-models.mjs for re-running). Those are
-  // whole-answer figures, not first-byte ones — on the streamed route the
-  // router actually uses, the capped quantity is time-to-first-byte (22s in
-  // api/llm.js), and that figure has not been measured: the NVIDIA key 401'd
-  // on 2026-09-06 before the probe could run. Tool-capable and
-  // reasoning-capable. Vision is NOT supported, so image turns still route
-  // through the vision engine (see VISION_ENGINE_MODEL in ai.ts) rather than
-  // this entry.
+  // The former default (3.12 → 2026-09-07; the default is now glm-5.3-free,
+  // above). DeepSeek V4 Flash 0731 — the model "Flyer" originally named.
+  // TTFB, measured 2026-09-07 after the quote-strip bug fix unblocked
+  // probing: 144s streamed bare (status 200, first byte at 144s). With a
+  // tools payload it never produced a first byte inside 300s on five
+  // consecutive probes — one with the exact production five-tool shape —
+  // which is why it cannot be a reliable FIRST leg of any chain (and why it
+  // sits last, where the server's isLastRoute relaxation gives it room).
+  // Tool-capable and reasoning-capable. Vision is NOT supported, so image
+  // turns still route through the vision engine (see VISION_ENGINE_MODEL in
+  // ai.ts) rather than this entry.
   //
   // FALLBACK CHAIN, added 2026-09-06 on the user's explicit direction: a
   // three-leg, all-NIM chain in gold/silver/bronze order —
@@ -200,36 +225,114 @@ export const MODELS: ModelSpec[] = [
   //
   // What we honestly do NOT know, and the reader must not assume otherwise:
   //
-  // 1. NO latency or capability measurements exist for ANY leg of this chain.
-  //    The key 401'd on 2026-09-06 (see the TTFB note above); probe scripts
-  //    cannot run. supportsTools/isReasoning/contextWindow describe the PRIMARY
-  //    route only — whether Lightning or GPT-OSS accept the tools payload
-  //    this entry sends (supportsTools: true, so a tools-capable turn ships
-  //    `tools` on every leg) is UNVERIFIED. A leg that rejects the tools
-  //    payload returns 400, and 400 is NOT in FAILOVER_STATUSES — the chain
-  //    would hard-fail rather than degrade. That is a real risk carried
-  //    knowingly, because the user's instruction was to write this chain now
-  //    with the ids as named; the mitigation when the key returns is to probe
-  //    each leg with a tools payload before trusting the chain end-to-end.
+  // 1. UPDATE 2026-09-07, with the key working again: the legs were probed with
+  //    tools payloads (the shape every tools-capable turn ships). Result: flash
+  //    wedged (>300s, 5/5), Lightning-30B answered 200 at ~4.6s with the exact
+  //    production five-tool shape, and gpt-oss-120b 410'd. So the *tools*
+  //    risk named here is retired for Lightning and confirmed for flash — but
+  //    this entry still says supportsTools: true, so a tools turn falling to
+  //    the flash leg still risks the wedge. A leg that rejects the tools
+  //    payload outright returns 400, and 400 is NOT in FAILOVER_STATUSES —
+  //    the chain would hard-fail rather than degrade. The remaining gap: bare
+  //    latency for Lightning/GPT-OSS on the current key is still unmeasured.
   // 2. `openai/gpt-oss-120b` is NOT in the free-endpoint /v1/models listing
   //    probed 2026-09-06 (only openai/gpt-oss-20b is; the 120B is
   //    downloadable-only on build.nvidia.com — the same split the deepseek-v4
   //    pair showed before both endpoints went live). The user named the 120B
   //    specifically, so the id is written as named — NOT silently swapped for
-  //    the listed 20B. Consequences if it 404s: 404 IS in FAILOVER_STATUSES,
-  //    so a dead last leg is skipped and the chain degrades gracefully to its
-  //    first two legs. The id stays until the user says otherwise.
+  //    the listed 20B. UPDATE 2026-09-07: the 120B leg 410'd on a live probe
+  //    (Gone) — it is dead weight in this chain today. 410 is in
+  //    FAILOVER_STATUSES, so it is skipped rather than fatal; the id stays as
+  //    named until the user says otherwise.
   // 3. Both live legs-1-and-2 measurements are stale by rotation: Lightning's
   //    entry cites 752ms TTFB from 3.11 probes, but those ran on the key that
   //    died — treat them as evidence the endpoint serves the id, not as
-  //    current latency. Re-probe both legs with
-  //    `node scripts/probe-id.mjs <id> --times 5` when a working key returns,
-  //    and re-measure the never-measured Flash TTFB the comment above flags.
+  //    current latency. (2026-09-07: the tools-shape probe above put Lightning
+  //    at ~4.6s WITH the production tools payload, which supersedes the 752ms
+  //    figure for any tools turn but is a single sample, not a re-measurement
+  //    of bare latency.) The Flash TTFB the old comment flagged as
+  //    never-measured IS now measured: 144s bare, >300s with tools.
+  // The default, since 2026-09-07. GLM 5.3 (free tier) via TokenRouter — the
+  // model a new conversation starts on, promoted on the user's explicit
+  // direction after the Flash TTFB measurements came in: Flash answers bare
+  // (200 at 144s streamed TTFB) but wedges with a tools payload (five probes,
+  // five >300s aborts — one with the exact production five-tool shapes), so it
+  // could not be a reliable *first* leg. GLM 5.3 measured 2.9s bare / 2.2s
+  // with tools on the same day's probes, which is the "first message fast"
+  // property the user asked the default to have.
+  //
+  // It streams `reasoning_content` deltas ahead of `content` — the same
+  // reasoning-stream shape ai.ts already parses for kimi/nemotron — so the
+  // thinking tier renders its reasoning live. isReasoning: true reflects that
+  // observed behaviour, not a vendor spec sheet.
+  //
+  // FALLBACK CHAIN — the user's order, not ours: GLM → Mistral → Flash, fast
+  // legs first. Two measured facts drive the shape:
+  //   1. The Mistral free tier 403s mistral-large-2512 ("tier_not"), and
+  //      mistral-small/magistral/medium answered 429 rate_limited on the same
+  //      key; open-mistral-nemo answered 200 at 466ms WITH a tools payload.
+  //      So nemo is the leg that actually serves both the tier and the tools
+  //      this entry ships every turn. If Mistral's larger ids ever clear for
+  //      this tier, promoting this leg is a one-line change.
+  //   2. Flash's 144s bare TTFB exceeds the router's FIRST_BYTE_TIMEOUT_MS cap
+  //      — but that cap only applies while another route remains. LAST leg
+  //      gets the whole remaining chain budget, so placing Flash last is what
+  //      makes it usable at all. Any earlier position kills the leg and the
+  //      chain keeps walking.
+  //
+  // This entry is the third documented exception to the one-source rule in
+  // ModelSpec.routes (same reasoning as the first two: "Flyer" names a
+  // service — the default experience — not a set of weights, so different
+  // weights answering under it as insurance is not misattribution).
   {
-    id: "deepseek-v4-flash-0731",
+    id: "glm-5.3-free",
+    // The picker name is "Flyer" (user-directed, 2026-09-07) — the service
+    // name for the default chat experience, per the naming rule the
+    // alias-guard test documents: a name that promises the default experience
+    // may answer from any leg of its chain. The id stays glm-5.3-free (the
+    // stable key for stored selections), so nothing breaks for users who
+    // already have it selected.
     label: "Flyer",
     shortLabel: "Flyer",
-    description: "The default Flyer model. Fast reasoning with tools.",
+    description: "The default model. GLM 5.3 reasoning with tools, backed by a Mistral and DeepSeek fallback chain.",
+    routes: [
+      { provider: "tokenrouter", modelId: "z-ai/glm-5.3-free" },
+      { provider: "mistral", modelId: "open-mistral-nemo" },
+      {
+        provider: "nvidia",
+        modelId: "deepseek-ai/deepseek-v4-flash-0731",
+        // Measured 2026-09-07: 144s streamed bare TTFB on this key. The client
+        // adds this to its budget for this model so the guard clears it.
+        firstByteAllowanceMs: 90_000,
+      },
+    ],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "🪽",
+    kind: "Chat",
+    featured: true,
+  },
+  {
+    id: "deepseek-v4-flash-0731",
+    label: "DeepSeek V4 Flash",
+    shortLabel: "DS V4 Flash",
+    description: "DeepSeek's compact reasoning model.",
+    // The previous default (3.12 → 2026-09-07), demoted but kept selectable —
+    // and kept in the new default's chain as its last leg. Measured
+    // 2026-09-07: bare streamed TTFB 144s (200); with a tools payload it
+    // wedged >300s on five consecutive probes. See the default entry above
+    // for what that means for how it can be positioned.
+    //
+    // PICKER-ENTRY REALITY, so nobody is surprised by which weights answer:
+    // as the PRIMARY route of THIS entry, flash is still cut at 22s
+    // (FIRST_BYTE_TIMEOUT_MS — it is not the last route here), so a turn on
+    // this entry in practice fails over to the Lightning leg and Lightning
+    // answers under the Flash name. That is the honest cost of keeping the
+    // entry selectable with flash first; the alternative (demoting flash in
+    // its own entry) would misname the entry the user picked.
     routes: [
       { provider: "nvidia", modelId: "deepseek-ai/deepseek-v4-flash-0731" },
       { provider: "nvidia", modelId: "nvidia/nemotron-3.5-lightning-30b-a3b" },
@@ -268,7 +371,7 @@ export const MODELS: ModelSpec[] = [
     id: "mistral-large",
     label: "Mistral Large",
     description: "Strong all-rounder that reads images and uses tools.",
-    routes: [{ provider: "mistral", modelId: "mistral-large-latest" }],
+    routes: [{ provider: "mistral", modelId: "mistral-large-2512" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
     supportsVision: true,
@@ -785,7 +888,10 @@ export function supportsTools(id: string): boolean {
 export const UTILITY_MODEL_ID = "fast-small";
 
 // The model a new conversation starts on. Must be a live id in MODELS.
-export const DEFAULT_MODEL_ID = "deepseek-v4-flash-0731";
+// glm-5.3-free since 2026-09-07 (user-directed; see its catalogue entry). The
+// previous default, deepseek-v4-flash-0731, remains selectable and is the
+// last leg of this model's chain.
+export const DEFAULT_MODEL_ID = "glm-5.3-free";
 
 /**
  * Walked in order by the image executor when a generation fails.

@@ -470,7 +470,7 @@ async function proxyMistral(
   }
 
   const { messages, model, temperature, top_p, max_tokens } = body as ChatRequestBody;
-  const requestedModel = model || "mistral-large-latest";
+  const requestedModel = model || "mistral-large-2512";
 
   // Serve exactly the model that was asked for — mirrors api/mistral.js. Never
   // re-route to another provider, which would misattribute the reply.

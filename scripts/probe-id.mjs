@@ -104,7 +104,7 @@ const FIRST_BYTE_TIMEOUT_MS = 22_000;
 /**
  * Which provider serves an id, inferred from the id itself.
  *
- * Mistral's ids are bare (`mistral-large-latest`); every NVIDIA id in the
+ * Mistral's ids are bare (`mistral-large-2512`); every NVIDIA id in the
  * catalogue carries a vendor prefix (`nvidia/`, `z-ai/`, `moonshotai/`). That is
  * a heuristic, not a rule the providers promise, so `--provider` overrides it.
  */

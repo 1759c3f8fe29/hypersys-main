@@ -25,7 +25,7 @@ import {
 const CONV: ExportConversation = {
   title: "Trip to Rome",
   updatedAt: "2026-09-04T12:34:56.789Z",
-  modelId: "mistral-large-latest",
+  modelId: "mistral-large-2512",
 };
 
 const user: ExportMessage = {

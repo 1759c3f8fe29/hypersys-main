@@ -104,21 +104,24 @@ describe("model catalogue", () => {
     expect(tripped, "seeded alias catalogue must trip the primary-route guard").toBe(true);
   });
 
-  // The default model's chain, pinned on 2026-09-06 when the user directed a
-  // three-NIM fallback in gold/silver/bronze order. Order is the promise here —
-  // the user named which model answers first — so the assertion is an exact
-  // array, not a set: a permutation would pass a membership check and silently
-  // re-order the answer every request walks.
-  it("walks the default model's fallback chain in the user's medal order", () => {
+  // The default model's chain, re-pinned 2026-09-07: glm-5.3-free first (fast
+  // first message — 2.9s bare / 2.2s with tools, measured), Mistral Nemo second
+  // (user direction), flash LAST (144s bare TTFB, wedges with tools — only the
+  // last position, with its isLastRoute budget relaxation, can carry it). Order
+  // is the promise here — the user named which model answers first — so the
+  // assertion is an exact array, not a set.
+  it("walks the default model's fallback chain in the user's order", () => {
     const spec = getModel(DEFAULT_MODEL_ID)!;
     expect(spec.routes.map((r) => r.modelId)).toEqual([
+      "z-ai/glm-5.3-free",
+      "open-mistral-nemo",
       "deepseek-ai/deepseek-v4-flash-0731",
-      "nvidia/nemotron-3.5-lightning-30b-a3b",
-      "openai/gpt-oss-120b",
     ]);
-    // All legs on NIM by the same instruction — a Mistral leg smuggled in here
-    // would re-open the cross-provider duplication the header rule bans.
-    expect(spec.routes.map((r) => r.provider)).toEqual(["nvidia", "nvidia", "nvidia"]);
+    expect(spec.routes.map((r) => r.provider)).toEqual([
+      "tokenrouter",
+      "mistral",
+      "nvidia",
+    ]);
   });
 
   it("gives every model the presentation fields the picker needs", () => {
@@ -185,7 +188,7 @@ describe("getModel", () => {
   // not in the catalogue resolves to nothing, by design. This pins that no
   // alias-layer resurrection slips back in under a different name.
   it("does not resolve ids from the removed legacy alias layer", () => {
-    expect(getModel("mistral-large-latest")).toBeUndefined();
+    expect(getModel("mistral-large-2512")).toBeUndefined();
     expect(getModel("Flyer AI")).toBeUndefined();
     expect(getModel("pixtral-12b")).toBeUndefined();
   });

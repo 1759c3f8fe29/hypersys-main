@@ -34,7 +34,7 @@ const build = args.includes("--vision")
     ? buildFlyerThinkingPrompt
     : buildFlyerSystemPrompt;
 const full = build({
-  modelName: "mistral-large-latest",
+  modelName: "mistral-large-2512",
   currentDate: "Saturday, August 22, 2026",
   toolsAvailable: args.includes("--tools"),
 });
