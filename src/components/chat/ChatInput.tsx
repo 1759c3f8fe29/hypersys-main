@@ -55,7 +55,7 @@ export default function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
-  
+
   const { start, stop, isListening, isSupported } = useSpeechToText({
     onResult: (text) => {
       setMessage((prev) => (prev ? `${prev} ${text}` : text));
@@ -227,6 +227,23 @@ export default function ChatInput({
   const canSend = (!!message.trim() || selectedFiles.length > 0) && !isLoading && !disabled;
   const isImageFile = (file: File) => file.type.startsWith('image/');
 
+  // The contract state. The composer is a one-line pill while it holds nothing —
+  // the reference shape: attach, a single line of text, the mode toggle, mic and
+  // send all sharing one baseline — and opens into a panel only once there is
+  // something to give room to: a draft (which may grow to the 120px textarea cap),
+  // an attachment preview row, or a live dictation session.
+  //
+  // Focus is deliberately NOT part of this condition. An empty focused composer is
+  // exactly the state the pill shape was designed for — caret in, controls inline,
+  // still one tight line — and keying the expansion on focus would pop the bar open
+  // under the user's thumb on every tap, which is the opposite of contracting.
+  const hasDraft = message.trim().length > 0 || selectedFiles.length > 0;
+  const isContracted = !hasDraft && !isRecording && !isFocused;
+  // One radius expression shared by the hairline, the shell and the clipped
+  // background wrapper so the three layers that draw the border never disagree
+  // mid-transition.
+  const shellRadius = isContracted ? 'rounded-full' : 'rounded-2xl sm:rounded-3xl';
+
   // No pb-* on the wrapper below: .safe-area-inset-bottom supplies it via
   // calc(0.75rem + env(safe-area-inset-bottom)) so the composer clears the
   // home indicator instead of sitting under it.
@@ -274,7 +291,8 @@ export default function ChatInput({
           <div
             aria-hidden
             className={cn(
-              'pointer-events-none absolute -inset-px rounded-2xl sm:rounded-3xl transition-all duration-150',
+              'pointer-events-none absolute -inset-px transition-all duration-200',
+              shellRadius,
               isRecording
                 ? 'bg-destructive/60 shadow-[0_0_0_3px_hsl(var(--destructive)/0.15)]'
                 : isFocused
@@ -288,8 +306,8 @@ export default function ChatInput({
               cuts off every item except the bottom-most one. The background
               layers get their own clipped wrapper instead so the rounded corners
               still mask the gradient and blur. */}
-          <div className="relative liquid-composer rounded-2xl sm:rounded-3xl">
-            <div className="absolute inset-0 rounded-2xl sm:rounded-3xl overflow-hidden">
+          <div className={cn('relative liquid-composer transition-[border-radius] duration-200', shellRadius)}>
+            <div className={cn('absolute inset-0 overflow-hidden', shellRadius)}>
               {/* Glass background */}
               <div className={`
                 absolute inset-0 transition-all duration-500
@@ -304,16 +322,16 @@ export default function ChatInput({
             </div>
 
             {/* Content */}
-            <div className="relative px-2 py-1.5 sm:px-2.5 space-y-1">
+            <div className="relative px-1.5 py-1 sm:px-2 sm:py-1.5">
               {previews.length > 0 && (
-                <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin">
+                <div className="flex gap-2 overflow-x-auto pb-1 pt-1 px-1 scrollbar-thin">
                   {previews.map(({ file, url }) => {
                     const fileKey = `${file.name}-${file.size}`;
 
                     return (
                       <div key={fileKey} className="group/file relative w-14 h-14 sm:w-16 sm:h-16 rounded-xl overflow-hidden border border-primary/20 bg-background/50 flex-shrink-0 shadow-md transition-transform hover:scale-[1.03] hover:border-primary/50 hover:shadow-primary/20">
                         <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent opacity-0 group-hover/file:opacity-100 transition-opacity z-10 pointer-events-none" />
-                        
+
                         {isImageFile(file) ? (
                           <img src={url} alt={file.name} className="w-full h-full object-cover relative z-0" loading="lazy" />
                         ) : (
@@ -366,55 +384,20 @@ export default function ChatInput({
                 className="hidden"
               />
 
-              {/* Row 1: the textarea spans the full width, ChatGPT-style. */}
-              <textarea
-                ref={textareaRef}
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onFocus={() => setIsFocused(true)}
-                onBlur={() => setIsFocused(false)}
-                placeholder={
-                  isRecording
-                    ? "🎤 Listening..."
-                    : modelKind === 'Image'
-                      ? `Describe an image for ${modelName} to create...`
-                      : modelKind === 'Vision'
-                        ? `Upload an image and ask ${modelName} about it...`
-                        : `Ask ${modelName} anything...`
-                }
-                /* Not disabled while recording. Transcription mishears words often enough
-                   that being unable to fix one until the engine releases the mic is a dead
-                   end rather than a safeguard — and it was worse than that: the mic button
-                   used to unmount as soon as dictation produced text (see the render
-                   condition below), so no control was left to release it with. The
-                   "Listening..." placeholder above is what signals the state. */
-                disabled={disabled}
-                rows={1}
-                aria-label="Message input"
-                /* Focus target for the app-wide keyboard layer (Cmd/Ctrl+L, and
-                   type-anywhere-to-focus) — see src/lib/shortcuts.ts. An attribute
-                   rather than a ref threaded down through props: the concern is
-                   "whatever is the composer on this page", the shortcut hook lives
-                   two levels up and does not otherwise know this component exists,
-                   and a data attribute says out loud that something outside is
-                   looking for this node. aria-label would have worked as a selector
-                   too, and is exactly the wrong thing to build on — it is user-
-                   facing copy and will be reworded by someone who has no reason to
-                   suspect a keyboard shortcut depends on the wording. */
-                data-flyer-composer=""
-                /* text-base (16px) on mobile is deliberate, not a style choice:
-                   iOS Safari zooms the whole viewport when a focused field's
-                   text is under 16px, and never zooms back out. sm: restores
-                   the intended 15px on larger screens. */
-                className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-1 px-1.5 max-h-[120px] scrollbar-thin text-base sm:text-[15px] leading-snug font-medium"
-                onKeyDown={handleKeyDown}
-                enterKeyHint="send"
-              />
+              {/* One row, always. The old bar stacked a full-width textarea over a
+                  second row of controls; that second row is a permanent ~44px of
+                  height the composer paid even when empty, and it is what made the
+                  bar read as a panel rather than the pill the reference shape is.
+                  Everything now shares one baseline — attach, the growing
+                  textarea, the mode toggle, mic, send — with `items-end` so the
+                  buttons stay pinned to the last text line as the draft grows
+                  instead of drifting to the vertical middle of a tall textarea.
 
-              {/* Row 2: a "+" menu holds attach/DeepThink/Search so the bar stays
-                  one line on mobile. Mic sits in the send slot until there's
-                  something to send, exactly like ChatGPT. */}
-              <div className="flex items-center gap-1.5">
+                  The "+" menu keeps Attach and Search; DeepThink moved out of it
+                  and onto the row as the inline Think chip, because a toggle that
+                  lives only inside a menu is invisible exactly when you are
+                  deciding whether to turn it on. */}
+              <div className="flex items-end gap-0.5 sm:gap-1">
                 <div className="relative flex-shrink-0" ref={plusMenuRef}>
                   <motion.button
                     type="button"
@@ -424,9 +407,9 @@ export default function ChatInput({
                     aria-expanded={plusOpen}
                     aria-haspopup="menu"
                     className={`
-                      relative w-9 h-9 rounded-full flex items-center justify-center
+                      relative w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center
                       border transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed
-                      ${plusOpen || deepThink || webSearch
+                      ${plusOpen
                         ? 'bg-primary/20 text-primary border-primary/50'
                         : 'liquid-surface text-muted-foreground/70 hover:text-foreground border-border/30 hover:border-primary/30'
                       }
@@ -462,21 +445,6 @@ export default function ChatInput({
                         <button
                           type="button"
                           role="menuitemcheckbox"
-                          aria-checked={deepThink}
-                          onClick={() => { onToggleDeepThink?.(); setPlusOpen(false); }}
-                          title="Force step-by-step extended reasoning"
-                          className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-medium transition-colors ${
-                            deepThink ? 'bg-primary/15 text-primary' : 'text-foreground/90 hover:bg-secondary/70'
-                          }`}
-                        >
-                          <Atom className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span>DeepThink</span>
-                          {deepThink && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
-                        </button>
-
-                        <button
-                          type="button"
-                          role="menuitemcheckbox"
                           aria-checked={webSearch}
                           onClick={() => { onToggleWebSearch?.(); setPlusOpen(false); }}
                           title="Always ground this answer in live web results"
@@ -493,35 +461,98 @@ export default function ChatInput({
                   </AnimatePresence>
                 </div>
 
-                {/* Active-mode chips: keep the enabled state visible once the
-                    menu is closed. Icon-only on mobile so nothing wraps. */}
-                {deepThink && (
-                  <button
-                    type="button"
-                    onClick={onToggleDeepThink}
-                    title="DeepThink enabled — click to turn off"
-                    className="flex items-center gap-1 h-7 px-2 rounded-full text-[11px] font-semibold bg-primary/20 text-primary border border-primary/50 flex-shrink-0"
-                  >
-                    <Atom className="w-[13px] h-[13px]" />
-                    <span className="hidden sm:inline">DeepThink</span>
-                  </button>
-                )}
-                {webSearch && (
-                  <button
-                    type="button"
-                    onClick={onToggleWebSearch}
-                    title="Search enabled — click to turn off"
-                    className="flex items-center gap-1 h-7 px-2 rounded-full text-[11px] font-semibold bg-primary/20 text-primary border border-primary/50 flex-shrink-0"
-                  >
-                    <Globe className="w-[13px] h-[13px]" />
-                    <span className="hidden sm:inline">Search</span>
-                  </button>
-                )}
+                {/* The growing middle. min-w-0 so a long unbroken draft can shrink
+                    the field and scroll inside it rather than pushing the send
+                    button off the row. */}
+                <div className="flex-1 min-w-0 flex items-center">
+                  <textarea
+                    ref={textareaRef}
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onFocus={() => setIsFocused(true)}
+                    onBlur={() => setIsFocused(false)}
+                    placeholder={
+                      isRecording
+                        ? "🎤 Listening..."
+                        : modelKind === 'Image'
+                          ? `Describe an image for ${modelName} to create...`
+                          : modelKind === 'Vision'
+                            ? `Upload an image and ask ${modelName} about it...`
+                            : `Ask ${modelName} anything...`
+                    }
+                    /* Not disabled while recording. Transcription mishears words often enough
+                       that being unable to fix one until the engine releases the mic is a dead
+                       end rather than a safeguard — and it was worse than that: the mic button
+                       used to unmount as soon as dictation produced text (see the render
+                       condition below), so no control was left to release it with. The
+                       "Listening..." placeholder above is what signals the state. */
+                    disabled={disabled}
+                    rows={1}
+                    aria-label="Message input"
+                    /* Focus target for the app-wide keyboard layer (Cmd/Ctrl+L, and
+                       type-anywhere-to-focus) — see src/lib/shortcuts.ts. An attribute
+                       rather than a ref threaded down through props: the concern is
+                       "whatever is the composer on this page", the shortcut hook lives
+                       two levels up and does not otherwise know this component exists,
+                       and a data attribute says out loud that something outside is
+                       looking for this node. aria-label would have worked as a selector
+                       too, and is exactly the wrong thing to build on — it is user-
+                       facing copy and will be reworded by someone who has no reason to
+                       suspect a keyboard shortcut depends on the wording. */
+                    data-flyer-composer=""
+                    /* text-base (16px) on mobile is deliberate, not a style choice:
+                       iOS Safari zooms the whole viewport when a focused field's
+                       text is under 16px, and never zooms back out. sm: restores
+                       the intended 15px on larger screens. */
+                    className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-2 px-1 sm:py-2.5 sm:px-1.5 max-h-[120px] scrollbar-thin text-base sm:text-[15px] leading-snug font-medium"
+                    onKeyDown={handleKeyDown}
+                    enterKeyHint="send"
+                  />
+                </div>
 
-                <div className="flex-1 min-w-0" />
+                {/* Trailing controls, right-hand end of the same row. */}
+                <div className="flex items-center gap-0.5 sm:gap-1 flex-shrink-0">
+                  {/* DeepThink as an inline chip rather than a menu item: the
+                      reference row carries its reasoning toggle in the open, and a
+                      toggle hidden behind "+" is undiscoverable at exactly the
+                      moment it matters — before typing. Icon-only below md so the
+                      row still fits a 360px phone with the mic and send beside it;
+                      the aria-label names it for screen readers and for the narrow
+                      case where the visible word is hidden. */}
+                  {modelKind !== 'Image' && onToggleDeepThink && (
+                    <button
+                      type="button"
+                      onClick={onToggleDeepThink}
+                      aria-label="DeepThink"
+                      aria-pressed={deepThink}
+                      title="Force step-by-step extended reasoning"
+                      className={cn(
+                        'flex items-center gap-1 h-8 sm:h-9 px-1.5 sm:px-2.5 rounded-full text-[12px] font-semibold transition-colors flex-shrink-0',
+                        deepThink
+                          ? 'bg-primary/20 text-primary border border-primary/50'
+                          : 'text-muted-foreground/70 hover:text-foreground border border-transparent hover:border-border/40',
+                      )}
+                    >
+                      <Atom className="w-[15px] h-[15px] flex-shrink-0" />
+                      <span className="hidden md:inline">Think</span>
+                    </button>
+                  )}
 
-                {/* Action buttons */}
-                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  {/* Search keeps a chip of its own once enabled, so the grounded
+                      state stays visible after the menu closes — same rule the old
+                      active-mode chips followed, now living on the row. */}
+                  {webSearch && (
+                    <button
+                      type="button"
+                      onClick={onToggleWebSearch}
+                      title="Search enabled — click to turn off"
+                      className="flex items-center gap-1 h-8 px-1.5 sm:h-9 sm:px-2.5 rounded-full text-[12px] font-semibold bg-primary/20 text-primary border border-primary/50 flex-shrink-0"
+                    >
+                      <Globe className="w-[15px] h-[15px] flex-shrink-0" />
+                      <span className="hidden md:inline">Search</span>
+                    </button>
+                  )}
+
                   {/* Voice — browser Web Speech API (live transcription). Hidden once
                       there's content to send, so send takes the slot — but NEVER while the
                       engine is live, which is the whole of `isRecording ||` below.
@@ -534,7 +565,7 @@ export default function ChatInput({
                   type="button"
                   onClick={handleVoiceClick}
                   className={`
-                    relative w-9 h-9 rounded-full flex items-center justify-center
+                    relative w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center
                     transition-all duration-300 overflow-hidden
                     ${isRecording
                       ? 'bg-destructive/20 text-destructive border border-destructive/30'
@@ -570,7 +601,7 @@ export default function ChatInput({
                         initial={{ scale: 0.8, opacity: 0 }}
                         animate={{ scale: 1, opacity: 1 }}
                         exit={{ scale: 0.8, opacity: 0 }}
-                        className="relative w-9 h-9 rounded-full flex items-center justify-center bg-destructive/20 text-destructive border border-destructive/30 hover:bg-destructive/30 transition-all duration-200"
+                        className="relative w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center bg-destructive/20 text-destructive border border-destructive/30 hover:bg-destructive/30 transition-all duration-200"
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
                         aria-label="Stop generating"
@@ -587,7 +618,7 @@ export default function ChatInput({
                         exit={{ scale: 0.8, opacity: 0 }}
                         aria-label="Send message"
                         className={`
-                          relative w-9 h-9 rounded-full flex items-center justify-center
+                          relative w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center
                           transition-all duration-150 overflow-hidden
                           ${canSend
                             ? 'bg-gradient-to-br from-primary via-primary to-accent text-primary-foreground shadow-[0_1px_3px_hsl(0_0%_0%/0.3)] border border-primary/50'
