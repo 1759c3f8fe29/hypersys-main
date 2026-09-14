@@ -284,18 +284,25 @@ const REASONING_TAGS = ["think", "thinking", "reasoning", "thought", "analysis"]
 const OPEN_TAG = new RegExp(`<\\s*(?:${REASONING_TAGS.join("|")})\\s*>`, "i");
 
 /**
- * Remove reasoning blocks from prose, keeping fenced code untouched.
+ * Split reasoning blocks OUT of a stream, rather than only deleting them.
  *
- * A tag left open means the model is still thinking, so everything after it is
- * chain-of-thought — including any fences inside it. That case therefore
- * truncates the whole remaining text rather than just the current segment;
- * otherwise a code block quoted inside the reasoning would surface as if it were
- * the answer.
+ * `stripReasoning` answers "what is the answer"; the thinking that preceded it
+ * was discarded. A thinking block in the UI needs both halves, so this is the
+ * underlying operation `stripReasoning` is now a one-line wrapper over: the
+ * same fence-aware rules, the same dangling-open-tag truncation, but the
+ * extracted chain-of-thought is returned alongside the answer instead of
+ * dropped.
+ *
+ * `reasoning` is the chain-of-thought with the tags themselves removed; when
+ * several blocks were emitted they are joined with a blank line. A dangling
+ * open tag (the streaming case — the model is still thinking) captures
+ * everything after it, so the block grows as the stream grows.
  */
-export function stripReasoning(raw: string): string {
-  if (!raw) return "";
+export function extractReasoning(raw: string): { reasoning: string; text: string } {
+  if (!raw) return { reasoning: "", text: "" };
   const segments = segmentByFence(raw);
   const kept: string[] = [];
+  const thoughts: string[] = [];
 
   for (const segment of segments) {
     if (segment.kind === "code") {
@@ -305,19 +312,39 @@ export function stripReasoning(raw: string): string {
     let prose = segment.text;
     for (const tag of REASONING_TAGS) {
       prose = prose.replace(
-        new RegExp(`<\\s*${tag}\\s*>[\\s\\S]*?<\\s*/\\s*${tag}\\s*>`, "gi"),
-        "",
+        new RegExp(`<\\s*${tag}\\s*>([\\s\\S]*?)<\\s*/\\s*${tag}\\s*>`, "gi"),
+        (_all, body: string) => {
+          thoughts.push(String(body).trim());
+          return "";
+        },
       );
     }
     const dangling = prose.search(OPEN_TAG);
     if (dangling !== -1) {
+      // A tag left open means the model is still thinking, so everything after
+      // it is chain-of-thought — including any fences inside it. Those become
+      // part of the thinking block, never of the answer.
+      thoughts.push(prose.slice(prose.match(OPEN_TAG)![0].length + dangling).trim());
       kept.push(prose.slice(0, dangling));
-      return kept.join("\n").trim();
+      return { reasoning: thoughts.filter(Boolean).join("\n\n"), text: kept.join("\n").trim() };
     }
     kept.push(prose);
   }
 
-  return kept.join("\n").trim();
+  return { reasoning: thoughts.filter(Boolean).join("\n\n"), text: kept.join("\n").trim() };
+}
+
+/**
+ * Remove reasoning blocks from prose, keeping fenced code untouched.
+ *
+ * A tag left open means the model is still thinking, so everything after it is
+ * chain-of-thought — including any fences inside it. That case therefore
+ * truncates the whole remaining text rather than just the current segment;
+ * otherwise a code block quoted inside the reasoning would surface as if it were
+ * the answer.
+ */
+export function stripReasoning(raw: string): string {
+  return extractReasoning(raw).text;
 }
 
 // ── JSON envelopes ──────────────────────────────────────────────────────────
@@ -366,6 +393,175 @@ export function unwrapJsonEnvelope(text: string): string | null {
     if (typeof value === "string" && value.trim()) return value;
   }
   return null;
+}
+
+// ── Text-form tool calls ─────────────────────────────────────────────────────
+/**
+ * Tool calls a model wrote as prose instead of structured `tool_calls` deltas.
+ *
+ * Measured 2026-09-12 on glm-5.3-free via tokenrouter: non-streamed tool passes
+ * always return a structured `tool_calls` array, but a streamed pass — the shape
+ * the app uses — intermittently emits the call as literal text with
+ * `finish_reason: "stop"`, e.g. a fenced `{"name": "web_search", "arguments":
+ * {"query": "..."}}` JSON block, or an XML tag form
+ * <web_search>{"query": "..."}</web_search>. The agent loop only sees prose,
+ * treats it as the final answer, and the user gets raw JSON where their grounded
+ * answer should be — with the search never run. The sibling case is documented
+ * in ai.ts's OCR section: the same model class streams a different grammar than
+ * it returns in one-shot mode.
+ *
+ * STRICT BY DESIGN. Every gate here exists to stop prose from converting into
+ * a tool call:
+ *   - the name must be one the caller advertised (that's the `toolNames`
+ *     argument; prose that merely mentions a tool never matches), and
+ *   - the payload must parse as an object (or be absent — `web_search` is the
+ *     only required-argument tool, so an empty call is a model error the agent
+ *     loop's "send valid JSON" result message handles).
+ *
+ * Returns `null` when nothing matched, so the caller keeps its prose answer.
+ */
+export interface TextFormToolCall {
+  name: string;
+  argumentsJson: string;
+  /**
+   * True when the call was recovered from an emission that never named a tool.
+   * The pump logs it, and nothing else reads it — the point is that a recovery
+   * this strong (structural match against the argument schema, no name in the
+   * text at all) needs its own label in any log line it reaches.
+   */
+  unnamed?: boolean;
+}
+
+/**
+ * The recovery-side view of a tool schema. This is NOT the provider-facing
+ * `ToolSchema` (src/lib/ai.ts), which gets JSON-stringified into the request
+ * payload — adding recovery metadata to that shape would ship it to providers.
+ * The pump builds these from the registry's ToolDefinitions.
+ */
+export interface RecoverySchemaInfo {
+  name: string;
+  required: string[];
+  properties: Record<string, unknown>;
+  /** See ToolDefinition.recognizeTextForm (src/lib/tools/types.ts). */
+  recognizeTextForm?(obj: Record<string, unknown>): boolean;
+}
+
+export function parseTextToolCalls(
+  text: string,
+  toolNames: string[],
+  schemas?: RecoverySchemaInfo[],
+): TextFormToolCall[] | null {
+  const known = new Set(toolNames);
+  const calls: TextFormToolCall[] = [];
+
+  const push = (name: string, argsRaw: string | undefined) => {
+    if (!known.has(name)) return false;
+    let argumentsJson = "{}";
+    if (argsRaw !== undefined && argsRaw.trim()) {
+      const parsed = parseLoose(argsRaw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+      argumentsJson = JSON.stringify(parsed);
+    }
+    calls.push({ name, argumentsJson });
+    return true;
+  };
+
+  // XML-tag form: <tool_name>{"query": "..."}</tool_name>. The observed and the
+  // documented-in-the-wild form; the tag itself names the tool, so the body is
+  // only the arguments object.
+  const xmlRe = /<([a-z_][a-z0-9_]*)>([\s\S]*?)<\/\1>/g;
+  for (const m of text.matchAll(xmlRe)) {
+    push(m[1], m[2]);
+  }
+
+  // Fenced or bare JSON call form. The `arguments` object is matched
+  // non-greedily and re-validated by parseLoose above, so a `{` inside a string
+  // value cannot end the capture early: the loop below advances until the
+  // brace-balanced body parses. Fences are not required — the observed GLM form
+  // was fenced, but a bare trailing {"name": ...} line is accepted too.
+  const jsonCallRe =
+    /\{\s*"name"\s*:\s*"([a-z_][a-z0-9_]*)"\s*,\s*"arguments"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
+  for (const m of text.matchAll(jsonCallRe)) {
+    push(m[1], m[2]);
+  }
+
+  // Parenthesised call form: `web_search({"query": "..."})` — the shape small
+  // models emit when imitating code. Args optional: `web_search()` is a call
+  // with no arguments, which push() records as "{}" so the executor's
+  // "arguments were not valid JSON" result message (not a crash) handles it.
+  const parenCallRe = /`([a-z_][a-z0-9_]*)\s*\(\s*(\{[\s\S]*?\})?\s*\)`/g;
+  for (const m of text.matchAll(parenCallRe)) {
+    push(m[1], m[2]);
+  }
+
+  // Bare-arguments form — the emission this function existed without knowing
+  // about: a JSON object with no tool name anywhere in the text, preceded by a
+  // one-line narration announcing the action. Observed 2026-09-13 on
+  // glm-5.3-free: "Creating a pptx on AI vs HI now." followed by a fenced
+  // {title, slides:[…]} — the arguments to create_file, minus the filename and
+  // format the schema requires, minus the name itself. The name matchers above
+  // cannot see it, and neither can a whole-response-only gate: the narration is
+  // real prose the model streamed, not noise to discard silently.
+  //
+  // The gate is STRUCTURAL and conservative. The candidate is the response's
+  // single JSON object — bare, fenced, or fenced after short narration — and
+  // exactly one advertised tool must claim it. "Claims" means either its schema
+  // accepts every key, or the tool supplied a domain recognizer for the content
+  // shapes its schema describes only in prose (create_file's pptx {slides:[…]}
+  // lives inside the `content` property's DESCRIPTION, not in the property
+  // list — a pure-schema matcher would reject the very emission that motivated
+  // this path). Two claimants is ambiguity, and ambiguity returns null: the
+  // prose answer stands, which is the safe failure.
+  if (!calls.length && schemas?.length) {
+    const candidate = trailingFencedOrBareObject(text);
+    if (candidate) {
+      const claims = schemas.filter(
+        (s) => schemaAcceptsKeys(s, candidate) || (s.recognizeTextForm?.(candidate) ?? false),
+      );
+      if (claims.length === 1) {
+        calls.push({ name: claims[0].name, argumentsJson: JSON.stringify(candidate), unnamed: true });
+      }
+    }
+  }
+
+  return calls.length ? calls : null;
+}
+
+/**
+ * Extract the single JSON object a reply consists of, when the reply consists
+ * of exactly one. Bare trailing text or a single fenced block — never a JSON
+ * fragment embedded in larger prose, which is how a passing mention of
+ * {"query": …} avoids becoming a web_search call.
+ *
+ * Returns the parsed object, or null when the text is not that shape.
+ */
+function trailingFencedOrBareObject(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  // A single fenced block, optionally preceded by short narration (the one
+  // line the model streamed while opening the call — "Creating a pptx on AI
+  // vs HI now." was the observed prefix). Narration is capped at 200 chars:
+  // the genuine prefix is a sentence, and a longer lead-in means the object
+  // is part of a real answer, not a call announcement.
+  const m = trimmed.match(/^(?:[^\n`]{0,200}\n)?`{3,}(?:json)?[ \t]*\n([\s\S]*?)\n?`{3,}$/);
+  const body = m ? m[1].trim() : trimmed;
+  if (!body.startsWith("{") || !body.endsWith("}")) return null;
+  const parsed = parseLoose(body);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * Does a tool's argument schema accept every key this object carries?
+ * Key-by-key acceptance, not best-effort scoring — the emission carries no
+ * name, so the only honest evidence is structural, and partial matching is
+ * how slide JSON becomes a spurious edit_file call.
+ */
+function schemaAcceptsKeys(
+  schema: { required: string[]; properties: Record<string, unknown> },
+  obj: Record<string, unknown>,
+): boolean {
+  const accepted = new Set([...schema.required, ...Object.keys(schema.properties)]);
+  return Object.keys(obj).every((k) => accepted.has(k));
 }
 
 // ── Escaped blobs ───────────────────────────────────────────────────────────

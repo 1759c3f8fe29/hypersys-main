@@ -52,14 +52,13 @@ describe("model catalogue", () => {
   // THE aliasing bug: "llama-4-maverick" and "qwen-3-next-80b" were distinct
   // picker entries that both resolved to meta/llama-3.1-70b-instruct. Two names
   // for one set of weights means at least one of them is lying about what
-  // answered. A model may have several routes — same weights on another
-  // provider, or (since 2026-09-06) a fallback leg as insurance, as on the
-  // default model's NIM chain — but two different models must never share an
-  // upstream id as each other's *primary*. A fallback leg borrowing another
-  // entry's primary answers under a service name ("Flyer" names the default
-  // experience, not weights), so it is not the lie this test exists to catch:
-  // the lie is a weights-named entry whose own first answer comes from weights
-  // wearing a different entry's name.
+  // answered. Historically this guard was narrowed to *primary* routes so the
+  // default model's fallback chain could borrow other entries' weights under
+  // the "Flyer" service name — a narrowing retired 2026-09-13 when the
+  // maintainer overruled the service-name exception ("use real model not
+  // alias"). The single-route test below is now the stronger guard; this one
+  // remains because two entries sharing a primary is still its own lie, and
+  // the seeded control below proves the matcher still has teeth.
   it("never points two models at the same upstream model id as primary", () => {
     const owner = new Map<string, string>();
     for (const model of MODELS) {
@@ -104,24 +103,52 @@ describe("model catalogue", () => {
     expect(tripped, "seeded alias catalogue must trip the primary-route guard").toBe(true);
   });
 
-  // The default model's chain, re-pinned 2026-09-07: glm-5.3-free first (fast
-  // first message — 2.9s bare / 2.2s with tools, measured), Mistral Nemo second
-  // (user direction), flash LAST (144s bare TTFB, wedges with tools — only the
-  // last position, with its isLastRoute budget relaxation, can carry it). Order
-  // is the promise here — the user named which model answers first — so the
-  // assertion is an exact array, not a set.
-  it("walks the default model's fallback chain in the user's order", () => {
+  // The default model's chain, re-pinned twice in one day (2026-09-13): the
+  // old three-leg chain (glm → mistral-medium → flash) was read out of "use
+  // real model not alias" as an order to go single-route; the maintainer
+  // corrected the reading within the hour — the complaint was mislabeled
+  // *entries*, and the default keeps its insurance. What came back is the
+  // two-leg chain: GLM 5.3 primary, flash last (flash must be last: only the
+  // final position gets the isLastRoute relaxation past the 22s first-byte
+  // cap, and its 144s cold start needs it).
+  it("keeps the default model's chain: GLM primary, flash last", () => {
     const spec = getModel(DEFAULT_MODEL_ID)!;
     expect(spec.routes.map((r) => r.modelId)).toEqual([
       "z-ai/glm-5.3-free",
-      "open-mistral-nemo",
       "deepseek-ai/deepseek-v4-flash-0731",
     ]);
-    expect(spec.routes.map((r) => r.provider)).toEqual([
-      "tokenrouter",
-      "mistral",
-      "nvidia",
-    ]);
+    expect(spec.routes.map((r) => r.provider)).toEqual(["tokenrouter", "nvidia"]);
+  });
+
+  // The mistral leg is deliberately NOT in the default chain (see the entry's
+  // comment): the medium leg 403s on the free-tier key and the nemo leg
+  // skipped tool calls. A future "restore the old three-leg chain" edit that
+  // brings mistral back would slow every failover with a leg that fails more
+  // than it serves.
+  it("does not route the default model through any Mistral leg", () => {
+    const spec = getModel(DEFAULT_MODEL_ID)!;
+    expect(spec.routes.some((r) => r.provider === "mistral")).toBe(false);
+  });
+
+  // THE ABSOLUTE RULE, re-cut 2026-09-13: an entry's PRIMARY route (leg 0) is
+  // what the picker's name promises, and no two entries may share one. But a
+  // *later* leg is insurance, not an alias — the maintainer explicitly keeps
+  // fallback chains ("keep glm, flash or other best model"). The old
+  // exactly-one-route guard misread the direction and is gone; this replaces
+  // it: primaries stay unique, and the chains this catalogue deliberately
+  // carries (Flyer default, Flyer Vision, hidden Flyer Mini) keep working.
+  it("gives every model a primary no other entry claims as its own primary", () => {
+    const owner = new Map<string, string>();
+    for (const model of MODELS) {
+      const key = `${model.routes[0].provider}:${model.routes[0].modelId}`;
+      const existing = owner.get(key);
+      expect(
+        existing ?? model.id,
+        `${key} is the primary of both "${existing}" and "${model.id}"`,
+      ).toBe(model.id);
+      owner.set(key, model.id);
+    }
+    expect(owner.size).toBe(MODELS.length);
   });
 
   it("gives every model the presentation fields the picker needs", () => {

@@ -139,11 +139,16 @@ export interface ModelSpec {
   /**
    * Where to send this model, in preference order.
    *
-   * Every route in a chain must be the SAME underlying model, just served by a
-   * different provider. Falling back to a genuinely different model would mean
-   * the user picks one thing and another answers — the failure this codebase
-   * already refuses to allow in generateChatResponse (see ai.ts). A chain of
-   * length 1 is normal and correct for a model only one provider hosts.
+   * RULE (made absolute 2026-09-13, maintainer's direction — "use real model
+   * not alias"): every entry has exactly ONE route, naming the exact model id
+   * the entry's label promises. A second route used to be allowed when it was
+   * the same weights on a different provider, or as a documented exception
+   * for service/capability names ("Flyer", "Flyer Vision"); the maintainer
+   * overruled both exceptions, so the array shape remains only because
+   * api/llm.js walks routes generically. Today every routes array in this file
+   * has length 1 — adding a second entry of ANY kind is reintroducing the
+   * alias, and the visible-failure behaviour of a dead route is the honest
+   * one: the user sees the error and picks another named model themselves.
    */
   routes: ModelRoute[];
   /** Total context window in tokens. Used by the token budgeter. */
@@ -188,8 +193,12 @@ export interface ModelSpec {
 //
 // Every NVIDIA and Mistral id below was confirmed present in the live provider
 // catalogue by `npm run verify:models`. Each model has a single source — NVIDIA,
-// Mistral, or Pollinations — never duplicated across providers, so the backend
-// that answers always matches the model the user picked.
+// Mistral, TokenRouter, or Pollinations — never duplicated across providers, so
+// the backend that answers always matches the model the user picked. Since
+// 2026-09-13 every entry is also single-ROUTE: no entry carries a fallback leg
+// of different weights under its name, whether the name is a set of weights
+// ("DeepSeek V4 Flash") or a service/capability name ("Flyer", "Flyer Vision") —
+// the maintainer overruled the old exceptions ("use real model not alias").
 //
 // Re-run `npm run verify:models` after changing anything here. Provider
 // catalogues churn, and an unverified id fails at request time.
@@ -200,58 +209,21 @@ export const MODELS: ModelSpec[] = [
   // TTFB, measured 2026-09-07 after the quote-strip bug fix unblocked
   // probing: 144s streamed bare (status 200, first byte at 144s). With a
   // tools payload it never produced a first byte inside 300s on five
-  // consecutive probes — one with the exact production five-tool shape —
-  // which is why it cannot be a reliable FIRST leg of any chain (and why it
-  // sits last, where the server's isLastRoute relaxation gives it room).
+  // consecutive probes — one with the exact production five-tool shape.
   // Tool-capable and reasoning-capable. Vision is NOT supported, so image
   // turns still route through the vision engine (see VISION_ENGINE_MODEL in
   // ai.ts) rather than this entry.
   //
-  // FALLBACK CHAIN, added 2026-09-06 on the user's explicit direction: a
-  // three-leg, all-NIM chain in gold/silver/bronze order —
-  // deepseek-v4-flash-0731 → nemotron-3.5-lightning-30b-a3b → gpt-oss-120b.
-  // The order is the user's, not ours; the comment below says why each leg is
-  // what it is, but nothing here was chosen by measurement. This entry is the
-  // second documented exception to the one-source rule in ModelSpec.routes —
-  // same reasoning as the first (see "Flyer Vision"): these are three
-  // genuinely different weights, and "Flyer" names a service ("the default
-  // chat experience"), not a set of weights, so a fallback leg answering
-  // under its name is insurance, not misattribution. "Flyer" is also a
-  // distinct model entry from "Nemotron 3.5 Lightning 30B", whose primary
-  // route is the silver leg here — the aliasing test was narrowed to guard
-  // *primary* routes for that reason (two picker entries both answered by
-  // the same weights was the original bug; a fallback leg borrowing another
-  // entry's primary is not that bug).
-  //
-  // What we honestly do NOT know, and the reader must not assume otherwise:
-  //
-  // 1. UPDATE 2026-09-07, with the key working again: the legs were probed with
-  //    tools payloads (the shape every tools-capable turn ships). Result: flash
-  //    wedged (>300s, 5/5), Lightning-30B answered 200 at ~4.6s with the exact
-  //    production five-tool shape, and gpt-oss-120b 410'd. So the *tools*
-  //    risk named here is retired for Lightning and confirmed for flash — but
-  //    this entry still says supportsTools: true, so a tools turn falling to
-  //    the flash leg still risks the wedge. A leg that rejects the tools
-  //    payload outright returns 400, and 400 is NOT in FAILOVER_STATUSES —
-  //    the chain would hard-fail rather than degrade. The remaining gap: bare
-  //    latency for Lightning/GPT-OSS on the current key is still unmeasured.
-  // 2. `openai/gpt-oss-120b` is NOT in the free-endpoint /v1/models listing
-  //    probed 2026-09-06 (only openai/gpt-oss-20b is; the 120B is
-  //    downloadable-only on build.nvidia.com — the same split the deepseek-v4
-  //    pair showed before both endpoints went live). The user named the 120B
-  //    specifically, so the id is written as named — NOT silently swapped for
-  //    the listed 20B. UPDATE 2026-09-07: the 120B leg 410'd on a live probe
-  //    (Gone) — it is dead weight in this chain today. 410 is in
-  //    FAILOVER_STATUSES, so it is skipped rather than fatal; the id stays as
-  //    named until the user says otherwise.
-  // 3. Both live legs-1-and-2 measurements are stale by rotation: Lightning's
-  //    entry cites 752ms TTFB from 3.11 probes, but those ran on the key that
-  //    died — treat them as evidence the endpoint serves the id, not as
-  //    current latency. (2026-09-07: the tools-shape probe above put Lightning
-  //    at ~4.6s WITH the production tools payload, which supersedes the 752ms
-  //    figure for any tools turn but is a single sample, not a re-measurement
-  //    of bare latency.) The Flash TTFB the old comment flagged as
-  //    never-measured IS now measured: 144s bare, >300s with tools.
+  // HISTORY — the chain this entry used to carry. It was added 2026-09-06 on
+  // the user's direction as a three-leg all-NIM chain (flash → lightning-30b
+  // → gpt-oss-120b), later re-cut as GLM → mistral-medium → flash, both times
+  // under the "service name" exception to the one-source rule. That exception
+  // was retired 2026-09-13 ("use real model not alias"): whichever weights
+  // this picker entry names are the ones that answer, and a failed route is a
+  // visible error the user can act on, not a silent swap. The probes that
+  // shaped the old chains still matter as measurements of the individual
+  // models (they are recorded on each model's own entry); they no longer
+  // justify any chain shape.
   // The default, since 2026-09-07. GLM 5.3 (free tier) via TokenRouter — the
   // model a new conversation starts on, promoted on the user's explicit
   // direction after the Flash TTFB measurements came in: Flash answers bare
@@ -266,43 +238,39 @@ export const MODELS: ModelSpec[] = [
   // thinking tier renders its reasoning live. isReasoning: true reflects that
   // observed behaviour, not a vendor spec sheet.
   //
-  // FALLBACK CHAIN — the user's order, not ours: GLM → Mistral → Flash, fast
-  // legs first. Two measured facts drive the shape:
-  //   1. The Mistral free tier 403s mistral-large-2512 ("tier_not"), and
-  //      mistral-small/magistral/medium answered 429 rate_limited on the same
-  //      key; open-mistral-nemo answered 200 at 466ms WITH a tools payload.
-  //      So nemo is the leg that actually serves both the tier and the tools
-  //      this entry ships every turn. If Mistral's larger ids ever clear for
-  //      this tier, promoting this leg is a one-line change.
-  //   2. Flash's 144s bare TTFB exceeds the router's FIRST_BYTE_TIMEOUT_MS cap
-  //      — but that cap only applies while another route remains. LAST leg
-  //      gets the whole remaining chain budget, so placing Flash last is what
-  //      makes it usable at all. Any earlier position kills the leg and the
-  //      chain keeps walking.
-  //
-  // This entry is the third documented exception to the one-source rule in
-  // ModelSpec.routes (same reasoning as the first two: "Flyer" names a
-  // service — the default experience — not a set of weights, so different
-  // weights answering under it as insurance is not misattribution).
+  // FALLBACK CHAIN — RESTORED 2026-09-13 on the maintainer's explicit
+  // direction. An earlier pass today read "use real model not alias" as an
+  // order to delete this chain and went single-route; the maintainer has now
+  // corrected that reading: the complaint was about mislabeled *entries*, not
+  // about insurance on the default. The chain is back, two legs, both named:
+  //   1. z-ai/glm-5.3-free (TokenRouter) — the default, 2.9s bare / 2.2s with
+  //      tools (measured 2026-09-07).
+  //   2. deepseek-ai/deepseek-v4-flash-0731 (NVIDIA) — 144s bare TTFB, so it
+  //      must be LAST: only the last position gets the isLastRoute relaxation
+  //      past the 22s first-byte cap. It wedges with a tools payload on this
+  //      key, but a tools turn that falls this far is better served slowly
+  //      than not at all.
+  // A mistral middle leg was considered and left out deliberately: the
+  // mistral-medium route is its own picker entry now, and the old
+  // open-mistral-nemo leg (2026-09-12) skipped tool calls on streamed tool
+  // passes — the exact failure a chain exists to absorb. flash's
+  // firstByteAllowanceMs: 90_000 below is what keeps the client's guard ahead
+  // of the 190s chain budget the server grants this entry.
   {
     id: "glm-5.3-free",
-    // The picker name is "Flyer" (user-directed, 2026-09-07) — the service
-    // name for the default chat experience, per the naming rule the
-    // alias-guard test documents: a name that promises the default experience
-    // may answer from any leg of its chain. The id stays glm-5.3-free (the
-    // stable key for stored selections), so nothing breaks for users who
-    // already have it selected.
+    // The picker name is "Flyer" (user-directed, 2026-09-07). The id stays
+    // glm-5.3-free (the stable key for stored selections), so nothing breaks
+    // for users who already have it selected.
     label: "Flyer",
     shortLabel: "Flyer",
-    description: "The default model. GLM 5.3 reasoning with tools, backed by a Mistral and DeepSeek fallback chain.",
+    description: "The default model. GLM 5.3 reasoning with tools.",
     routes: [
       { provider: "tokenrouter", modelId: "z-ai/glm-5.3-free" },
-      { provider: "mistral", modelId: "open-mistral-nemo" },
       {
         provider: "nvidia",
         modelId: "deepseek-ai/deepseek-v4-flash-0731",
-        // Measured 2026-09-07: 144s streamed bare TTFB on this key. The client
-        // adds this to its budget for this model so the guard clears it.
+        // LAST leg only — this position's server-side isLastRoute relaxation
+        // is what lets it spend the whole chain budget (144s TTFB measured).
         firstByteAllowanceMs: 90_000,
       },
     ],
@@ -320,23 +288,29 @@ export const MODELS: ModelSpec[] = [
     label: "DeepSeek V4 Flash",
     shortLabel: "DS V4 Flash",
     description: "DeepSeek's compact reasoning model.",
-    // The previous default (3.12 → 2026-09-07), demoted but kept selectable —
-    // and kept in the new default's chain as its last leg. Measured
-    // 2026-09-07: bare streamed TTFB 144s (200); with a tools payload it
-    // wedged >300s on five consecutive probes. See the default entry above
-    // for what that means for how it can be positioned.
+    // The previous default (3.12 → 2026-09-07), demoted but kept selectable.
+    // Measured 2026-09-07: bare streamed TTFB 144s (200); with a tools payload
+    // it wedged >300s on five consecutive probes.
     //
-    // PICKER-ENTRY REALITY, so nobody is surprised by which weights answer:
-    // as the PRIMARY route of THIS entry, flash is still cut at 22s
-    // (FIRST_BYTE_TIMEOUT_MS — it is not the last route here), so a turn on
-    // this entry in practice fails over to the Lightning leg and Lightning
-    // answers under the Flash name. That is the honest cost of keeping the
-    // entry selectable with flash first; the alternative (demoting flash in
-    // its own entry) would misname the entry the user picked.
+    // ITS OWN LEGS DELETED 2026-09-13 ("use real model not alias" — the
+    // Lightning and gpt-oss legs answered under the Flash name on failover),
+    // then the situation changed twice: flash stayed selectable under its own
+    // name, and it was restored as the LAST leg of the Flyer chain above.
+    // The two roles are the same weights wearing two honest hats: here it
+    // answers under its own name (and needs the 90s allowance to make it
+    // through its own 144s cold start), and there it is insurance under a
+    // service name — the exception the maintainer has always granted the
+    // default model.
     routes: [
-      { provider: "nvidia", modelId: "deepseek-ai/deepseek-v4-flash-0731" },
-      { provider: "nvidia", modelId: "nvidia/nemotron-3.5-lightning-30b-a3b" },
-      { provider: "nvidia", modelId: "openai/gpt-oss-120b" },
+      {
+        provider: "nvidia",
+        modelId: "deepseek-ai/deepseek-v4-flash-0731",
+        // Measured 2026-09-07: 144s streamed bare TTFB on this key. Single
+        // route, therefore the last route — the server gives it the whole
+        // chain budget, and the client's guard must clear the same 144s or it
+        // would abort the answer the user is waiting for.
+        firstByteAllowanceMs: 90_000,
+      },
     ],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -363,10 +337,21 @@ export const MODELS: ModelSpec[] = [
     featured: true,
   },
   // Mistral Large, the previous default, demoted from the "Flyer" name (which
-  // moved to deepseek-v4-flash-0731 above) but still selectable. Its unique
-  // selling point remains: the one flagship that is both tool- AND
-  // vision-capable on a single route, so it is the strongest entry that can
-  // read an image without a routing hop.
+  // moved to deepseek-v4-flash-0731 above). Its unique selling point remains:
+  // the one flagship that is both tool- AND vision-capable on a single route.
+  //
+  // HIDDEN 2026-09-11, two signals meeting the bar this file uses everywhere:
+  // mistral-large-2512 has left Mistral's /v1/models listing, and the chat
+  // endpoint answers 403 tier_not_allowed (code 1910) on the same key that
+  // still 200s ministral-8b — the free-tier wall this catalogue already
+  // documented for the glm chain (the catalogue entry above records it hitting
+  // large before the EOL batch). Unlike a 429 this is not capacity: no retry
+  // and no later session changes it, and unlike a 404 it is not ambiguous.
+  //
+  // Hidden rather than deleted: messages in Firestore carry this id and would
+  // lose their byline on delete — the same reason glm-5.2 is hidden. To
+  // restore: confirm the id is back in /v1/models AND a chat probe answers
+  // on the free-tier key, then drop `hidden`.
   {
     id: "mistral-large",
     label: "Mistral Large",
@@ -378,7 +363,7 @@ export const MODELS: ModelSpec[] = [
     supportsTools: true,
     emoji: "🇫🇷",
     kind: "Chat",
-    featured: true,
+    hidden: true,
   },
   {
     id: "kimi-k3",
@@ -677,23 +662,25 @@ export const MODELS: ModelSpec[] = [
     id: "nemotron-vision",
     label: "Flyer Vision",
     description: "Reads images, screenshots and diagrams.",
-    // A DELIBERATE EXCEPTION to the same-model rule in ModelSpec.routes above,
-    // documented here so it does not read as an oversight and get "fixed" by
-    // deleting the second route. It is worth deleting on a first read — the second
-    // leg is the flakier model and, because the first leg has never failed, it is
-    // never actually reached. See the insurance argument below before removing it.
+    // WAS a deliberate exception to the same-model rule in ModelSpec.routes —
+    // retired 2026-09-13 on the maintainer's explicit direction ("use real
+    // model not alias"): the maintainer does not accept the capability-name
+    // argument, so one picker entry now means one set of weights everywhere,
+    // including here. The historical probe record below is kept because it is
+    // the evidence for which leg survived (the 11B), not because the two-leg
+    // shape it describes still exists. What it measured about the old 12B/8B
+    // pair still governs nothing; what it established about orderings and
+    // probe discipline still teaches. The old first leg
+    // (nemotron-nano-12b-v2-vl) is dead anyway — 410 and delisted in the
+    // 2026-08-26 EOL batch.
     //
-    // These two ids are genuinely different weights (12B v2 VL and 8B v1 VL), not
-    // one model on two providers. The rule exists so a user who picks a model
-    // cannot be answered by different weights wearing its name; here there is no
-    // such name to misattribute. "Flyer Vision" is a capability, like flyer-free,
-    // and the description names no model — so the promise made to the user is
-    // "this reads images", which both routes keep. Every other entry in this file
-    // names its weights and must obey the rule strictly.
+    // The historical shape this entry had: two genuinely different weights
+    // (a 12B v2 VL and an 8B v1 VL, later an 11B and an omni-30B), one
+    // capability name, no model named in the description. The promise made to
+    // the user was "this reads images", which both routes kept — that was the
+    // argument for the exception, and the maintainer has overruled it.
     //
-    // The exception is load-bearing, because one of the two routes is unusable as a
-    // primary. nemotron-nano-12b-v2-vl over sixteen probes in 3.9-3.12:
-    //
+    // The historical probe record of the old 12B first leg:
     //   1722ms, timeout, ok, http-500, timeout, 3197ms,
     //   51473ms, 24981ms, 7718ms, http-500, http-500, 54826ms,
     //   timeout, timeout, http-500, http-500
@@ -701,56 +688,49 @@ export const MODELS: ModelSpec[] = [
     // Seven of sixteen answered — and three of those seven took longer than the 22s
     // api/llm.js gives a non-final route, two of them longer than the whole 50s
     // CHAIN_DEADLINE_MS. So "answers" and "answers in time" are different numbers
-    // here, and the useful one is the second: roughly four of sixteen.
-    //
-    // The last four on that list are the 3.12 additions and every one of them is a
+    // here, and the useful one is the second: roughly four of sixteen. The last
+    // four on that list are the 3.12 additions and every one of them is a
     // failure — two timeouts and two http-500s, the second 500 from a
-    // verify-models.mjs run rather than a targeted probe, so it is not one bad
-    // moment observed twice. Four more measurements have not changed the shape of
-    // the distribution; they have made the good days look more like the outliers.
+    // verify-models.mjs run rather than a targeted probe. Four more
+    // measurements did not change the shape of the distribution; they made the
+    // good days look more like the outliers.
     //
-    // The 8B has answered every probe it has ever been given (5777ms most recently).
+    // The old ordering lesson, kept because the shape recurs: the decision to
+    // keep the 12B first had been weighed against ~2.1s of retry cost, which is
+    // right for the http-500 mode (BACKOFF_MS = 600+1500) and wrong by an order
+    // of magnitude for the timeout mode — a non-final route is capped at
+    // FIRST_BYTE_TIMEOUT_MS and not retried, so a dead first leg cost the full
+    // 22 seconds. With the real distribution, 12B-first spent most requests
+    // waiting (a quarter ate 22s of nothing plus the fallback's 5.8s, and a
+    // further slice "succeeded" at 25-55s, worse than failing over would have
+    // been). That is why the faster, more reliable model went first — a rule
+    // that still applies to which single route this entry keeps.
+    // RE-PINNED 2026-09-11. Both previous legs —
+    //   nvidia/llama-3.1-nemotron-nano-vl-8b-v1 (primary, the "8B" above)
+    //   nvidia/nemotron-nano-12b-v2-vl (the "12B" insurance)
+    // — returned 410 AND left /v1/models (80 entries, neither present): the
+    // 2026-08-26 EOL batch. 410 fails over, so both were removed rather than
+    // kept as dead hops every image turn would pay for. Both replacements were
+    // probed with REAL image payloads on the same day, not text-only 200s (the
+    // nemotron-parse lesson: a text answer proves nothing about an image
+    // contract):
     //
-    // ORDER WAS SWAPPED IN 3.11, and the earlier decision to keep the 12B first was
-    // made against a wrong cost. That comment said "a bad run adds ~2.1s plus the
-    // dead attempts, which is the number to weigh" — true for the http-500 mode
-    // (api/llm.js retries a 500 twice, BACKOFF_MS = 600+1500), and wrong by an order
-    // of magnitude for the timeout mode. callProvider does not retry a timeout at
-    // all: it caps a non-final route at FIRST_BYTE_TIMEOUT_MS and returns, so a
-    // timed-out first leg costs the full **22 seconds** before the second leg is
-    // asked. The decision was weighed against 2.1s when half the observed failures
-    // cost ten times that.
+    //   meta/llama-3.2-11b-vision-instruct — 389-737ms, answered every probe,
+    //     text and image, "Red" off a 1x1 PNG. Kept as the primary.
+    //   nvidia/nemotron-3-nano-omni-30b-a3b-reasoning — 2.2-3.6s with the
+    //     same image, 4/4 spaced probes, but 503s ("Worker local total
+    //     request limit reached 515/16") when hit back-to-back — a concurrency
+    //     cap, not a verdict, and acceptable in the LAST-leg seat it holds:
+    //     it only gets traffic when the 11B is down, which is rare.
     //
-    // With the real distribution, 12B-first spends most requests waiting: a quarter
-    // of them eat 22s of nothing and then the 8B's 5.8s, and a further slice
-    // "succeed" at 25-55s, which is worse than failing over would have been. The
-    // expected dead wait exceeds the entire successful latency of the fallback.
-    // 8B-first is ~5.8s flat with no tail.
-    //
-    // WHAT THIS TRADE ACTUALLY IS, stated honestly: measured reliability bought with
-    // unmeasured quality. Nothing here has compared the two models' vision output;
-    // the 12B is newer and larger and is *presumably* better, and on its good days
-    // it is faster too (1722/3197ms). That is given up. For a *featured* capability
-    // it is still the right trade — a 25s stare at a spinner reads as a broken app,
-    // and both routes keep the promise the description makes — but it is a trade,
-    // not an upgrade.
-    //
-    // The 12B is not dead code in second position, it is insurance, and weak
-    // insurance: meta/llama-3.3-70b-instruct went from working to permanently
-    // unresponsive inside this catalogue's lifetime, so a second leg is worth
-    // having — but if the 8B ever dies, this one answers inside the budget about a
-    // third of the time. Better than a hard failure, not much better.
-    //
-    // FLIP IT BACK only on evidence of a different distribution: five consecutive
-    // clean probes *all under 22s*, which at the current in-budget rate of four in
-    // sixteen is a fluke of about 1 in 1000 — and the streak counter is at zero, not
-    // partway there, because the four most recent probes on record all failed.
-    // `node scripts/probe-id.mjs nvidia/nemotron-nano-12b-v2-vl --times 5` is that
-    // measurement, and it flags any run over 22s explicitly, because a route that
-    // answers at 51s looks green in a probe and fails over in production.
+    // The insurance leg was briefly removed (2026-09-13, an over-broad reading
+    // of "use real model not alias") and restored the same day on the
+    // maintainer's correction — they did not ask for fallbacks to go, and this
+    // entry is exactly the situation insurance exists for: one fast leg with
+    // measured reliability, one slower leg with headroom.
     routes: [
-      { provider: "nvidia", modelId: "nvidia/llama-3.1-nemotron-nano-vl-8b-v1" },
-      { provider: "nvidia", modelId: "nvidia/nemotron-nano-12b-v2-vl" },
+      { provider: "nvidia", modelId: "meta/llama-3.2-11b-vision-instruct" },
+      { provider: "nvidia", modelId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" },
     ],
     contextWindow: 128_000,
     maxOutputTokens: 4096,
@@ -766,6 +746,13 @@ export const MODELS: ModelSpec[] = [
     id: "fast-small",
     label: "Flyer Mini",
     description: "Cheapest and quickest. Used internally for utility work.",
+    // Two legs, restored 2026-09-13: the ministral-8b-latest leg was removed
+    // the same day in an over-broad reading of "use real model not alias",
+    // and the maintainer corrected that reading — they did not ask for
+    // fallbacks to go. This entry is hidden, so the chain's reader is us:
+    // title generation and the other utility calls keep working when either
+    // provider is down, and an internal insurance leg is not an alias any
+    // user reads.
     routes: [
       { provider: "nvidia", modelId: "nvidia/nvidia-nemotron-nano-9b-v2" },
       { provider: "mistral", modelId: "ministral-8b-latest" },

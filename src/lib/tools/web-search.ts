@@ -52,6 +52,39 @@ function recencyWords(days: number): string {
   return "latest";
 }
 
+/**
+ * Decode the proxy's machine reasons into words a user can act on.
+ *
+ * The reasons come from api/_search-providers.js and reach this file through
+ * the `error` field on the response. They are written for logs ("ddg_no_results",
+ * "serpapi_http_429") and land in a tool result the model is expected to relay
+ * — where "serpapi_http_402" answers nothing. Anything unrecognized passes
+ * through verbatim rather than being flattened into a wrong guess: a new
+ * reason string the model relays literally beats one silently mislabelled.
+ */
+export function explainSearchError(reason: string): string {
+  switch (reason) {
+    case "serpapi_key_missing":
+      return "the search API key is not configured";
+    case "serpapi_error":
+      return "the search API rejected the request (quota or key)";
+    case "serpapi_zero_results":
+      return "the search engine returned nothing for the query";
+    case "serpapi_fetch_failed":
+      return "the search API could not be reached";
+    case "ddg_rate_limited":
+      return "the fallback search engine is rate-limiting us";
+    case "ddg_no_results":
+      return "the fallback search engine found nothing on this";
+    case "ddg_fetch_failed":
+      return "the fallback search engine could not be reached";
+    default:
+      return reason.startsWith("serpapi_http_") || reason.startsWith("ddg_http_")
+        ? `the search service answered with an error (${reason.split("_").pop()})`
+        : reason;
+  }
+}
+
 export async function executeWebSearch(
   args: Record<string, unknown>,
   ctx: ToolContext,
@@ -72,11 +105,51 @@ export async function executeWebSearch(
   if (!search) {
     return { ok: false, error: "web_search: the search service is currently unavailable. Answer from what you know and say you could not verify it." };
   }
-  if (search.error) {
-    return { ok: false, error: `web_search: ${search.error}` };
+
+  // Results are counted BEFORE the error check, not after. The provider chain
+  // returns rows AND an error together when the primary engine died but a
+  // keyless fallback answered (api/_search-providers.js sets `degraded: true`
+  // on that tier). The old `if (search.error) return {ok:false}` ran first and
+  // threw those rows away, so the model was told "serpapi_error" on a turn
+  // that actually had results — and, having nothing else to answer with,
+  // produced a reply that was nothing but the failure notice (measured
+  // 2026-09-12: "I could not retrieve live results…", query parroted back,
+  // question never addressed). buildSearchContext in src/lib/search.ts already
+  // treats the pair as legal; this is the agent path joining it.
+  const results: SearchResult[] = (search.results || []).slice(0, 8);
+
+  if (search.error && results.length) {
+    // Degraded, not failed. Keep the rows, but label them: this tier is
+    // encyclopedic/programming indexes, not the live web, and the model must
+    // not present them as fresh Google results — the same honesty rule as the
+    // note buildSearchContext appends for the non-agent path.
+    ctx.artifacts.sources = [...(ctx.artifacts.sources || []), ...results.filter((r) => r.link)];
+    const rows = results.map((r, i) => ({
+      index: i + 1,
+      title: r.title || "(untitled)",
+      url: r.link,
+      snippet: (r.snippet || "").slice(0, 500),
+      date: r.date || null,
+    }));
+    return {
+      ok: true,
+      results: rows,
+      answer: search.answerBox?.answer || null,
+      total: rows.length,
+      note: `The primary search engine failed (${explainSearchError(search.error)}); these rows are from narrower fallback indexes and may be incomplete or not fully current. Tell the user this if you rely on them.`,
+    };
   }
 
-  const results: SearchResult[] = (search.results || []).slice(0, 8);
+  if (search.error) {
+    // Every tier failed and there are no rows to salvage. The reason is decoded
+    // to words the model can relay — "serpapi_http_402" answers nothing the user
+    // can act on — and the shape instruction is baked in because the measured
+    // failure mode was a reply that stopped at the disclosure.
+    return {
+      ok: false,
+      error: `web_search failed: ${explainSearchError(search.error)}. Tell the user in one plain sentence that the live search failed and why, then answer from your own knowledge with a clear caveat that it may be out of date; the disclosure must not be the whole reply. Do not fabricate headlines, prices, scores, or dates.`,
+    };
+  }
 
   // The UI renders source chips from the message, so the actual results go to
   // the artifacts while the model gets the condensed, citable form. Appended,

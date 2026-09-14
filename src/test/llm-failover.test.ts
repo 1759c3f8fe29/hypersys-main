@@ -22,6 +22,13 @@
 // assertion that keeps the fix from regressing into that.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// vitest runs ESM, where __dirname does not exist — derive it once for the
+// drift tests below, which read repo source files relative to this test.
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 import {
   callProvider,
@@ -446,6 +453,62 @@ describe("classifyFailure", () => {
       expect(error, "error code must be set").toBeTruthy();
       expect(status).toBeGreaterThanOrEqual(400);
       expect(detail, `${error} has no detail`).toBeTruthy();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dev/prod drift — the tokenrouter incident.
+// ---------------------------------------------------------------------------
+//
+// api/llm.js's header says dev and prod must change together, but nothing
+// enforced it: tokenrouter was added to PROVIDER_ENDPOINTS there on 2026-09-08
+// and not to DEV_PROVIDER_ENDPOINTS in vite.config.ts, so every dev request for
+// the default model paid a "status 0: unknown provider" hop before its
+// fallback. The same class of drift left DEV_FAILOVER_STATUSES without 404/410
+// while production failed over on both.
+//
+// Importing vite.config.ts here would drag the whole Vite plugin pipeline into
+// the test (its side effects are harmless but heavy), so the test reads both
+// files' source and compares the literal status lists. Crude, and that is the
+// point: any edit to either side's list changes its source text, and the
+// assertion fails until both match.
+describe("dev/prod failover drift", () => {
+  const read = (p: string) => readFileSync(join(__dirname, p), "utf8");
+
+  it("DEV_FAILOVER_STATUSES mirrors FAILOVER_STATUSES exactly", () => {
+    const dev = read("../../vite.config.ts").match(/DEV_FAILOVER_STATUSES = new Set\(\[([^\]]*)\]\)/);
+    const prod = read("../../api/_failover.js").match(/FAILOVER_STATUSES = new Set\(\[([^\]]*)\]\)/);
+    expect(dev, "DEV_FAILOVER_STATUSES not found in vite.config.ts").toBeTruthy();
+    expect(prod, "FAILOVER_STATUSES not found in api/_failover.js").toBeTruthy();
+    const normalise = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean).sort();
+    expect(normalise(dev![1])).toEqual(normalise(prod![1]));
+  });
+
+  it("every provider in api/llm.js has an entry in the dev proxy", () => {
+    const prodSrc = read("../../api/llm.js");
+    const devSrc = read("../../vite.config.ts");
+    // The two maps are formatted differently (api/llm.js spreads each entry
+    // over lines; vite.config.ts puts one entry per line), so extract the keys
+    // between the map's opening and the first entry of each — or more simply,
+    // take the provider keys as the identifiers that carry a `url:` property
+    // somewhere in the following ~3 lines. Split on the map headers first.
+    const prodMap = prodSrc.slice(
+      prodSrc.indexOf("const PROVIDER_ENDPOINTS = {"),
+      prodSrc.indexOf("};", prodSrc.indexOf("const PROVIDER_ENDPOINTS = {")),
+    );
+    const devMap = devSrc.slice(
+      devSrc.indexOf("DEV_PROVIDER_ENDPOINTS"),
+      devSrc.indexOf("};", devSrc.indexOf("DEV_PROVIDER_ENDPOINTS")),
+    );
+    // api/llm.js: `nvidia: {` on its own line, url: on the next.
+    const prodKeys = [...prodMap.matchAll(/^\s{2}(\w+): \{$/gm)].map((m) => m[1]);
+    // vite.config.ts: `nvidia: { url: ...` inline.
+    const devKeys = [...devMap.matchAll(/^\s{2}(\w+): \{ url:/gm)].map((m) => m[1]);
+    expect(prodKeys.length, "provider map not found in api/llm.js").toBeGreaterThan(0);
+    expect(devKeys.length, "provider map not found in vite.config.ts").toBeGreaterThan(0);
+    for (const key of prodKeys) {
+      expect(devKeys, `vite.config.ts is missing provider "${key}"`).toContain(key);
     }
   });
 });

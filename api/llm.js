@@ -20,6 +20,7 @@
 import { applyGuard } from "./_guard.js";
 import { applyMeter } from "./_meter.js";
 import { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES, GONE_STATUSES } from "./_failover.js";
+import { sanitiseMessages } from "./_messages.js";
 
 // Keep in step with PROVIDERS in src/lib/providers.ts. Server-side only, so no
 // VITE_-prefixed key is read here by preference — those get inlined into the
@@ -147,11 +148,15 @@ const BACKOFF_MS = [600, 1500];
 // CHAIN_DEADLINE_MS above ~55s therefore does nothing until maxDuration goes up
 // with it (Pro allows 300).
 //
-// 2026-09-07: the pin went up with this change — 60 → 200 — because the new
-// default model's LAST leg (deepseek-v4-flash, measured 144s streamed bare
-// TTFB) is unreachable inside 50s. 200 is the Hobby ceiling per Vercel's
-// Fluid-compute docs as of this change; if a deploy rejects it, the plan is
-// not on Fluid compute and the pin must come back down with CHAIN_DEADLINE_MS.
+// 2026-09-07: the pin went up with this change — 60 → 200 — because the
+// then-default model's last leg (deepseek-v4-flash, measured 144s streamed
+// bare TTFB) was unreachable inside 50s. That leg is exactly where it was
+// again as of 2026-09-13: flash was briefly pulled from the chain in an
+// over-broad reading of "use real model not alias" and restored the same day
+// on the maintainer's correction ("keep glm, flash or other best model").
+// 200 is the Hobby ceiling per Vercel's Fluid-compute docs as of this
+// change; if a deploy rejects it, the plan is not on Fluid compute and the
+// pin must come back down with CHAIN_DEADLINE_MS.
 //
 // This bounds the *whole* invocation including streaming, so a very long answer
 // can still be cut off by the platform. That is a plan limit, not something this
@@ -458,8 +463,19 @@ export default async function handler(req, res) {
   if (await applyMeter(req, res, { byokHeaders })) return;
 
   // --- Walk the chain -------------------------------------------------------
+  //
+  // Empty assistant messages (a past turn that failed before its first token)
+  // are stripped here rather than rejected: Mistral 400s them with code 3240
+  // and a 400 stops the chain — see api/_messages.js for the full story. The
+  // drop is logged, because it means a previous turn of this conversation
+  // died and left no trace otherwise.
+  const { messages: cleanMessages, dropped } = sanitiseMessages(messages);
+  if (dropped > 0) {
+    console.warn(`[llm] dropped ${dropped} empty assistant message(s) from history`);
+  }
+
   const payload = {
-    messages,
+    messages: cleanMessages,
     stream: true,
     temperature: temperature ?? 0.7,
     top_p: top_p ?? 0.95,

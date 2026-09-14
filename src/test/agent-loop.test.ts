@@ -24,6 +24,10 @@ vi.mock("@/lib/tools", () => ({
       type: "function",
       function: { name, description: name, parameters: {} },
     })) as ToolSchema[],
+  // The recovery-side registry view for text-form tool calls; the mocked
+  // schemas above have no properties, so recovery can never fire spuriously —
+  // this is just the same names so parseTextToolCalls sees them.
+  toolRecoveryInfos: () => [...registry.keys()].map((name) => ({ name, required: [], properties: {} })),
 }));
 
 const { runAgentTurn, MAX_STEPS } = await import("@/lib/agent");

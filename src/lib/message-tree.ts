@@ -128,6 +128,10 @@ export function toTreeMessages(
     parentMessageId: m.parentMessageId ?? null,
     siblingIndex: m.siblingIndex ?? 0,
     createdAt: m.createdAt,
+    // The thinking block's payload, so a reloaded conversation keeps the
+    // chain-of-thought and the "Thought for Ns" label. See FirestoreMessage.
+    reasoning: m.reasoning,
+    thinkSeconds: m.thinkSeconds,
   }));
 }
 

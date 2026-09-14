@@ -17,8 +17,18 @@
 //   text), where there's usually nothing worth persisting.
 
 import { generateChatResponse } from './ai';
+import { UTILITY_MODEL_ID } from './providers';
 
-const EXTRACTION_MODEL = 'ministral-8b';
+// Extraction rides the hidden utility model's chain (Flyer Mini:
+// nemotron-nano-9b primary, ministral-8b-latest insurance), so a cheap model
+// always answers even when one provider is down.
+//
+// History: this pinned the literal id 'ministral-8b', which stopped being a
+// catalogue entry — generateChatResponse fails visibly on ids it does not
+// know, so extraction silently produced nothing while that pin pointed at a
+// name nothing resolved. UTILITY_MODEL_ID is the maintained constant; a
+// literal here is how the last drift happened.
+const EXTRACTION_MODEL = UTILITY_MODEL_ID;
 
 const SYSTEM_PROMPT = [
   'You extract durable facts worth remembering about the user from the conversation below.',

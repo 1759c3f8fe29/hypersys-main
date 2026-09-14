@@ -238,7 +238,7 @@ export default function ChatInput({
   // still one tight line — and keying the expansion on focus would pop the bar open
   // under the user's thumb on every tap, which is the opposite of contracting.
   const hasDraft = message.trim().length > 0 || selectedFiles.length > 0;
-  const isContracted = !hasDraft && !isRecording && !isFocused;
+  const isContracted = !hasDraft && !isRecording;
   // One radius expression shared by the hairline, the shell and the clipped
   // background wrapper so the three layers that draw the border never disagree
   // mid-transition.
@@ -502,9 +502,12 @@ export default function ChatInput({
                     data-flyer-composer=""
                     /* text-base (16px) on mobile is deliberate, not a style choice:
                        iOS Safari zooms the whole viewport when a focused field's
-                       text is under 16px, and never zooms back out. sm: restores
-                       the intended 15px on larger screens. */
-                    className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-2 px-1 sm:py-2.5 sm:px-1.5 max-h-[120px] scrollbar-thin text-base sm:text-[15px] leading-snug font-medium"
+                       text is under 16px, and never zooms back out. sm: steps to
+                       the 16.5px body stop of the type scale pinned in
+                       typography-contract.test.tsx; font-normal because the spec's
+                       input row is 400 — the old font-medium read a prompt as a
+                       label. */
+                    className="w-full bg-transparent border-0 resize-none focus:outline-none focus:ring-0 text-foreground placeholder:text-muted-foreground/50 py-2 px-1 sm:py-2.5 sm:px-1.5 max-h-[120px] scrollbar-thin text-base sm:text-[16.5px] leading-snug font-normal"
                     onKeyDown={handleKeyDown}
                     enterKeyHint="send"
                   />
@@ -527,7 +530,7 @@ export default function ChatInput({
                       aria-pressed={deepThink}
                       title="Force step-by-step extended reasoning"
                       className={cn(
-                        'flex items-center gap-1 h-8 sm:h-9 px-1.5 sm:px-2.5 rounded-full text-[12px] font-semibold transition-colors flex-shrink-0',
+                        'flex items-center gap-1 h-8 sm:h-9 px-1.5 sm:px-2.5 rounded-full text-[12.5px] font-medium transition-colors flex-shrink-0',
                         deepThink
                           ? 'bg-primary/20 text-primary border border-primary/50'
                           : 'text-muted-foreground/70 hover:text-foreground border border-transparent hover:border-border/40',
@@ -546,7 +549,7 @@ export default function ChatInput({
                       type="button"
                       onClick={onToggleWebSearch}
                       title="Search enabled — click to turn off"
-                      className="flex items-center gap-1 h-8 px-1.5 sm:h-9 sm:px-2.5 rounded-full text-[12px] font-semibold bg-primary/20 text-primary border border-primary/50 flex-shrink-0"
+                      className="flex items-center gap-1 h-8 px-1.5 sm:h-9 sm:px-2.5 rounded-full text-[12.5px] font-medium bg-primary/20 text-primary border border-primary/50 flex-shrink-0"
                     >
                       <Globe className="w-[15px] h-[15px] flex-shrink-0" />
                       <span className="hidden md:inline">Search</span>

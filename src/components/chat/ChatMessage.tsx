@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -58,6 +58,14 @@ interface ChatMessageProps {
   // destructive: the parent appends a new sibling branch rather than overwriting.
   canEdit?: boolean;
   onEdit?: (newContent: string) => void;
+  // The model's chain-of-thought for this reply, shown in the collapsible
+  // thinking block above the answer. Set from `reasoning_content` deltas or
+  // from inline <thinking>-style tags extracted out of the stream; absent
+  // means the model did not reason (or no reasoning survived).
+  reasoning?: string;
+  // How long the model thought, in whole seconds. The collapsed block's label
+  // ("Thought for 12s") reads it; undefined falls back to "Thought process".
+  thinkSeconds?: number;
 }
 
 function hostOf(link: string): string {
@@ -136,6 +144,100 @@ function StreamingStatus({ label, tone }: { label: string; tone: "primary" | "ac
       )}
     </div>
   );
+}
+
+/**
+ * The model's chain-of-thought, the way ChatGPT and DeepSeek show it: a
+ * collapsible block above the answer.
+ *
+ * While the model is thinking the block is open and follows the stream — the
+ * page goes quiet for those long reasoning-model seconds otherwise, and the
+ * empty answer bubble reads as a hang rather than as work. When the answer's
+ * first token arrives the block collapses itself to "Thought for Ns", because
+ * the reader's attention has a new object and the thinking is now context. A
+ * manual click wins over both rules from then on: once the reader has chosen
+ * to open or close it, reopening is their decision, not the stream's.
+ *
+ * The body renders as plain pre-wrapped text, not markdown. Chain-of-thought
+ * is scratch writing — half-formed lists, abandoned sentences — and running it
+ * through the renderer both misformats it (a `#` scratch note becomes a
+ * heading) and costs the same whole-string re-parse per chunk the message body
+ * coalesces to avoid.
+ */
+function ThinkingBlock({ reasoning, thinkSeconds, isThinking }: {
+  reasoning: string;
+  thinkSeconds?: number;
+  /** True while the turn is still streaming — drives "Thinking…" vs the summary. */
+  isThinking: boolean;
+}) {
+  // null means "no user click yet"; the stream's own state decides. Once set,
+  // it is the decision forever — the stream will not re-open or re-close it.
+  const [manual, setManual] = useState<boolean | null>(null);
+  const [autoOpen, setAutoOpen] = useState(true);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  // Auto-collapse: open only while there is no answer to show. `isThinking`
+  // alone is not that signal — a model can keep trailing thinking deltas after
+  // the answer starts — so the parent passes isThinking && !content.
+  useEffect(() => {
+    if (manual !== null) return;
+    setAutoOpen(isThinking);
+  }, [isThinking, manual]);
+
+  const expanded = manual ?? autoOpen;
+
+  // Follow the stream: an open block that doesn't scroll shows one frozen
+  // line while the rest accumulates below the fold, which reads as stuck.
+  useEffect(() => {
+    if (expanded && isThinking && bodyRef.current) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    }
+  }, [reasoning, expanded, isThinking]);
+
+  const label = isThinking
+    ? 'Thinking…'
+    : thinkSeconds != null
+      ? `Thought for ${formatThoughtSeconds(thinkSeconds)}`
+      : 'Thought process';
+
+  return (
+    <div className="mb-3 -mt-1" data-thinking-block>
+      <button
+        type="button"
+        onClick={() => setManual(!expanded)}
+        aria-expanded={expanded}
+        className="flex items-center gap-1.5 -ml-1.5 px-1.5 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+      >
+        {isThinking ? (
+          // A live tell, not decoration: this icon is the only "still going"
+          // signal while the block is closed and the answer hasn't started.
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        ) : (
+          <Brain className="w-3.5 h-3.5" />
+        )}
+        <span className={`text-[13px] ${isThinking ? 'text-primary/80' : ''}`}>{label}</span>
+        <ChevronDown
+          className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`}
+        />
+      </button>
+      {expanded && (
+        <div
+          ref={bodyRef}
+          className="mt-2 pl-4 border-l-2 border-border/60 text-[13.5px] leading-relaxed text-muted-foreground whitespace-pre-wrap overflow-y-auto max-h-72 overscroll-contain"
+        >
+          {reasoning}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** "12s", "1m 05s" — the collapsed summary a reader skims past. */
+function formatThoughtSeconds(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${String(s).padStart(2, '0')}s`;
 }
 
 function FollowUpChips({ followUps, onFollowUp }: { followUps: string[]; onFollowUp: (q: string) => void }) {
@@ -518,7 +620,7 @@ function CodeBlock({ language, children }: { language: string; children: string 
             <div className="w-3 h-3 rounded-full bg-amber-500/70" />
             <div className="w-3 h-3 rounded-full bg-emerald-500/70" />
           </div>
-          <span className="text-xs text-muted-foreground/70 font-mono ml-2 uppercase tracking-wider">{language || 'code'}</span>
+          <span className="text-xs text-muted-foreground/80 font-mono ml-2 uppercase tracking-wider">{language || 'code'}</span>
         </div>
         <div className="flex items-center gap-2">
           {inCanvas && (
@@ -573,7 +675,7 @@ function CodeBlock({ language, children }: { language: string; children: string 
           <SyntaxHighlighter
             language={language || 'text'}
             style={oneDark}
-            customStyle={{ margin: 0, padding: '1.25rem 1.5rem', background: 'transparent', fontSize: '0.875rem', lineHeight: '1.7' }}
+            customStyle={{ margin: 0, padding: '1.25rem 1.5rem', background: 'transparent', fontSize: '14px', lineHeight: '1.7' }}
             showLineNumbers={lineTotal > 3}
             lineNumberStyle={{ opacity: 0.4, minWidth: '2.5em' }}
           >
@@ -597,21 +699,36 @@ function CodeBlock({ language, children }: { language: string; children: string 
 // `className`, `href`, `src` all come from the library instead of being implicit
 // anys, and an override keyed to an element that does not exist is now a build
 // error rather than an override that silently never fires.
-function buildMarkdownComponents(): Components {
+// Exported for ArtifactPanel's MarkdownView, which renders prose artifacts.
+// It used to style them with `prose prose-invert prose-sm` alone — the classes
+// that generate zero rules because the typography plugin is not registered (see
+// the header of typography-contract.test.tsx), so a prose artifact rendered
+// with raw browser defaults while chat messages carried the full scale. Sharing
+// this builder is what keeps the two surfaces on one type scale; a second copy
+// is how the search providers drifted (see _search-providers.js's header).
+export function buildMarkdownComponents(): Components {
+ // THE SCALE — pinned by src/test/typography-contract.test.tsx, which holds the
+ // spec table this restyle implemented (2026-09-12): body 15.5/16.5px weight
+ // 400, bold 600 plain, inline code 13.5px, fenced code 14px, headings
+ // 28/24/20/18px at 600, tables 15px. The decorations this pass stripped:
+ // gradient text on h1, the accent bar on h2, and the primary-tinted chip behind
+ // bold — the reference look is plain weight-and-size hierarchy, and a restyle
+ // that wants any of them back is a spec change, not a tweak. Edit the test in
+ // the same commit or it will name the row you changed.
  return {
   h1: ({ children }) => (
-    <h1 className="text-xl sm:text-2xl font-extrabold mb-3 mt-5 first:mt-0 text-foreground bg-clip-text text-transparent bg-gradient-to-r from-primary via-accent to-primary drop-shadow-sm tracking-tight">
+    <h1 className="text-[28px] font-semibold leading-tight mb-4 mt-6 first:mt-0 text-foreground tracking-tight">
       {children}
     </h1>
   ),
   h2: ({ children }) => (
-    <h2 className="text-lg sm:text-xl font-bold mb-2.5 mt-4 first:mt-0 text-foreground/95 flex items-center gap-2">
-      <span className="w-1 h-4 rounded-full bg-gradient-to-b from-primary to-accent flex-shrink-0" />
-      {children}
-    </h2>
+    <h2 className="text-[24px] font-semibold leading-tight mb-3 mt-5 first:mt-0 text-foreground tracking-tight">{children}</h2>
   ),
   h3: ({ children }) => (
-    <h3 className="text-base sm:text-lg font-semibold mb-2 mt-3.5 first:mt-0 text-foreground/90 tracking-tight">{children}</h3>
+    <h3 className="text-[20px] font-semibold leading-snug mb-2.5 mt-4 first:mt-0 text-foreground">{children}</h3>
+  ),
+  h4: ({ children }) => (
+    <h4 className="text-[18px] font-semibold leading-snug mb-2 mt-3.5 first:mt-0 text-foreground/95">{children}</h4>
   ),
   p: ({ children, node }) => {
     // If paragraph contains only an image, render as div to avoid nesting issues.
@@ -624,36 +741,36 @@ function buildMarkdownComponents(): Components {
       (child) => child.type === 'element' && child.tagName === 'img',
     );
     if (hasImage) {
-      return <div className="text-sm sm:text-[15px] leading-relaxed mb-3.5 last:mb-0 text-foreground/85">{children}</div>;
+      return <div className="text-[15.5px] sm:text-[16.5px] font-normal leading-[1.75] mb-3.5 last:mb-0 text-foreground/90">{children}</div>;
     }
-    return <p className="text-sm sm:text-[15px] leading-relaxed mb-3.5 last:mb-0 text-foreground/85">{children}</p>;
+    return <p className="text-[15.5px] sm:text-[16.5px] font-normal leading-[1.75] mb-3.5 last:mb-0 text-foreground/90">{children}</p>;
   },
   ul: ({ children }) => <ul className="space-y-2 my-3 pl-1 list-none">{children}</ul>,
-  ol: ({ children }) => <ol className="space-y-2 my-3 pl-5 list-decimal marker:text-primary/70 marker:font-semibold text-sm sm:text-[15px]">{children}</ol>,
+  ol: ({ children }) => <ol className="space-y-2 my-3 pl-5 list-decimal marker:text-primary/70 marker:font-semibold text-[15.5px] sm:text-[16.5px]">{children}</ol>,
   li: ({ children, className }) => {
     if (className?.includes('task-list-item')) {
-      return <li className="flex items-center gap-2.5 text-sm sm:text-[15px] text-foreground/85 my-1">{children}</li>;
+      return <li className="flex items-center gap-2.5 text-[15.5px] sm:text-[16.5px] font-normal text-foreground/90 my-1">{children}</li>;
     }
     return (
-      <li className="flex items-start gap-2.5 text-sm sm:text-[15px] leading-relaxed text-foreground/85 py-0.5 px-0.5 transition-transform duration-200 group/li">
-        <span className="flex-shrink-0 mt-[8px] w-1.5 h-1.5 rounded-full bg-primary/40 group-hover/li:bg-primary group-hover/li:shadow-[0_0_6px_hsla(var(--primary)/0.6)] transition-all" />
+      <li className="flex items-start gap-2.5 text-[15.5px] sm:text-[16.5px] font-normal leading-[1.75] text-foreground/90 py-0.5 px-0.5 transition-transform duration-200 group/li">
+        <span className="flex-shrink-0 mt-[9px] w-1.5 h-1.5 rounded-full bg-primary/40 group-hover/li:bg-primary group-hover/li:shadow-[0_0_6px_hsla(var(--primary)/0.6)] transition-all" />
         <span className="flex-1">{children}</span>
       </li>
     );
   },
   strong: ({ children }) => (
-    <strong className="font-bold text-foreground bg-primary/10 px-1 rounded-sm">{children}</strong>
+    <strong className="font-semibold text-foreground">{children}</strong>
   ),
   em: ({ children }) => <em className="italic text-foreground/90">{children}</em>,
   blockquote: ({ children }) => (
-    <blockquote className="my-4 pl-4 py-2 border-l-[3px] border-primary/50 bg-primary/[0.03] rounded-r-xl text-foreground/80 text-sm sm:text-[15px] italic shadow-inner">
+    <blockquote className="my-4 pl-4 py-2 border-l-[3px] border-primary/50 bg-primary/[0.03] rounded-r-xl text-foreground/85 text-[15.5px] sm:text-[16.5px] italic">
       {children}
     </blockquote>
   ),
   code: ({ className, children }) => {
     const match = /language-(\w+)/.exec(className || '');
     if (!match) {
-      return <code className="px-1.5 py-0.5 mx-0.5 rounded-md bg-secondary/60 border border-border/40 text-primary font-mono text-[0.85em]">{children}</code>;
+      return <code className="px-1.5 py-0.5 mx-0.5 rounded-md bg-secondary/60 border border-border/40 text-foreground font-mono text-[13.5px]">{children}</code>;
     }
     return <CodeBlock language={match[1]}>{String(children).replace(/\n$/, '')}</CodeBlock>;
   },
@@ -663,11 +780,11 @@ function buildMarkdownComponents(): Components {
   ),
   table: ({ children }) => (
     <div className="my-4 overflow-x-auto rounded-xl border border-border/40 shadow-md">
-      <table className="w-full text-xs sm:text-sm">{children}</table>
+      <table className="w-full text-[15px]">{children}</table>
     </div>
   ),
-  th: ({ children }) => <th className="px-4 py-2.5 text-left font-bold bg-primary/10 border-b border-border/40 text-foreground">{children}</th>,
-  td: ({ children }) => <td className="px-4 py-2.5 border-b border-border/20 text-foreground/85">{children}</td>,
+  th: ({ children }) => <th className="px-4 py-2.5 text-left font-semibold bg-primary/10 border-b border-border/40 text-foreground">{children}</th>,
+  td: ({ children }) => <td className="px-4 py-2.5 border-b border-border/20 text-foreground/90">{children}</td>,
   hr: () => <hr className="my-6 border-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />,
   img: ({ src, alt }) => {
     if (src && (src.startsWith('data:image') || src.match(/\.(png|jpg|jpeg|gif|webp|svg)$/i))) {
@@ -686,7 +803,7 @@ function buildMarkdownComponents(): Components {
  };
 }
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, onFollowUp, onRegenerate, canRegenerate, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, onFollowUp, onRegenerate, canRegenerate, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedArenaIdx, setCopiedArenaIdx] = useState<number | null>(null);
@@ -866,7 +983,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                     }
                   }}
                   rows={Math.min(12, Math.max(2, editDraft.split('\n').length))}
-                  className="w-full resize-none bg-background/40 border border-primary/30 rounded-xl px-3 py-2 text-sm sm:text-[15px] leading-relaxed text-foreground font-medium focus:outline-none focus:border-primary/60"
+                  className="w-full resize-none bg-background/40 border border-primary/30 rounded-xl px-3 py-2 text-[15.5px] sm:text-[16.5px] leading-relaxed text-foreground font-normal focus:outline-none focus:border-primary/60"
                 />
                 <div className="flex items-center justify-end gap-2">
                   <button
@@ -883,7 +1000,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                 </div>
               </div>
             ) : (
-              content && <p className="text-sm sm:text-[15px] leading-relaxed text-foreground font-medium whitespace-pre-wrap break-words">{content}</p>
+              content && <p className="text-[15.5px] sm:text-[16.5px] font-normal leading-[1.75] text-foreground whitespace-pre-wrap break-words">{content}</p>
             )}
             {/* Hover edit affordance — only while not editing and not streaming.
                 Editing is non-destructive, so the original wording stays reachable
@@ -1015,6 +1132,16 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                 />
               )}
 
+              {!isUser && reasoning && (
+                <ThinkingBlock
+                  reasoning={reasoning}
+                  thinkSeconds={thinkSeconds}
+                  // The block stays open only while there is no answer to read;
+                  // the first content token is the model handing over.
+                  isThinking={isStreaming && !content}
+                />
+              )}
+
               {textOnlyContent ? (
                 <div className="prose prose-sm sm:prose-base prose-invert max-w-none">
                   <ReactMarkdown
@@ -1025,7 +1152,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                     {textOnlyContent}
                   </ReactMarkdown>
                 </div>
-              ) : (isStreaming && !isArenaMode) ? (
+              ) : (isStreaming && !isArenaMode && !reasoning) ? (
                 <StreamingStatus label={statusText || "Generating response..."} tone="primary" />
               ) : null}
 

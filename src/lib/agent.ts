@@ -29,7 +29,7 @@
 import { generateRoutedResponse } from "@/lib/ai";
 import type { ChatMessage, ToolCall, WireToolCall } from "@/lib/ai";
 import { getModel, supportsTools } from "@/lib/providers";
-import { getTool, toolSchemas } from "@/lib/tools";
+import { getTool, toolRecoveryInfos, toolSchemas } from "@/lib/tools";
 import type { AttachmentRef, ToolArtifacts, ToolContext } from "@/lib/tools";
 
 /**
@@ -64,6 +64,12 @@ export interface RunAgentOptions {
   onChunk: (text: string) => void;
   signal?: AbortSignal;
   deepThink?: boolean;
+  /**
+   * Live `reasoning_content` deltas, for the thinking block. Fires from every
+   * model pass in the turn — a tool-using model reasons about which tool to
+   * call too, and that thinking is as much part of the turn as the answer's.
+   */
+  onReasoning?: (text: string) => void;
   /**
    * Files the user attached this turn, metadata only. `edit_file` validates its
    * `attachment_id` against this list; other tools ignore it. Absent or empty is
@@ -145,7 +151,7 @@ const EMPTY_TURN_NOTICE =
  * design, because a model that cannot search should still answer.
  */
 export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResult> {
-  const { messages, modelId, onChunk, signal, deepThink, attachments, onToolStart, onToolEnd, onDiscardPartial } =
+  const { messages, modelId, onChunk, onReasoning, signal, deepThink, attachments, onToolStart, onToolEnd, onDiscardPartial } =
     opts;
 
   const artifacts: ToolArtifacts = {};
@@ -154,7 +160,7 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
   // No catalogue entry means a legacy id on a direct proxy, which has no tool
   // plumbing; no tool support means the provider would reject the payload.
   if (!spec || !supportsTools(modelId)) {
-    const plain = await generateRoutedResponse(messages, modelId, onChunk, signal, { deepThink });
+    const plain = await generateRoutedResponse(messages, modelId, onChunk, signal, { deepThink, onReasoning });
     if (!plain.sawContent) onChunk(EMPTY_TURN_NOTICE);
     return { artifacts, steps: 0, hitStepLimit: false };
   }
@@ -163,13 +169,18 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
   // the caller owns would corrupt the conversation it is rendering from.
   const working: ChatMessage[] = [...messages];
   const schemas = toolSchemas();
+  // The recovery-side view of the registry, for text-form tool calls that
+  // carry no name (a bare JSON arguments block). See parseTextToolCalls.
+  const recoveryInfos = toolRecoveryInfos();
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const lastStep = step === MAX_STEPS - 1;
 
     const result = await generateRoutedResponse(working, modelId, onChunk, signal, {
       deepThink,
+      onReasoning,
       tools: schemas,
+      recoverySchemas: recoveryInfos,
       // On the final step the tools stay advertised but are withdrawn as an
       // option. Dropping the schemas instead would invalidate the tool_call ids
       // already in `working` on providers that validate them.
@@ -229,9 +240,18 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
           };
         }
 
+        // Bare-arguments recovery marked this call. The args were the tool's
+        // content payload, not its arguments — the tool repairs them (fills
+        // filename/format, normalizes variant field spellings) so the executor
+        // receives the shape it expects rather than a retry through the same
+        // provider bug.
+        const recovered = call.id.startsWith("call_textform_") && tool.prepareRecoveredArgs
+          ? tool.prepareRecoveredArgs(args)
+          : args;
+
         try {
-          const payload = await tool.execute(args, ctx);
-          onToolEnd?.({ name: call.name, args, ok: payload.ok !== false });
+          const payload = await tool.execute(recovered, ctx);
+          onToolEnd?.({ name: call.name, args: recovered, ok: payload.ok !== false });
           return { call, payload };
         } catch (err) {
           // Only an abort should reach here; executors handle their own
@@ -261,6 +281,7 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
       // model. One more pass with no tools available turns them into an answer.
       const final = await generateRoutedResponse(working, modelId, onChunk, signal, {
         deepThink,
+        onReasoning,
         tools: schemas,
         toolChoice: "none",
       });

@@ -110,6 +110,46 @@ describe("executeWebSearch — the three outcomes stay distinct", () => {
     expect(String(out.ok === false && out.error)).toContain("rate limited");
   });
 
+  it("keeps the rows a degraded search still returned, instead of discarding them", async () => {
+    // The provider chain's last tier: primary engine dead, keyless fallbacks
+    // answered. The response carries rows AND an error together. The old code
+    // checked `error` first and returned {ok:false}, so the model was handed
+    // "serpapi_error" on a turn that had results — the measured 2026-09-12
+    // case behind the "I could not retrieve live results…" reply that never
+    // answered the question. This is the agent path joining what
+    // buildSearchContext already knew: the pair is legal.
+    const ctx = ctxWith();
+    searchStub.mockResolvedValue({
+      error: "serpapi_error",
+      degraded: true,
+      results: [result("https://a"), result("https://b")],
+    });
+    const out = await executeWebSearch({ query: "x" }, ctx);
+    expect(body(out).total).toBe(2);
+    expect(rowsOf(out).map((r) => r.url)).toEqual(["https://a", "https://b"]);
+    // The model is told the rows are from the fallback tier, so it cannot
+    // present them as fresh full-web results.
+    expect(String(body(out).note)).toMatch(/fallback/i);
+    // The chips still get the sources — a degraded answer with visible provenance
+    // is more useful than a clean failure with none.
+    expect(ctx.artifacts.sources?.map((s) => s.link)).toEqual(["https://a", "https://b"]);
+  });
+
+  it("decodes the machine reason into words a user can act on", async () => {
+    searchStub.mockResolvedValue({ error: "serpapi_key_missing" });
+    const out = await executeWebSearch({ query: "x" }, ctxWith());
+    expect(String(out.ok === false && out.error)).toContain("API key is not configured");
+    // And the shape instruction, because the measured failure mode was a
+    // reply that stopped at the disclosure.
+    expect(String(out.ok === false && out.error)).toMatch(/must not be the whole reply/i);
+  });
+
+  it("passes an unknown reason through rather than mislabelling it", async () => {
+    searchStub.mockResolvedValue({ error: "new_engine_banned_us" });
+    const out = await executeWebSearch({ query: "x" }, ctxWith());
+    expect(String(out.ok === false && out.error)).toContain("new_engine_banned_us");
+  });
+
   it("reports an empty index as a success worth retrying", async () => {
     searchStub.mockResolvedValue({ results: [] });
     const out = await executeWebSearch({ query: "obscure thing" }, ctxWith());

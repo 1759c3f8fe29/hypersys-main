@@ -69,6 +69,103 @@ function resolveFormat(format: string, filename: string): string {
   return ext && isSupportedFormat(ext) ? ext : format;
 }
 
+/**
+ * The create_file half of text-form recovery's bare-arguments path.
+ *
+ * A model that announced a file ("Creating a pptx on AI vs HI now.") and then
+ * streamed its arguments as a fenced JSON object never named the tool, and the
+ * object it sent is not create_file's ARGUMENTS — it is the `content` payload
+ * (a pptx {slides:[…]} or an xlsx {sheets:[…]}), minus filename and format.
+ * That shape lives in the content property's DESCRIPTION, not in the property
+ * list, so schema matching cannot see it; this recognizer is the domain eye
+ * that can.
+ *
+ * It claims only whole-object document shapes, never fragments: the object
+ * must carry `slides` (pptx) or `sheets` (xlsx) as an ARRAY. Free-standing
+ * prose JSON — an answer containing a {"query": …} example — does not have
+ * those keys and never reaches this far anyway (see parseTextToolCalls).
+ *
+ * The observation this exists for (2026-09-13, glm-5.3-free) even misspelled
+ * the slide bullets as `bullet_points`, so the executor tolerates that
+ * spelling too; see normalizeRecoveredDocumentArgs below.
+ */
+function isDocumentPayload(obj: Record<string, unknown>): boolean {
+  return Array.isArray(obj.slides) || Array.isArray(obj.sheets);
+}
+
+/**
+ * Repair the argument object a bare-arguments recovery salvaged.
+ *
+ * The emission is missing `filename` and `format` (the model thought it was
+ * writing the content, not the arguments), and may spell slide fields
+ * unconventionally (`bullet_points` instead of `bullets`, plus a stray
+ * deck-level `title`). Rather than fail the call and make the model retry
+ * — the recovery already burned one pass, and the same provider bug would
+ * eat the retry too — the missing pieces are filled in and the payload is
+ * folded into `content` as the JSON string the generator's pptx/xlsx paths
+ * read, so the executor receives the schema's own argument shape.
+ */
+function normalizeRecoveredDocumentArgs(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  // The deck's own title, when the model wrote one, becomes the filename stem.
+  const title = typeof args.title === "string" && args.title.trim() ? args.title.trim() : "document";
+  const ext = Array.isArray(args.slides) ? "pptx" : Array.isArray(args.sheets) ? "xlsx" : "json";
+  // Slashes would turn the title into a path fragment; colons and the other
+  // Windows-invalid characters would make the download filename illegal on
+  // the platform most users save to.
+  const stem =
+    title
+      .replace(/[/\\:*?|"<>]/g, "-")
+      .replace(/\.{2,}/g, ".")
+      .replace(/\s+/g, "-")
+      .replace(/-{2,}/g, "-")
+      .toLowerCase()
+      .slice(0, 60) || "document";
+
+  // pptx: normalize the observed variant spellings onto the generator's shape.
+  let payload: Record<string, unknown>;
+  if (Array.isArray(args.slides)) {
+    const slides = args.slides.map((slide) => {
+      if (!slide || typeof slide !== "object" || Array.isArray(slide)) return slide;
+      const s = { ...(slide as Record<string, unknown>) };
+      // The misspelling is consumed, not kept beside the correction: a reader
+      // diffing the deck's JSON would see both spellings and wonder which one
+      // is live. The generator reads `bullets` first, so behavior is identical
+      // either way — this is about not persisting the confusion.
+      if (!s.bullets && Array.isArray(s.bullet_points)) {
+        s.bullets = s.bullet_points;
+        delete s.bullet_points;
+      }
+      if (!s.bullets && Array.isArray(s.points)) {
+        s.bullets = s.points;
+        delete s.points;
+      }
+      return s;
+    });
+    // A deck-level title with no titled slide of its own becomes slide one's
+    // title — the generator reads titles off each slide, and a presentation's
+    // cover slide is where the deck's title belongs anyway.
+    const hasOwnTitle = slides.some(
+      (sl) => sl && typeof sl === "object" && String((sl as Record<string, unknown>).title ?? "").trim(),
+    );
+    payload =
+      !hasOwnTitle && title !== "document" ? { slides: [{ title, bullets: [] }, ...slides] } : { slides };
+  } else {
+    payload = { sheets: args.sheets };
+  }
+
+  return {
+    filename: `${stem}.${ext}`,
+    format: ext,
+    content: JSON.stringify(payload),
+  };
+}
+
+/** The registry-facing halves of the recovery hooks — see ToolDefinition. */
+export const recognizeCreateFileTextForm = isDocumentPayload;
+export const prepareCreateFileRecoveredArgs = normalizeRecoveredDocumentArgs;
+
 export async function executeCreateFile(
   args: Record<string, unknown>,
   ctx: ToolContext,

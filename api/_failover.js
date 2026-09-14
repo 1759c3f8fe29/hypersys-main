@@ -60,12 +60,13 @@
  *
  * What the exclusion was protecting is still worth something, and is now kept
  * somewhere better. The worry was a genuinely wrong model id quietly working via a
- * backup. But every model's routes are the *same model* on different providers
- * (ModelSpec.routes enforces it, with two documented exceptions: "Flyer
- * Vision" and the default model's NIM fallback chain, both argued in
- * providers.ts), so failing over is
- * not substituting different weights — and a genuinely unknown id 404s on every leg
- * and still fails the chain loudly. The place to catch a wrong id is
+ * backup. But a model's routes are one deliberate chain whose legs are chosen by
+ * the maintainer (primary + insurance — restored 2026-09-13 after a brief
+ * single-route pass over-read "use real model not alias"; the maintainer's
+ * correction was explicit that fallbacks stay: "keep glm, flash or other best
+ * model"), so failing over is not a bug papering over a wrong id — and a
+ * genuinely unknown id 404s on every leg and still fails the chain loudly.
+ * The place to catch a wrong id is
  * scripts/verify-models.mjs, which probes repeatedly over time and can therefore
  * tell identity from capacity; a single request cannot, and should stop pretending
  * it can. callProvider logs a distinct warning on 404 so the signal is not lost.

@@ -3652,3 +3652,238 @@ Mistral and DeepSeek fallback chain") so the picker row itself discloses what an
 test asserted the old label; the sidebar picker is a projection of ModelSpec so the rename
 propagated without touching ChatSidebar. Providers 15/15, typecheck clean, production build
 clean.
+
+### 45. The composer contracted to the reference pill — one row instead of two, and the caret is not content
+
+The user's screenshot was the ChatGPT-mobile compact input: one tight row — plus button,
+placeholder, inline "Think" chip, mic, send — and the ask was to make the composer
+"contractible" like it, smartly responsive on desktop and mobile. The old bar was two stacked
+rows (full-width textarea over a controls row), which paid a permanent ~44px of height even
+when empty and read as a panel rather than a pill.
+
+What changed in src/components/chat/ChatInput.tsx:
+
+- One row, always: attach, the growing textarea, and the trailing controls share a single
+  `items-end` flex baseline, so the buttons stay pinned to the last text line as a draft grows
+  to the 120px cap instead of drifting to the vertical middle of a tall field.
+- The contract state: while there is no draft, no attachment, and no live dictation, the shell
+  is `rounded-full` (the pill); any of those three opens it into `rounded-2xl sm:rounded-3xl`.
+  Focus is deliberately NOT part of the condition — an empty focused composer is exactly the
+  state the pill was designed for, and keying expansion on focus would pop the bar open under
+  the user's thumb on every tap, which is the opposite of contracting. One radius expression is
+  shared by the hairline, the shell, and the clipped background wrapper so the three border
+  layers never disagree mid-transition, and it works at all because `.liquid-composer`'s
+  hard-coded radius sits in `@layer components` (src/index.css), which Tailwind utilities beat.
+- DeepThink moved out of the "+" menu and onto the row as an inline Think chip — icon-only
+  below md so a 360px phone still fits mic and send beside it, `aria-pressed` carrying the
+  state — because a toggle hidden behind a menu is invisible exactly when you are deciding
+  whether to turn it on. The menu keeps Attach and Search; Search keeps its enabled-state chip.
+- Responsive details preserved or extended: 36px controls on mobile stepping to 40px at sm:,
+  16px text below sm: (the iOS zoom rule), `safe-area-inset-bottom` untouched, and
+  `data-flyer-composer` kept — src/lib/shortcuts.ts queries the composer by that attribute.
+
+Tests: src/test/composer-contract.test.tsx (8) pins the pill radius at rest, that focus alone
+does not expand, that a draft expands and re-contracts, that an attachment expands before any
+text, the single shared row, and the inline Think toggle (toggles, reports state, and is gone
+from the menu while Attach and Search remain). Red-first: 7 of 8 failed before the redesign.
+Mutation check: adding `&& !isFocused` to the contract condition failed exactly the
+focused-but-empty test, and reverting restored 8/8.
+
+Gates: tsc app project clean, eslint clean on both changed files, full vitest suite 57 files /
+822 tests green with --testTimeout=20000, vite production build clean.
+
+
+### 46. One failed turn poisoned every later turn of its conversation — Mistral 400 code 3240
+
+The bug: an assistant bubble is created empty before its first token arrives, and a turn that
+dies before streaming (all-providers-failed, a stall, an abort) can be saved that way. On the
+NEXT turn the whole stored history is replayed to the router — and Mistral rejects it outright:
+
+  {"message":"Assistant message must have either content or tool_calls, but not
+   none.","type":"invalid_request_assistant_message","code":"3240"}
+
+A 400 is deliberately NOT a failover status (a malformed request is ours to fix, not the next
+provider's problem — api/_failover.js's taxonomy), so the chain never walked: the conversation
+was permanently broken until its history was edited by hand. One failed turn, every turn after
+it dead.
+
+The fix is at the boundary, in a new shared module api/_messages.js: `sanitiseMessages` strips
+assistant messages carrying neither `content` nor `tool_calls` before any provider sees them.
+Dropping rather than padding: a placeholder " " would misrepresent the model as having said
+something. `content: null` WITH tool_calls is kept — that is the agent loop's own legitimate
+wire shape for a tool-calling step. Whitespace-only content counts as dropped (the stall-path
+save persisted "   " exactly once). The drop is logged at both routers, because it means a
+previous turn of this conversation died and left no other trace.
+
+Both routers apply it: api/llm.js before the chain walk, and vite.config.ts's dev proxy in the
+same place. Not imported into the browser bundle — routers apply it, the client never needs it —
+but the dependency-free rule of _failover.js is followed anyway so the module is unit-testable
+with nothing mocked.
+
+The second half of this entry is the drift class the 3240 incident exposed. api/llm.js's header
+says dev and prod must change together, and nothing enforced it: tokenrouter had been added to
+PROVIDER_ENDPOINTS on 2026-09-08 but not to DEV_PROVIDER_ENDPOINTS, so every dev request for the
+default model paid a "status 0: unknown provider" hop before its fallback. The same drift left
+DEV_FAILOVER_STATUSES without 404/410 while production failed over on both — a 404/410ing dev
+route stopped the chain instead of walking to the backup. The dev proxy gained tokenrouter, the
+missing statuses, and llm-failover.test.ts gained two source-text assertions: the status sets
+must mirror exactly, and every provider key in api/llm.js's map must exist in the dev proxy's.
+Source-text comparison rather than import, deliberately — importing vite.config.ts would drag
+the whole plugin pipeline into the test, and any edit to either side's list changes its literal
+text, which is exactly what the assertion pins.
+
+Tests: src/test/llm-messages.test.ts pins the sanitiser (empty drops, null-with-tool_calls
+KEEPS, whitespace drops and counts, adjacent user messages survive). llm-failover.test.ts's new
+"dev/prod failover drift" describe does the source-text mirror checks.
+
+Gates: tsc clean, full vitest suite green (59 files / 844 tests at last full run), dev proxy
+probe of /api/llm with poisoned history answers instead of 400ing.
+
+### 47. The vision chain re-pinned, and mistral-large hit the free-tier wall — hidden, not deleted
+
+Two 2026-09-11 measurements, one catalogue entry each.
+
+The default model's vision chain: both legs it shipped with were measured off the island the
+way the entry itself prescribes — `node scripts/probe-id.mjs <id> --times 5` (and the probe
+flags any run over 22s explicitly, because a route that answers at 51s looks green in a probe
+and fails over in production).
+
+  nvidia/llama-3.1-nemotron-nano-vl-8b-v1 — the previous first leg — had degraded to ~51s
+  TTFB on text, with 503s interleaved; it is gone from NVIDIA's /v1/models listing.
+
+  nvidia/nemotron-nano-12b-v2-vl — the previous insurance leg — 404'd every probe. Gone.
+
+The re-pinned chain, both measured on the day:
+
+  meta/llama-3.2-11b-vision-instruct — 389-737ms, answered every probe, text and image,
+  "Red" off a 1x1 PNG. First leg.
+
+  nvidia/nemotron-3-nano-omni-30b-a3b-reasoning — 2.2-3.6s with the same image, 4/4 spaced
+  probes, but 503s ("Worker local total request limit reached 515/16") when hit back-to-back —
+  a concurrency cap, not a verdict. Second leg; the 11B is the reliable one and this is the
+  insurance.
+
+The same-model exception documented for the chain's predecessors covers the new pair: different
+weights, one capability name, no model named in the description to misattribute.
+
+mistral-large: HIDDEN 2026-09-11, two signals meeting the bar this file uses everywhere.
+mistral-large-2512 has left Mistral's /v1/models listing, and the chat endpoint answers 403
+tier_not_allowed (code 1910) on the same key that still 200s ministral-8b — the free-tier wall
+this catalogue already documented for the glm chain. Unlike a 429 this is not capacity: no
+retry and no later session changes it, and unlike a 404 it is not ambiguous. Hidden rather
+than deleted: messages in Firestore carry this id and would lose their byline on delete — the
+same reason glm-5.2 is hidden. The entry records its own restore procedure: confirm the id is
+back in /v1/models AND a chat probe answers on the free-tier key, then drop `hidden`.
+
+Gates: tsc clean, full vitest suite green, probe logs quoted in the entry headers are the
+measurements (scripts/probe-id.mjs output, not vendor claims).
+
+### 48. The tool call that arrived as prose — GLM's streamed text-form calls, recovered
+
+Measured 2026-09-12 on glm-5.3-free via tokenrouter. Non-streamed tool passes always return a
+structured `tool_calls` array. The streamed pass — the shape the app uses — intermittently
+does something else: the call arrives as literal text with `finish_reason: "stop"`, e.g.
+
+  ```json
+  {"name": "web_search", "arguments": {"query": "..."}}
+  ```
+
+or an XML tag form. The agent loop only sees prose, treats it as the final answer, and the user
+gets raw JSON where their grounded answer should be — with the search never run. Captured once
+live through the /api/llm dev proxy (served-by: tokenrouter); sibling of the OCR case this
+brief already documents, where the same model class streams a different grammar than it
+returns in one-shot mode. Direct-to-tokenrouter probes could not reproduce it on demand (12
+polite tries, all structured) — the emission is rare per-request but real, and the day's
+probes also measured a second failure shape: open-mistral-nemo, the chain's second leg,
+intermittently skipped the tool call entirely on streamed tool passes, twice in one day.
+
+The recovery, deliberately narrow:
+
+  - `parseTextToolCalls(text, toolNames)` in chat-format.ts recognises three forms — the XML
+    tag, the fenced/bare `{"name": ..., "arguments": {...}}` JSON call, and the parenthesised
+    `web_search({...})` shape. Every gate exists to stop prose converting into a call: the name
+    must be one the caller advertised (prose that merely mentions a tool never matches), and
+    the payload must parse as an object (absent args record as "{}" so the executor's
+    "send valid JSON" result message handles it rather than a crash).
+  - pumpOpenAiStream gained `opts.toolsAdvertised` and now retains the content it streams.
+    At stream end — ONLY when structured calls did not arrive AND tools were advertised — the
+    accumulated text is re-examined. On the OCR/pollinations paths (no tools advertised) prose
+    mentioning a tool stays prose; when structured calls arrived, recovery never fires.
+    `sawContent` stays true on recovery: the raw text already reached onChunk, and the agent
+    loop's narration-discard (onDiscardPartial) exists exactly to flush it.
+  - generateRoutedResponse passes the advertised names through from the schemas it sent, so
+    the gate is the actual tool list of the pass, not a hard-coded one.
+
+The same day, the chain's second leg changed: open-mistral-nemo → mistral-medium-3-5
+(user-directed; the nemo skip-the-call behaviour is quoted in the entry's header). The
+providers.test.ts chain assertion re-pinned to the new order, and the catalogue entry's
+measured-facts comment updated to match — it still claimed nemo was "the leg that actually
+serves both the tier and the tools", stale the moment the swap landed.
+
+Tests: src/test/text-form-tool-calls.test.ts (12) — the parser contract (fenced JSON, XML,
+paren, no-args, unadvertised rejects, mention-stays-prose, non-object rejects, plain prose
+null) and the pump integration (recovers fenced and XML when advertised; stays prose when not
+advertised; never when structured calls arrived; reasoning fallback preserved for a
+thinking-only toolless pass).
+
+Gates: tsc clean, full vitest suite green (59 files / 844 tests), stream-pump.test.ts's 20
+pre-existing pump assertions still green beside the new ones.
+
+### 49. The type scale re-pinned to the reference — and the dead `prose` classes found on the way
+
+The ask arrived as a spec table (2026-09-12): every element with its px size and weight, matching
+ChatGPT's webapp. The survey that preceded the restyle measured the gap — body text 14–15px against
+the spec's 16–17, H1 20–24px against ~28–30, tables 12–14px against 14–16, bold at 700 with a
+primary-tinted chip behind it, h1 in gradient text, h2 behind an accent bar. The heaviest thing the
+survey found was not a size, though: `@tailwindcss/typography` sits in package.json but was never
+registered in tailwind.config.ts's plugins, so the `prose prose-sm sm:prose-base prose-invert`
+classes ChatMessage's containers have carried all along generate ZERO rules — verified against the
+built CSS, where `prose` appears only in the cursor/user-select allowlists from entry 34. All
+message typography was, and remains, the custom markdown components' own classes. The container
+classes are decorative string literals that persuade every reader they are doing something.
+
+The restyle (user-confirmed decisions in parentheses):
+
+  - Font: the platform stack, unchanged. OpenAI Sans is proprietary and unavailable, and index.css's
+    header records the deliberate no-webfont policy (blocking request, offline failure, third-party
+    call on every desktop launch). SF Pro / Segoe UI Variable / Roboto are the humanist grotesques
+    the reference look reads as. (Platform stack, not a webfont.)
+  - Body: `text-[15.5px] sm:text-[16.5px]` weight 400, line-height 1.75 — paragraphs, both list
+    kinds, blockquote, the user bubble's sent and editing text. The old `font-medium` on user
+    prompts is gone: a prompt is content, not a UI label. (15.5/16.5px responsive pair.)
+  - Headings: 28/24/20/18px at 600, plain foreground, no gradient, no bar, no drop-shadow. h4 had
+    no override at all before — browser default 300-weight, now the smallest rung of a real scale.
+  - Bold: `font-semibold` — 600, no chip. Inline code: 13.5px 400 in the foreground colour rather
+    than primary-tinted, still monospace on secondary. (Decorations stripped; the plain reference is
+    weight-and-size hierarchy only.)
+  - Code block body stays 14px, now written `14px` instead of `0.875rem` so it reads as the spec row
+    it is. Language label 12px. Tables 15px with 600 headers.
+  - Composer: mobile stays `text-base` 16px — the iOS Safari zoom guard (a focused field under 16px
+    zooms the viewport and never returns), which predates this entry and outranks the spec. At sm
+    it steps to 16.5px, and `font-medium` became 400 per the spec's input row. Mode chips (Think,
+    Search) 12.5px at 500, was 12/600. Sidebar: New Chat 500 (was 600), conversation titles 400
+    (was 500), count badge and date-group labels 11px/500 (was 10px/600).
+
+Tests: src/test/typography-contract.test.tsx (14) — red-first, all 14 initial assertions failed
+against the pre-restyle code. jsdom does not apply stylesheets, so getComputedStyle cannot resolve
+class-based sizing; the assertions read the class tokens themselves, which is exact here because a
+Tailwind arbitrary value is a 1:1 px declaration — asserting `text-[28px]` IS asserting the size.
+The file's header records why the assertions target the markdown elements rather than any prose
+class: registering the typography plugin someday would double-apply sizes, and the fix is removing
+one of the two, not relaxing the test.
+
+The survey's second finding, fixed in the same pass: ArtifactPanel's MarkdownView styled prose
+artifacts with `prose prose-invert prose-sm` alone — the same zero-rule classes — so a markdown
+artifact rendered with raw browser defaults while chat replies carried the full custom scale.
+`buildMarkdownComponents` is now exported and shared by both surfaces (a second copy is how the
+search providers drifted; see _search-providers.js's header). MarkdownView's container keeps the
+`prose` class deliberately: it is a no-op for styling but a live selector in index.css's desktop
+user-select allowlist, so dropping it would have made artifact prose unselectable — a styling
+cleanup that breaks a behaviour, caught because the join is tested (test 14 renders the real
+ArtifactCanvas with a real store and pins both the shared scale and the surviving `.prose` hook).
+
+Gates: tsc clean (both project passes), full vitest suite green (60 files / 858 tests), vite build
+clean. The dead prose classes were left on the chat containers — the native-selection allowlist
+from entry 34 keys on `.prose` as a selector, and the classes do no harm as no-ops. Registering the
+plugin without removing the component classes would visibly double every size; the test header
+names that trap.

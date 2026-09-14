@@ -48,7 +48,7 @@ import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource } from 
 import { Menu, ArrowDown, Sparkles, AlertTriangle, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
-import { extractFirstMarkdownImage, sanitizeAssistantText, withPersistedImage, closeUnterminatedFence } from '@/lib/chat-format';
+import { extractFirstMarkdownImage, sanitizeAssistantText, withPersistedImage, closeUnterminatedFence, extractReasoning } from '@/lib/chat-format';
 import { buildMessageForest, linearizeForest, switchBranch, toTreeMessages, type TreeNode } from '@/lib/message-tree';
 import { extractMemories, dedupeMemories } from '@/lib/memory';
 
@@ -101,6 +101,15 @@ interface Message {
   // the switcher only appears where a real branch exists.
   __branchIndex?: number;
   __branchCount?: number;
+  // The model's chain-of-thought for this reply (thinking block, ChatGPT-style):
+  // `reasoning_content` deltas when the provider streams that channel, or the
+  // inline <thinking>-style tags extracted out of the content stream. Session
+  // state while streaming; stamped on the final message and persisted with it.
+  reasoning?: string;
+  // Whole seconds between the first thinking delta and the first answer token.
+  // Read by the collapsed block's label ("Thought for 12s"); absent on replies
+  // the model produced without reasoning.
+  thinkSeconds?: number;
 }
 
 interface Conversation {
@@ -120,19 +129,21 @@ interface Conversation {
 // and the Mistral large/medium tiers cold-start 60-100s before the first token,
 // then stream fine. The base timeout must clear that window or those models
 // always error. Verified worst-case first-token was ~100s on 2026-07-21.
-// Added 2026-09-07: an entry whose LAST leg is a measured 144s-TTFB model
-// (deepseek-v4-flash on the default chain) can legally spend that long before
-// its first byte — the server's last-route relaxation lets it — so a fixed
-// 130s client guard would kill a healthy answer one route deep. The budget now
-// scales per model: 130s flat, plus the longest extra first-byte allowance any
-// of its non-primary routes declares (the server spends the same allowance, so
-// the client always stays ahead of the chain it is guarding). See
-// FIRST_BYTE_TIMEOUT_MS in api/llm.js for the server half of this contract.
+// Added 2026-09-07: a model whose route declares extra first-byte headroom
+// (deepseek-v4-flash, measured 144s bare TTFB — see its providers.ts entry)
+// can legally spend that long before its first byte, because the server gives
+// a single-route entry the whole chain budget — so a fixed 130s client guard
+// would kill a healthy answer. The budget scales per model: 130s flat, plus
+// the longest first-byte allowance its routes declare (the server spends the
+// same allowance, so the client always stays ahead of the turn it is
+// guarding). See FIRST_BYTE_TIMEOUT_MS in api/llm.js for the server half of
+// this contract.
 const REQUEST_TIMEOUT_MS = 130_000;
 const SLOW_REQUEST_TIMEOUT_MS = 130_000;
 /** Per-route extra first-byte headroom a model's chain may spend beyond the
- *  22s cap. Last-leg entries get the whole remaining chain budget server-side,
- *  so their allowance here is what keeps the client's guard ahead of it. */
+ *  22s cap. Single-route entries (every entry since 2026-09-13 — see
+ *  ModelSpec.routes) get the whole remaining chain budget server-side, so a
+ *  declared allowance here is what keeps the client's guard ahead of it. */
 const FIRST_BYTE_ALLOWANCE_MS = 90_000;
 /** A model's total cold-start budget: flat base plus its declared extras. */
 function requestBudgetMs(modelId: string): number {
@@ -140,10 +151,7 @@ function requestBudgetMs(modelId: string): number {
   if (!spec) return REQUEST_TIMEOUT_MS;
   return (
     REQUEST_TIMEOUT_MS +
-    Math.max(
-      0,
-      ...spec.routes.slice(1).map((r) => r.firstByteAllowanceMs ?? 0),
-    )
+    Math.max(0, ...spec.routes.map((r) => r.firstByteAllowanceMs ?? 0))
   );
 }
 // How long a stream may sit silent between chunks before we treat the
@@ -845,11 +853,17 @@ export default function Chat() {
     // two are drawn from the same namespace after a reload — see the `clientId`
     // comment in firestore-db.getMessages. Optional so a caller that has no local
     // message (there is none today) still compiles, but every call site passes it.
-    clientId?: string
+    clientId?: string,
+    // The thinking block's payload: chain-of-thought and how long it took. An
+    // object rather than two more positional booleans-of-attendance — this one
+    // is optional and skipped by the paths that have no reasoning (the user
+    // turn, the image turn), and the call sites above would otherwise become
+    // long runs of `undefined, undefined, 0`.
+    meta?: { reasoning?: string; thinkSeconds?: number }
   ) => {
     if (!user) return false;
     try {
-      await firestoreDb.saveMessage(conversationId, user.uid, role, content, modelName, attachments, parentMessageId, clientId);
+      await firestoreDb.saveMessage(conversationId, user.uid, role, content, modelName, attachments, parentMessageId, clientId, meta);
       return true;
     } catch (e) {
       console.error("Error saving message:", e);
@@ -1186,6 +1200,13 @@ export default function Chat() {
     // is lost on reload. runPrimary's handleDelta appends to this.
     let runPrimaryPartialText = '';
 
+    // The thinking the model streamed before the same stall, hoisted for the
+    // same reason: a stream that dies mid-deliberation keeps whatever chain-of-
+    // thought arrived, and the note about the stall lands under a block that
+    // still says what the model was doing when it died.
+    let runPrimaryReasoning = '';
+    let runPrimaryThinkSeconds: number | undefined;
+
     try {
       if (isImageGen) {
         const rawPrompt = trimmedContent || 'a beautiful, highly detailed artistic image';
@@ -1302,14 +1323,22 @@ export default function Chat() {
               });
             } else {
               // Search ran but produced nothing usable (dead fallback, bad key,
-              // quota). Tell the model explicitly so it says "couldn't retrieve
-              // live results" instead of inventing an answer or claiming the web
-              // is empty.
+              // quota). Tell the model explicitly so it discloses the failed
+              // search instead of inventing an answer or claiming the web is
+              // empty. The copy is prescriptive about shape as well as honesty:
+              // measured failure mode (2026-09-12) had models treating the
+              // disclosure itself as the whole reply — one line about the failed
+              // search, nothing about the question — and parroting the query
+              // back ("I could not retrieve live results for the latest AI news
+              // developments and breakthroughs as of September 12, 2026"). So the
+              // instruction fixes the ordering: disclose briefly, THEN answer
+              // from knowledge, caveat the staleness, and answer the question in
+              // the user's own words rather than the query's.
               messagesForModel.splice(messagesForModel.length - 1, 0, {
                 role: 'system',
                 content: [
                   `[WEB SEARCH ATTEMPTED FOR "${searchQuery}" BUT RETURNED NO USABLE RESULTS${search?.error ? ` (reason: ${search.error})` : ''}.]`,
-                  'Tell the user you could not retrieve live web results for this, then answer from your own knowledge while clearly flagging it may be out of date. Do NOT fabricate headlines, prices, scores, or dates.',
+                  'I could not retrieve live results, so this is from my training data and may be out of date. Briefly acknowledge that the live search failed in one plain sentence, without repeating the search query back, and then answer the question as well as you can from your own knowledge. The acknowledgement must not be the whole reply. Do NOT fabricate headlines, prices, scores, or dates, and do not present remembered information as current.',
                 ].join('\n')
               });
             }
@@ -1335,7 +1364,7 @@ export default function Chat() {
               // one situation is two sets of behaviour to keep in step.
               content: [
                 `[WEB SEARCH ATTEMPTED FOR "${searchQuery}" BUT FAILED (reason: ${reason}).]`,
-                'Tell the user you could not retrieve live web results for this, then answer from your own knowledge while clearly flagging it may be out of date. Do NOT fabricate headlines, prices, scores, or dates.',
+                'I could not retrieve live results, so this is from my training data and may be out of date. Briefly acknowledge that the live search failed in one plain sentence, without repeating the search query back, and then answer the question as well as you can from your own knowledge. The acknowledgement must not be the whole reply. Do NOT fabricate headlines, prices, scores, or dates, and do not present remembered information as current.',
               ].join('\n')
             });
           } finally {
@@ -1389,6 +1418,29 @@ export default function Chat() {
             // watchdog takes over and resets on every chunk, so only a genuine
             // stall — not a model that is simply slow between tokens — trips it.
             armIdleWatchdog();
+            // The answer has started: if the model reasoned first, the thinking
+            // clock stops here — the collapsed label reads "Thought for Ns",
+            // not "Thought for the whole turn".
+            if (reasoningStartMs && thinkSeconds === undefined) {
+              thinkSeconds = Math.max(1, Math.round((Date.now() - reasoningStartMs) / 1000));
+              runPrimaryThinkSeconds = thinkSeconds;
+            }
+            // Providers without a reasoning channel sometimes emit the thinking
+            // inline as <thinking>…</thinking>, and sanitizeAssistantText strips
+            // those tags out of the displayed body — so the same pass that strips
+            // them recovers them for the block. Channel reasoning (if any) wins:
+            // both are the model's thinking for this reply, and a provider that
+            // streams the channel is the one that tags are leftovers from.
+            if (!fullReasoning) {
+              const inline = extractReasoning(fullContent).reasoning;
+              if (inline) {
+                fullReasoning = inline;
+                runPrimaryReasoning = fullReasoning;
+                setMessages((prev) =>
+                  prev.map((m) => (m.id === assistantMessage.id ? { ...m, reasoning: fullReasoning } : m)),
+                );
+              }
+            }
             const liveContent = sanitizeAssistantText(fullContent) || fullContent;
             runPrimaryPartialText = liveContent;
             setMessages((prev) =>
@@ -1406,6 +1458,36 @@ export default function Chat() {
             );
           };
 
+          // The thinking block, streamed live. Two sources feed it and they are
+          // kept in one field deliberately: a reasoning model on a tool path can
+          // emit `reasoning_content` for its call and inline <thinking> tags for
+          // its answer (measured: glm-5.3-free, 2026-09-12), and a block that
+          // rendered whichever arrived last would flicker between the two. The
+          // channel deltas come straight through here; the inline tags are
+          // fished out of fullContent by extractReasoning below, which already
+          // runs every chunk as part of sanitizeAssistantText — the reasoning
+          // never reaches the sanitized body, so it must be caught here or it
+          // is gone for good.
+          let fullReasoning = runPrimaryReasoning;
+          let reasoningStartMs = 0;
+          let thinkSeconds = runPrimaryThinkSeconds;
+          const handleReasoning = (delta: string) => {
+            if (!fullReasoning) reasoningStartMs = Date.now();
+            fullReasoning += delta;
+            runPrimaryReasoning = fullReasoning;
+            // Thinking is proof of life exactly like a first token: the
+            // cold-start guard must not fire while the model is mid-deliberation,
+            // and the idle watchdog resets on every delta.
+            if (!receivedAssistantContent) {
+              clearColdStartGuard();
+              receivedAssistantContent = true;
+            }
+            armIdleWatchdog();
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantMessage.id ? { ...m, reasoning: fullReasoning } : m)),
+            );
+          };
+
           if (hasImages && isVisionCapableModel(selectedModel)) {
             // The selected model can read the image itself, so answer in one hop.
             // The old two-hop path (vision engine → text-only synthesis) dropped
@@ -1417,7 +1499,7 @@ export default function Chat() {
               selectedModel,
               handleDelta,
               abortControllerRef.current!.signal,
-              { deepThink },
+              { deepThink, onReasoning: handleReasoning },
             );
           } else if (hasImages) {
             // Step 1: Run Vision Engine (Mistral Pixtral 12B by default) to extract raw visual breakdown
@@ -1458,7 +1540,7 @@ export default function Chat() {
               selectedModel,
               handleDelta,
               abortControllerRef.current!.signal,
-              { deepThink },
+              { deepThink, onReasoning: handleReasoning },
             );
           } else if (useAgent) {
             // The agent path. The model decides whether it needs to search,
@@ -1469,6 +1551,7 @@ export default function Chat() {
               messages: messagesForModel,
               modelId: effectiveModelId,
               onChunk: handleDelta,
+              onReasoning: handleReasoning,
               signal: abortControllerRef.current!.signal,
               deepThink,
               // Tools that name an attachment resolve it against these.
@@ -1539,7 +1622,7 @@ export default function Chat() {
             }
           } else {
             setStatusText(deepThink ? 'Thinking deeply...' : 'Generating response...');
-            await generateChatResponse(messagesForModel, effectiveModelId, handleDelta, abortControllerRef.current!.signal, { deepThink });
+            await generateChatResponse(messagesForModel, effectiveModelId, handleDelta, abortControllerRef.current!.signal, { deepThink, onReasoning: handleReasoning });
           }
 
           return sanitizeAssistantText(fullContent);
@@ -1600,6 +1683,11 @@ export default function Chat() {
               return {
                 ...m,
                 content: finalText,
+                // The turn's thinking, frozen now the answer is in: the block
+                // collapses from "Thinking…" to its summary label, and both it
+                // and thinkSeconds go to Firestore so a reload keeps them.
+                reasoning: fullReasoning || undefined,
+                thinkSeconds,
                 imageUrl: agentImageUrl || m.imageUrl,
                 files: agentFiles.length ? agentFiles : m.files,
                 codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns,
@@ -1631,7 +1719,7 @@ export default function Chat() {
             // the explicit Image-model path has always done, and it renders the
             // same: ChatMessage hoists the markdown image out of the prose with
             // stripMarkdownImages, so this adds nothing visible to the reply.
-            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id);
+            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: fullReasoning, thinkSeconds });
             maybeExtractMemories(finalText);
           }
         } else if (agentImageUrl || agentFiles.length) {
@@ -1641,12 +1729,12 @@ export default function Chat() {
           const madeText = agentImageUrl ? 'Here you go.' : `Created ${agentFiles.map((f) => f.filename).join(', ')}.`;
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantMessage.id
-              ? { ...m, content: madeText, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns }
+              ? { ...m, content: madeText, reasoning: fullReasoning || undefined, thinkSeconds, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns }
               : m)),
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
           if (convId && isAuthenticated) {
-            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id);
+            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: fullReasoning, thinkSeconds });
             maybeExtractMemories(madeText);
           }
         } else {
@@ -1683,7 +1771,9 @@ export default function Chat() {
           );
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === assistantMessage.id ? { ...m, content: persistedPartial } : m,
+              m.id === assistantMessage.id
+                ? { ...m, content: persistedPartial, reasoning: fullReasoning || undefined, thinkSeconds }
+                : m,
             ),
           );
           if (convId && isAuthenticated) {
@@ -1695,6 +1785,7 @@ export default function Chat() {
               undefined,
               assistantMessage.parentMessageId,
               assistantMessage.id,
+              { reasoning: fullReasoning, thinkSeconds },
             );
             // No `.catch` here, deliberately, and it used to have one.
             // `saveMessage` catches its own failure, toasts it and returns false
@@ -2338,6 +2429,8 @@ export default function Chat() {
                           content={msg.content}
                           imageUrl={msg.imageUrl}
                           attachments={msg.attachments}
+                          reasoning={msg.reasoning}
+                          thinkSeconds={msg.thinkSeconds}
                           isStreaming={isLoading && msg.role === 'assistant' && index === messages.length - 1}
                           modelName={msg.modelName || 'AI'}
                           statusText={isLoading && msg.role === 'assistant' && index === messages.length - 1 ? statusText : undefined}

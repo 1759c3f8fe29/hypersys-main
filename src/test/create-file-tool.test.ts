@@ -17,7 +17,7 @@
 // supplied ("unsupported format \"\"") ends the turn in an apology.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { executeCreateFile } from "@/lib/tools/create-file";
+import { executeCreateFile, prepareCreateFileRecoveredArgs } from "@/lib/tools/create-file";
 import type { ToolContext } from "@/lib/tools/types";
 
 const ctx = (): ToolContext => ({ modelId: "test-model", artifacts: {} });
@@ -149,5 +149,65 @@ describe("what the model is told after a file is made", () => {
     const urls = context.artifacts.files?.map((f) => f.url) ?? [];
     expect(new Set(urls).size).toBe(2);
     expect(urls.every((u) => u.startsWith("blob:"))).toBe(true);
+  });
+});
+
+// The bare-arguments recovery path (see parseTextToolCalls in chat-format.ts)
+// salvaged a real emission: glm-5.3-free streamed "Creating a pptx on AI vs HI
+// now." plus a fenced {title, slides} and never named the tool. The salvaged
+// object is the CONTENT the model meant to write, not the arguments — this
+// suite pins the repair that turns it back into what the executor reads.
+describe("prepareCreateFileRecoveredArgs — repairing a salvaged pptx emission", () => {
+  it("fills filename/format from the deck title and folds the payload into content", async () => {
+    const observed = {
+      title: "AI vs HI: A Comparative Overview",
+      slides: [
+        { title: "Basics", bullet_points: ["AI: simulation", "HI: cognition"] },
+      ],
+    };
+    const repaired = prepareCreateFileRecoveredArgs(observed);
+    // Colons do not survive the stem: they are invalid in filenames on Windows.
+    expect(repaired.filename).toBe("ai-vs-hi-a-comparative-overview.pptx");
+    expect(repaired.format).toBe("pptx");
+    expect(typeof repaired.content).toBe("string");
+    // And the executor can actually run it: a real pptx blob comes back.
+    const built = await executeCreateFile(repaired as Record<string, unknown>, context);
+    expect(built.ok).toBe(true);
+    expect(built.filename).toBe("ai-vs-hi-a-comparative-overview.pptx");
+    expect(context.artifacts.files?.length).toBe(1);
+  });
+
+  it("rewrites bullet_points to bullets — the generator does not read that spelling", () => {
+    const repaired = prepareCreateFileRecoveredArgs({
+      title: "Deck",
+      slides: [{ title: "S1", bullet_points: ["one", "two"] }],
+    });
+    const content = JSON.parse(String(repaired.content));
+    expect(content.slides[0].bullets).toEqual(["one", "two"]);
+    expect(content.slides[0].bullet_points).toBeUndefined();
+  });
+
+  it("turns a deck title with no titled slide into the cover slide's title", () => {
+    const repaired = prepareCreateFileRecoveredArgs({
+      title: "Quarterly Review",
+      slides: [{ bullets: ["a"] }],
+    });
+    const content = JSON.parse(String(repaired.content));
+    expect(content.slides[0]).toEqual({ title: "Quarterly Review", bullets: [] });
+    expect(content.slides[1]).toEqual({ bullets: ["a"] });
+  });
+
+  it("defaults a titleless pptx emission to a generic stem, not an empty filename", () => {
+    const repaired = prepareCreateFileRecoveredArgs({ slides: [{ title: "Only slide" }] });
+    expect(String(repaired.filename)).toBe("document.pptx");
+  });
+
+  it("treats an xlsx sheets payload the same way, with the xlsx extension", () => {
+    const repaired = prepareCreateFileRecoveredArgs({
+      sheets: [{ name: "Q1", rows: [{ a: 1 }] }],
+    });
+    expect(repaired.filename).toBe("document.xlsx");
+    expect(repaired.format).toBe("xlsx");
+    expect(JSON.parse(String(repaired.content))).toEqual({ sheets: [{ name: "Q1", rows: [{ a: 1 }] }] });
   });
 });

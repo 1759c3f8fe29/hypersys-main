@@ -112,6 +112,30 @@ export interface ToolDefinition {
    * string. Validate defensively and return `{ok:false}` on nonsense.
    */
   execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
+  /**
+   * Optional domain recognizer for text-form recovery: given a nameless JSON
+   * object a model emitted as prose, does this tool recognize it as its own
+   * arguments? Used by parseTextToolCalls' bare-arguments path (see
+   * chat-format.ts) when a model streams an unnamed tool call — the observed
+   * case was a pptx {slides:[…]} block for create_file, whose shape lives in
+   * the schema's content DESCRIPTION rather than in its property list, so
+   * schema matching alone cannot see it.
+   *
+   * Must be conservative: return true only for shapes unambiguously this
+   * tool's. Two tools both claiming an object is ambiguity, and the recovery
+   * declines it.
+   */
+  recognizeTextForm?(obj: Record<string, unknown>): boolean;
+  /**
+   * Optional repair for arguments salvaged by the bare-arguments recovery path
+   * (the unnamed half of parseTextToolCalls). Those emissions were written as
+   * the tool's CONTENT, not its arguments — create_file's observed form was a
+   * fenced {slides:[…]} with no filename, no format, and slide fields spelled
+   * the model's own way. Failing them would force a retry through the same
+   * provider bug that mangled the first attempt; repairing them runs the call
+   * the user already waited for.
+   */
+  prepareRecoveredArgs?(args: Record<string, unknown>): Record<string, unknown>;
 }
 
 /** Coerce a model-supplied value to a non-empty trimmed string, or undefined. */

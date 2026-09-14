@@ -114,6 +114,14 @@ export interface FirestoreMessage {
   // rather than an in-place mutation — old branches are preserved. This index
   // orders the siblings and drives the < 1/3 > branch switcher.
   siblingIndex?: number;
+  // The thinking block (2026-09-13): the model's chain-of-thought and how
+  // long it spent before the first answer token. Written for assistant turns
+  // that produced reasoning; absent otherwise. Messages written before these
+  // fields existed read back without them and render with no block, which is
+  // the correct presentation for a reply that never showed one.
+  reasoning?: string;
+  /** Whole seconds of pre-answer thinking; rounded on write. */
+  thinkSeconds?: number;
 }
 
 export const firestoreDb = {
@@ -207,7 +215,12 @@ export const firestoreDb = {
           // tree-linearization code never has to distinguish "missing" from
           // "root" at runtime.
           parentMessageId: data.parentMessageId ?? null,
-          siblingIndex: typeof data.siblingIndex === 'number' ? data.siblingIndex : 0
+          siblingIndex: typeof data.siblingIndex === 'number' ? data.siblingIndex : 0,
+          // Thinking-block fields: undefined (not null) when the turn had no
+          // reasoning, so `!msg.reasoning` means "no block" rather than "an
+          // empty block" after a reload.
+          reasoning: data.reasoning || undefined,
+          thinkSeconds: typeof data.thinkSeconds === 'number' ? data.thinkSeconds : undefined
         };
       });
       // Sort client-side to avoid needing a composite index
@@ -262,7 +275,11 @@ export const firestoreDb = {
     // The id this message already has in the client's own state, persisted so it
     // survives a reload. See the comment on `id` in getMessages — without it, the
     // parentMessageId written above pointed at nothing after a refresh.
-    clientId?: string | null
+    clientId?: string | null,
+    // The thinking block's payload (see FirestoreMessage.reasoning). An object
+    // so the reasoning-free call sites stay as they were rather than growing
+    // two more undefineds each.
+    meta?: { reasoning?: string; thinkSeconds?: number }
   ): Promise<string> {
     // Compute the sibling index: how many children this parent already has.
     // This is a read-then-write (not transactional), which is fine here —
@@ -318,6 +335,10 @@ export const firestoreDb = {
       parentMessageId: parentMessageId ?? null,
       siblingIndex,
       clientId: clientId ?? null,
+      // The thinking block's fields — null rather than omitted so a doc that
+      // has no reasoning is the same shape as one that never gets any.
+      reasoning: meta?.reasoning || null,
+      thinkSeconds: typeof meta?.thinkSeconds === 'number' ? meta.thinkSeconds : null,
       createdAt: serverTimestamp()
     });
 

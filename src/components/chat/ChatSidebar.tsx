@@ -515,9 +515,9 @@ export default function ChatSidebar({
           </div>
 
           <div className="p-4 space-y-4 flex-shrink-0">
-            <Button 
-              onClick={onNewConversation} 
-              className="w-full liquid-control text-primary justify-start gap-3 py-6 px-5 font-semibold tracking-wide"
+            <Button
+              onClick={onNewConversation}
+              className="w-full liquid-control text-primary justify-start gap-3 py-6 px-5 font-medium tracking-wide"
             >
               <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-primary/20 group-hover:bg-primary/30 transition-colors">
                 <Plus className="w-4 h-4 text-primary" />
@@ -539,7 +539,7 @@ export default function ChatSidebar({
                 </div>
                 <span className="flex flex-col items-start min-w-0 flex-1">
                   <span className="text-[10px] font-bold text-sidebar-foreground/50 uppercase tracking-widest leading-none mb-1">AI Model</span>
-                  <span className="text-sm font-semibold text-sidebar-foreground truncate max-w-full">
+                  <span className="text-sm font-medium text-sidebar-foreground truncate max-w-full">
                     {selectedModelMeta.emoji} {selectedModelMeta.label}
                   </span>
                 </span>
@@ -615,7 +615,7 @@ export default function ChatSidebar({
               <History className="w-3.5 h-3.5 text-sidebar-foreground/50" />
               <p className="text-xs font-medium text-sidebar-foreground/50 uppercase tracking-wider">History</p>
               {conversations.length > 0 && (
-                <span className="ml-auto text-[10px] font-semibold text-primary/70 bg-primary/10 border border-primary/20 rounded-full px-2 py-0.5">
+                <span className="ml-auto text-[11px] font-medium text-primary/70 bg-primary/10 border border-primary/20 rounded-full px-2 py-0.5">
                   {/* The match count while filtering, the total otherwise. A badge
                       that keeps reading "47" beside three visible rows is the kind
                       of small untruth that makes a UI feel careless. */}
@@ -823,7 +823,7 @@ export default function ChatSidebar({
               <div className="space-y-3">
                 {groupedConversations.map((group) => (
                   <div key={group.label} className="space-y-1">
-                    <p className="px-2 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/35">{group.label}</p>
+                    <p className="px-2 text-[11px] font-medium uppercase tracking-wider text-sidebar-foreground/35">{group.label}</p>
                     {/* No AnimatePresence and no enter animation on the rows any more,
                         which the search field forced a decision on.
 
@@ -919,7 +919,7 @@ export default function ChatSidebar({
                                     className="w-full bg-sidebar-accent/60 border border-primary/40 rounded px-1.5 py-0.5 text-sm font-medium text-sidebar-foreground outline-none"
                                   />
                                 ) : (
-                                  <p className="text-sm truncate font-medium flex items-center gap-1.5">
+                                  <p className="text-sm truncate font-normal flex items-center gap-1.5">
                                     {conv.title}
                                     {/* Pin glyph beside the title, so a pinned row is
                                         distinguishable from its unpinned neighbours by

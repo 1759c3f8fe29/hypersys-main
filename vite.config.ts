@@ -9,6 +9,10 @@ import { existsSync, statSync } from "fs";
 // import it from anything under src/.
 // @ts-expect-error - plain JS module shared with the serverless route, no .d.ts
 import { runSearch } from "./api/_search-providers.js";
+// Same rule: api/llm.js imports this too, and dev and prod must sanitise
+// identically — the 400-code-3240 poison story is in the module's own header.
+// @ts-expect-error - plain JS module shared with the serverless route, no .d.ts
+import { sanitiseMessages } from "./api/_messages.js";
 
 // Env available to the /api proxy handlers. Vite does NOT load .env into
 // process.env, so we populate this from loadEnv() at config time. Falls back
@@ -183,10 +187,23 @@ function localApiProxy(): Plugin {
 const DEV_PROVIDER_ENDPOINTS: Record<string, { url: string; envKeys: string[]; byokHeader?: string; keyless?: boolean }> = {
   nvidia: { url: "https://integrate.api.nvidia.com/v1/chat/completions", envKeys: ["NVIDIA_API_KEY", "VITE_NVIDIA_API_KEY"], byokHeader: "x-nvidia-api-key" },
   mistral: { url: "https://api.mistral.ai/v1/chat/completions", envKeys: ["MISTRAL_API_KEY", "VITE_MISTRAL_API_KEY"], byokHeader: "x-mistral-api-key" },
+  // Kept in step with PROVIDER_ENDPOINTS in api/llm.js, whose header says dev and
+  // prod must change together. It drifted once: tokenrouter was added there on
+  // 2026-09-08 and not here, so every dev request for the default model walked
+  // its first leg into "unknown provider" (status 0) and paid a wasted hop
+  // before the nemo fallback — and the router's 400-on-poisoned-history bug
+  // was only reachable in dev because the healthy first leg never ran.
+  tokenrouter: { url: "https://api.tokenrouter.com/v1/chat/completions", envKeys: ["TOKENROUTER_API_KEY", "VITE_TOKENROUTER_API_KEY"], byokHeader: "x-tokenrouter-api-key" },
   pollinations: { url: "https://text.pollinations.ai/openai", envKeys: [], keyless: true },
 };
 
-const DEV_FAILOVER_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
+// Mirrors FAILOVER_STATUSES in api/_failover.js, which added 404 (NVIDIA serves
+// it for transient unavailability — nemotron-3-super-120b-a12b 404'd three times
+// running, then answered three times running) and 410 (EOL, fails over because
+// another provider may still host the same weights). When this set lacked them,
+// a 404/410ing dev route stopped the chain instead of walking to the backup —
+// the opposite of what prod did with the same request.
+const DEV_FAILOVER_STATUSES = new Set([404, 408, 409, 410, 425, 429, 500, 502, 503, 504, 529]);
 
 /**
  * The slice of Node's ServerResponse these dev proxies actually touch.
@@ -316,6 +333,14 @@ async function proxyLlm(
     return;
   }
 
+  // Dev must do exactly what api/llm.js does here (its header: change both
+  // together). Empty assistant messages in replayed history 400 at Mistral
+  // (code 3240) and a 400 stops the chain — api/_messages.js has the story.
+  const { messages: cleanMessages, dropped } = sanitiseMessages(messages);
+  if (dropped > 0) {
+    console.warn(`[llm] dropped ${dropped} empty assistant message(s) from history`);
+  }
+
   const attempts: Array<{ provider: string; status: number; detail?: string }> = [];
 
   for (const route of routes) {
@@ -346,7 +371,7 @@ async function proxyLlm(
         },
         body: JSON.stringify({
           model: route.modelId,
-          messages,
+          messages: cleanMessages,
           stream: true,
           temperature: temperature ?? 0.7,
           top_p: top_p ?? 0.95,

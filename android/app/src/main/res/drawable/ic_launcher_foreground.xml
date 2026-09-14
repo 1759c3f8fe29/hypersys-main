@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder brand mark: a rounded "H" glyph. The web app's flyer-logo.png
+     is a raster; porting it byte-for-byte is a later pass — this vector stands
+     in so Assets.LOGO_RES resolves from day one, and every logo call site goes
+     through it exactly as the web file's LOGO_URL demands. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#E6E8EB"
+        android:pathData="M14,10 L14,38 M34,10 L34,38 M14,24 L34,24"
+        android:strokeColor="#E6E8EB"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+</vector>

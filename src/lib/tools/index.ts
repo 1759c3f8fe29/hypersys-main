@@ -7,7 +7,12 @@
 // tool that was never advertised, and the recoverable answer is to tell them.
 
 import type { ToolDefinition } from "./types";
-import { CREATE_FILE_SCHEMA, executeCreateFile } from "./create-file";
+import {
+  CREATE_FILE_SCHEMA,
+  executeCreateFile,
+  prepareCreateFileRecoveredArgs,
+  recognizeCreateFileTextForm,
+} from "./create-file";
 import { EDIT_FILE_SCHEMA, executeEditFile } from "./edit-file";
 import { GENERATE_IMAGE_SCHEMA, executeGenerateImage } from "./generate-image";
 import { OCR_IMAGE_SCHEMA, executeOcrImage } from "./ocr-image";
@@ -20,7 +25,13 @@ export type { AttachmentRef, ToolArtifacts, ToolContext, ToolDefinition, ToolRes
 const DEFINITIONS: ToolDefinition[] = [
   { name: "web_search", schema: WEB_SEARCH_SCHEMA, execute: executeWebSearch },
   { name: "generate_image", schema: GENERATE_IMAGE_SCHEMA, execute: executeGenerateImage },
-  { name: "create_file", schema: CREATE_FILE_SCHEMA, execute: executeCreateFile },
+  {
+    name: "create_file",
+    schema: CREATE_FILE_SCHEMA,
+    execute: executeCreateFile,
+    recognizeTextForm: recognizeCreateFileTextForm,
+    prepareRecoveredArgs: prepareCreateFileRecoveredArgs,
+  },
   { name: "edit_file", schema: EDIT_FILE_SCHEMA, execute: executeEditFile },
   { name: "run_code", schema: RUN_CODE_SCHEMA, execute: executeRunCode },
   { name: "ocr_image", schema: OCR_IMAGE_SCHEMA, execute: executeOcrImage },
@@ -37,6 +48,21 @@ export function getTool(name: string): ToolDefinition | undefined {
 /** The schemas to advertise on a request. Order is the order the model sees. */
 export function toolSchemas(): ToolSchema[] {
   return DEFINITIONS.map((tool) => tool.schema);
+}
+
+/**
+ * The recovery-side view of the registry, for parseTextToolCalls'
+ * bare-arguments path. Built here because the recognizers live on
+ * ToolDefinition (registry-side) and can never ride on ToolSchema, which is
+ * JSON-stringified into the provider payload.
+ */
+export function toolRecoveryInfos(): { name: string; required: string[]; properties: Record<string, unknown>; recognizeTextForm?(obj: Record<string, unknown>): boolean }[] {
+  return DEFINITIONS.map((tool) => ({
+    name: tool.schema.function.name,
+    required: tool.schema.function.parameters.required ?? [],
+    properties: tool.schema.function.parameters.properties ?? {},
+    ...(tool.recognizeTextForm ? { recognizeTextForm: (obj: Record<string, unknown>) => tool.recognizeTextForm!(obj) } : {}),
+  }));
 }
 
 export const TOOL_NAMES = DEFINITIONS.map((tool) => tool.name);

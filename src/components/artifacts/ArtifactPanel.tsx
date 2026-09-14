@@ -18,6 +18,9 @@ import { copyText } from "@/lib/clipboard";
 import type { Artifact, ArtifactVersion } from "@/lib/artifacts";
 import { RunButton, RunOutput } from "@/components/chat/CodeRunner";
 import { isRunnableLanguage, useCodeRunner } from "@/components/chat/use-code-runner";
+// The chat surface's markdown element overrides, shared so a prose artifact and
+// a chat reply use one type scale (see the export's comment in ChatMessage.tsx).
+import { buildMarkdownComponents } from "@/components/chat/ChatMessage";
 import { useArtifacts, closeArtifact } from "./ArtifactProvider";
 
 // The languages the preview iframe can render live. React would need a runtime
@@ -347,9 +350,17 @@ function CodeView({ content, language }: { content: string; language: string }) 
 }
 
 function MarkdownView({ content }: { content: string }) {
+  // Built once per module is what ChatMessage does per component; here the
+  // builder is pure and the components are static, so memoizing at module
+  // level skips the rebuild on every panel render.
+  const components = useMemo(buildMarkdownComponents, []);
   return (
-    <div className="p-5 prose prose-invert prose-sm max-w-none">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    // `prose` stays even though the typography plugin is unregistered and it
+    // generates no styling rules: the desktop selection allowlist (index.css)
+    // keys user-select:text on `.prose`, so dropping it made artifact prose
+    // unselectable. It is a semantic hook here, not a style.
+    <div className="p-5 prose max-w-none">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{content}</ReactMarkdown>
     </div>
   );
 }

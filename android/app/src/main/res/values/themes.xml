@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Framework Material theme, dark-capable, no extra dependency. When the
+         typographic port of ChatMessage.tsx lands this grows a real scale. -->
+    <style name="Theme.Hypersys" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
+    </style>
+</resources>

@@ -13,6 +13,7 @@ import { describe, it, expect } from "vitest";
 import {
   sanitizeAssistantText,
   stripReasoning,
+  extractReasoning,
   segmentByFence,
   unwrapJsonEnvelope,
   stripMarkdownImages,
@@ -77,6 +78,42 @@ describe("sanitizeAssistantText leaves code fences alone", () => {
   it("still spaces headings and bold lists in prose", () => {
     expect(sanitizeAssistantText("intro text\n## Heading")).toContain("intro text\n\n## Heading");
     expect(sanitizeAssistantText("lead in\n- **bold item**")).toContain("lead in\n\n- **bold item**");
+  });
+});
+
+describe("extractReasoning — the split stripReasoning used to burn", () => {
+  it("returns both halves of a complete think block", () => {
+    const { reasoning, text } = extractReasoning("Hmm.\n<thinking>a=2, b=3, so 5</thinking>The answer is 5.");
+    expect(reasoning).toBe("a=2, b=3, so 5");
+    expect(text).toBe("Hmm.\nThe answer is 5.");
+  });
+
+  it("captures everything after a dangling open tag as live thinking", () => {
+    // Mid-stream: the tag is open, the block is still growing. The thinking
+    // captured here is what the block shows while the model works.
+    const { reasoning, text } = extractReasoning("Here:\n<thinking>weighing");
+    expect(reasoning).toBe("weighing");
+    expect(text).toBe("Here:");
+  });
+
+  it("keeps a fenced example of the tag in the text, out of the reasoning", () => {
+    // A block demonstrating a prompt format is content; pulling it into the
+    // thinking block would be the same bug that once deleted it.
+    const raw = "Models emit this:\n\n```xml\n<thinking>hidden</thinking>\n```";
+    const { reasoning, text } = extractReasoning(raw);
+    expect(reasoning).toBe("");
+    expect(text).toContain("<thinking>hidden</thinking>");
+  });
+
+  it("joins several blocks with a blank line", () => {
+    const out = extractReasoning("Before.<reasoning>first</reasoning>Between.<reasoning>second</reasoning>Done.");
+    expect(out.reasoning).toBe("first\n\nsecond");
+    expect(out.text).toBe("Before.Between.Done.");
+  });
+
+  it("leaves clean text untouched in both fields", () => {
+    const out = extractReasoning("Just an answer, no tags anywhere.");
+    expect(out).toEqual({ reasoning: "", text: "Just an answer, no tags anywhere." });
   });
 });
 

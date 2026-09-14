@@ -12,7 +12,8 @@ import {
 } from "./providers";
 // `chat-format` imports nothing, so this cannot start a cycle — the same property
 // that lets `api/_failover.js` stay dependency-free (see providers.ts).
-import { stripReasoning } from "./chat-format";
+import { parseTextToolCalls, stripReasoning } from "./chat-format";
+import type { RecoverySchemaInfo } from "./chat-format";
 
 // ---------------------------------------------------------------------------
 // API base — same-origin on the web, absolute on the desktop shell
@@ -47,10 +48,16 @@ export const VISION_ENGINE_MODEL = "nemotron-vision";
 // then Mistral's multimodal chat engines so an outage or a missing NVIDIA key
 // still resolves to an answer. All ids are live catalogue ids — there is no
 // alias layer to lean on.
+//
+// 2026-09-11: mistral-large dropped from the walk — its only route 403s
+// tier_not_allowed (code 1910) and has left Mistral's /v1/models, so as the
+// final engine it was a guaranteed dead end (and its catalogue entry is now
+// hidden). mistral-medium stays: it 429s on the free tier — capacity, not a
+// verdict — but is the only remaining non-NVIDIA vision engine, so it is the
+// leg that survives an NVIDIA outage even though it usually loses the race.
 export const VISION_ENGINE_FALLBACKS = [
   "nemotron-vision",
   "mistral-medium",
-  "mistral-large",
 ];
 
 export function isVisionCapableModel(modelId: string): boolean {
@@ -194,7 +201,7 @@ export async function generateChatResponse(
   modelId: string,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
-  opts?: { deepThink?: boolean },
+  opts?: { deepThink?: boolean; onReasoning?: (text: string) => void },
 ) {
   // The catalogue in providers.ts is the single source of truth: a known id
   // goes through the unified /api/llm router, which walks that model's
@@ -226,7 +233,15 @@ export async function generateRoutedResponse(
   modelId: string,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
-  opts?: { deepThink?: boolean; tools?: ToolSchema[]; toolChoice?: "auto" | "none" | "required" },
+  opts?: {
+    deepThink?: boolean;
+    tools?: ToolSchema[];
+    toolChoice?: "auto" | "none" | "required";
+    /** Recovery-side schema info for parseTextToolCalls' bare-arguments path. */
+    recoverySchemas?: RecoverySchemaInfo[];
+    /** Live `reasoning_content` deltas, for the thinking block. */
+    onReasoning?: (text: string) => void;
+  },
 ): Promise<StreamResult> {
   const spec = getModel(modelId)!;
 
@@ -272,7 +287,17 @@ export async function generateRoutedResponse(
     throw new Error(routerError(response.status, errText));
   }
 
-  return pumpOpenAiStream(response, onChunk);
+  return pumpOpenAiStream(response, onChunk, {
+    // Text-form recovery only applies to a pass that advertised tools — see the
+    // pump's doc note. The names come from the schemas so prose that merely
+    // mentions a tool can never match. The recovery schemas come through opts
+    // (built by the agent loop from the registry) so ai.ts never imports the
+    // tool registry — tools imports this file, and the reverse edge would be
+    // circular.
+    toolsAdvertised: opts?.tools?.length ? opts.tools.map((t) => t.function.name) : undefined,
+    recoverySchemas: opts?.recoverySchemas,
+    onReasoning: opts?.onReasoning,
+  });
 }
 
 /**
@@ -570,16 +595,46 @@ export function slotIndexFor(
  * asked for two tools and the loop reports malformed arguments. A fake Response
  * over a ReadableStream exercises it exactly as the network does, including the
  * part that actually breaks — fragments split at arbitrary byte boundaries.
+ *
+ * `opts.toolsAdvertised` opts in to text-form tool-call recovery. Some providers
+ * intermittently stream a tool call as prose (see parseTextToolCalls in
+ * chat-format.ts) instead of `tool_calls` deltas; when a pass advertised tools
+ * and produced none, the accumulated content is re-examined for a call the
+ * model wrote as text. Only callers that sent tools should pass it — on a
+ * tools-less pass, prose that merely mentions a tool name must stay prose.
+ *
+ * `opts.recoverySchemas` extends that to emissions that never name a tool —
+ * a bare JSON object of arguments, claimed by exactly one tool (schema match
+ * or domain recognizer). Same rule: only a tools pass, only when no
+ * structured calls arrived.
+ *
+ * `opts.onReasoning`, when provided, receives `reasoning_content` deltas as
+ * they arrive — the model's chain-of-thought streamed live into a thinking
+ * block, the way ChatGPT shows it, rather than being held silently until the
+ * turn ends. It also changes the thinking-only fallback: with a callback the
+ * thinking is already visible in its own block, so a model that spent its
+ * whole budget reasoning and never answered leaves the message body empty
+ * instead of having its private deliberation pasted in as if it were the
+ * answer (the caller's empty-turn notice covers that case). Callers with no
+ * callback keep the old behavior exactly.
  */
 export async function pumpOpenAiStream(
   response: Response,
   onChunk: (text: string) => void,
+  opts?: {
+    toolsAdvertised?: string[];
+    recoverySchemas?: RecoverySchemaInfo[];
+    onReasoning?: (text: string) => void;
+  },
 ): Promise<StreamResult> {
   if (!response.body) throw new Error("No response body");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let reasoning = "";
+  // Kept for the text-form recovery below — content is streamed to `onChunk` as
+  // it arrives and would otherwise be unrecoverable once the turn ends.
+  let contentText = "";
   let sawContent = false;
   let finishReason: string | undefined;
 
@@ -638,14 +693,16 @@ export async function pumpOpenAiStream(
         }
 
         // Reasoning models (kimi, nemotron, minimax) stream their thinking in
-        // `reasoning_content` and the answer in `content`. Emit content when it
-        // exists; only fall back to reasoning when a turn produced nothing else,
-        // so a thinking-only response is never silently empty.
+        // `reasoning_content` and the answer in `content`. Both are live now:
+        // content to `onChunk`, thinking to `onReasoning` when the caller wants
+        // to show a thinking block.
         if (delta?.content) {
           sawContent = true;
+          contentText += delta.content;
           onChunk(delta.content);
         } else if (delta?.reasoning_content) {
           reasoning += delta.reasoning_content;
+          opts?.onReasoning?.(delta.reasoning_content);
         }
       } catch {
         // ignore JSON parse errors for incomplete chunks
@@ -656,7 +713,7 @@ export async function pumpOpenAiStream(
   // A tool-calling turn legitimately produces no content, so the reasoning
   // fallback must not fire there — it would print the model's private
   // deliberation about which tool to call as if it were the answer.
-  const toolCalls = [...pending.entries()]
+  let toolCalls = [...pending.entries()]
     .sort(([a], [b]) => a - b)
     .filter(([, slot]) => slot.name)
     .map(([index, slot]) => ({
@@ -672,8 +729,34 @@ export async function pumpOpenAiStream(
       argumentsJson: slot.args || "{}",
     }));
 
+  // Text-form recovery: the provider streamed its tool call as prose instead of
+  // `tool_calls` deltas. Only runs when tools were advertised and none arrived
+  // — otherwise prose that mentions a tool stays prose. `sawContent` stays true
+  // on purpose: the raw text already reached `onChunk`, and the agent loop's
+  // narration-discard (`onDiscardPartial`) exists exactly to flush it.
+  // `recoverySchemas` additionally recovers nameless bare-arguments emissions,
+  // which the name-carrying forms above cannot see.
+  if (!toolCalls.length && opts?.toolsAdvertised?.length) {
+    const textForm = parseTextToolCalls(contentText, opts.toolsAdvertised, opts.recoverySchemas);
+    if (textForm) {
+      const unnamed = textForm.some((c) => c.unnamed);
+      console.warn(
+        `[agent] ${textForm.length} tool call(s) arrived as text, not tool_calls deltas — recovering${unnamed ? " (one carried no tool name)" : ""}`,
+      );
+      toolCalls = textForm.map((call, i) => ({
+        id: `call_textform_${i}_${call.name}`,
+        name: call.name,
+        argumentsJson: call.argumentsJson,
+      }));
+    }
+  }
+
   // Some reasoning models spend their whole budget in `reasoning_content` and
-  // never emit `content`. Surface the thinking rather than an empty answer.
+  // never emit `content`. Surface the thinking rather than an empty answer —
+  // but only for callers with no thinking block to put it in. With
+  // `onReasoning` the chain-of-thought is already on screen where it belongs,
+  // so repeating it into the body would render the block twice, and the body
+  // staying empty lets the caller's empty-turn notice speak instead.
   //
   // `sawContent` is set with it, because the flag answers "did text reach the
   // caller" — not "did a `content` delta arrive". The distinction is invisible
@@ -681,7 +764,7 @@ export async function pumpOpenAiStream(
   // turn produced nothing and needs a stand-in message, and a reasoning-only reply
   // that left the flag false would get that message appended under the thinking it
   // had just streamed.
-  if (!sawContent && !toolCalls.length && reasoning) {
+  if (!sawContent && !toolCalls.length && reasoning && !opts?.onReasoning) {
     onChunk(reasoning);
     sawContent = true;
   }
