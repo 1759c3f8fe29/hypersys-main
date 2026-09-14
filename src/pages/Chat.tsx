@@ -110,6 +110,15 @@ interface Message {
   // Read by the collapsed block's label ("Thought for 12s"); absent on replies
   // the model produced without reasoning.
   thinkSeconds?: number;
+  // Resume/Continue (ChatGPT-style): true when the turn hit max_tokens
+  // (finish_reason=length) mid-answer. Content is a prefix; the row offers
+  // Continue, which streams the rest in place. Session state while streaming;
+  // persisted with the message so a reload keeps the affordance.
+  truncated?: boolean;
+  // Feedback (ChatGPT-style thumbs up/down): 'up'/'down' when the user rated
+  // this reply, absent when unrated or cleared. Optimistic in session state;
+  // persisted per message so it survives reloads and branch switches.
+  rating?: 'up' | 'down';
 }
 
 interface Conversation {
@@ -132,11 +141,11 @@ interface Conversation {
 // Added 2026-09-07: a model whose route declares extra first-byte headroom
 // (deepseek-v4-flash, measured 144s bare TTFB — see its providers.ts entry)
 // can legally spend that long before its first byte, because the server gives
-// a single-route entry the whole chain budget — so a fixed 130s client guard
-// would kill a healthy answer. The budget scales per model: 130s flat, plus
-// the longest first-byte allowance its routes declare (the server spends the
-// same allowance, so the client always stays ahead of the turn it is
-// guarding). See FIRST_BYTE_TIMEOUT_MS in api/llm.js for the server half of
+// the last leg of a chain the whole remaining chain budget — so a fixed 130s
+// client guard would kill a healthy answer. The budget scales per model: 130s
+// flat, plus the longest first-byte allowance its routes declare (the server
+// spends the same allowance, so the client always stays ahead of the turn it
+// is guarding). See FIRST_BYTE_TIMEOUT_MS in api/llm.js for the server half of
 // this contract.
 const REQUEST_TIMEOUT_MS = 130_000;
 const SLOW_REQUEST_TIMEOUT_MS = 130_000;
@@ -425,7 +434,10 @@ export default function Chat() {
   // followOutput + atBottomStateChange. Kept for the loading/welcome states.
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const isNewConversationRef = useRef(false);
+  // Scoped by conversation id, not a bare boolean: a global flag set before
+  // createConversation was consumed by whatever loadMessages ran next, so a
+  // fast New-chat then select-other-convo skipped loading the other convo.
+  const isNewConversationRef = useRef<string | null>(null);
 
   // Every object URL create_file handed out this session. Blob URLs pin their
   // blob in memory until revoked, and an xlsx can be megabytes — a long session
@@ -724,8 +736,8 @@ export default function Chat() {
     // right-hand canvas — and still open, if it was open. The two paths look
     // interchangeable but only one of them was doing the full teardown.
     if (!activeConversationId) { setMessages([]); revokeObjectUrls(); resetArtifacts(); return; }
-    if (isNewConversationRef.current) {
-      isNewConversationRef.current = false;
+    if (isNewConversationRef.current && isNewConversationRef.current === activeConversationId) {
+      isNewConversationRef.current = null;
       return;
     }
     setIsMessagesLoading(true);
@@ -859,7 +871,7 @@ export default function Chat() {
     // is optional and skipped by the paths that have no reasoning (the user
     // turn, the image turn), and the call sites above would otherwise become
     // long runs of `undefined, undefined, 0`.
-    meta?: { reasoning?: string; thinkSeconds?: number }
+    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean }
   ) => {
     if (!user) return false;
     try {
@@ -890,8 +902,8 @@ export default function Chat() {
     }
   };
 
-  const handleSendMessage = async (content: string, files: File[] = []) => {
-    if ((!content.trim() && files.length === 0) || isLoading) return;
+  const handleSendMessage = async (content: string, files: File[] = [], reuseAttachments?: Message["attachments"]) => {
+    if ((!content.trim() && files.length === 0 && !reuseAttachments?.length) || isLoading) return;
 
     createSparkleBurst();
 
@@ -931,16 +943,18 @@ export default function Chat() {
       })();
     };
 
-    const pendingAttachments: ChatAttachment[] = await Promise.all(
-      files.map(async (file) => ({
-        id: crypto.randomUUID(),
-        name: file.name,
-        url: await fileToDataUrl(file),
-        type: file.type.startsWith('image/') ? 'image' as const : 'file' as const,
-        mimeType: file.type,
-        size: file.size,
-      })),
-    );
+    const pendingAttachments: ChatAttachment[] = reuseAttachments?.length
+      ? reuseAttachments
+      : await Promise.all(
+          files.map(async (file) => ({
+            id: crypto.randomUUID(),
+            name: file.name,
+            url: await fileToDataUrl(file),
+            type: file.type.startsWith('image/') ? 'image' as const : 'file' as const,
+            mimeType: file.type,
+            size: file.size,
+          })),
+        );
 
     // Non-image uploads have to be parsed into text before the model can use
     // them. Previously they were only base64-encoded, so a PDF reached the model
@@ -993,11 +1007,32 @@ export default function Chat() {
     const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant' && m.content.trim() !== '');
     const userParentId = lastAssistant?.id ?? null;
 
-    const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: trimmedContent, attachments: pendingAttachments, parentMessageId: userParentId };
+    const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: trimmedContent || requestContent, attachments: pendingAttachments, parentMessageId: userParentId };
     const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', modelName: selectedModelMeta.name, parentMessageId: userMessage.id };
 
     // ── INSTANT UI UPDATE — show user message + thinking placeholder NOW ──
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    // Keep the branch forest in step with live sends: handleSwitchBranch
+    // re-linearizes messageForestRef, so leaving it stale discarded every turn
+    // sent since load on the next branch switch.
+    try {
+      messageForestRef.current = buildMessageForest(
+        toTreeMessages(
+          [...messages, userMessage, assistantMessage].map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            parentMessageId: (m as Message).parentMessageId ?? null,
+            siblingIndex: (m as Message).siblingIndex ?? 0,
+            reasoning: (m as Message).reasoning,
+            thinkSeconds: (m as Message).thinkSeconds,
+            truncated: (m as Message).truncated,
+          })),
+        ),
+      );
+    } catch {
+      // Non-fatal: forest rebuild is best-effort; render state is source of truth.
+    }
     // Sending arms autoscroll and re-pins: you sent it, you want to watch the
     // answer arrive.
     hasSentThisSessionRef.current = true;
@@ -1099,15 +1134,14 @@ export default function Chat() {
     let convId = activeConversationId;
 
     if (!convId && isAuthenticated) {
-      isNewConversationRef.current = true;
       const initialTitle = (trimmedContent || pendingAttachments[0]?.name || 'New chat').slice(0, 30);
       convId = await createConversation(initialTitle);
       if (!convId) {
-        isNewConversationRef.current = false;
         // Revert messages on UI if creation failed
         setMessages((prev) => prev.slice(0, -2));
         return;
       }
+      isNewConversationRef.current = convId;
       setActiveConversationId(convId);
 
       // Asynchronously generate a smart, concise 2-4 word title (like ChatGPT)
@@ -1157,7 +1191,7 @@ export default function Chat() {
 
     const timeoutMs = isImageGen
       ? SLOW_REQUEST_TIMEOUT_MS
-      : requestBudgetMs(selectedModel);
+      : requestBudgetMs(effectiveModelId);
 
     let timeoutReached = false;
     let stalledMidStream = false;
@@ -1206,6 +1240,10 @@ export default function Chat() {
     // still says what the model was doing when it died.
     let runPrimaryReasoning = '';
     let runPrimaryThinkSeconds: number | undefined;
+    // Whether the primary pass hit max_tokens (finish_reason=length).
+    // Hoisted like the partial text so the success-path save and the message
+    // stamp both see it; drives the Continue/Resume affordance (ChatGPT-style).
+    let runPrimaryTruncated = false;
 
     try {
       if (isImageGen) {
@@ -1408,6 +1446,17 @@ export default function Chat() {
 
         const runPrimary = async () => {
           let fullContent = '';
+          // Hoisted above both handlers: handleDelta (inline tags) and
+          // handleReasoning (reasoning_content channel) share one thinking
+          // buffer — ChatGPT-style, all deliberation in the block, never in
+          // the answer body.
+          let fullReasoning = runPrimaryReasoning;
+          let reasoningStartMs = 0;
+          let thinkSeconds = runPrimaryThinkSeconds;
+          // Last inline block already merged: extractReasoning returns the
+          // CUMULATIVE thinking, so appending it whole each chunk duplicates
+          // quadratically while a tag dangles. Replace the tail instead.
+          let lastInline = "";
           const handleDelta = (delta: string) => {
             fullContent += delta;
             if (!receivedAssistantContent) {
@@ -1418,30 +1467,40 @@ export default function Chat() {
             // watchdog takes over and resets on every chunk, so only a genuine
             // stall — not a model that is simply slow between tokens — trips it.
             armIdleWatchdog();
-            // The answer has started: if the model reasoned first, the thinking
-            // clock stops here — the collapsed label reads "Thought for Ns",
-            // not "Thought for the whole turn".
-            if (reasoningStartMs && thinkSeconds === undefined) {
-              thinkSeconds = Math.max(1, Math.round((Date.now() - reasoningStartMs) / 1000));
-              runPrimaryThinkSeconds = thinkSeconds;
-            }
             // Providers without a reasoning channel sometimes emit the thinking
             // inline as <thinking>…</thinking>, and sanitizeAssistantText strips
             // those tags out of the displayed body — so the same pass that strips
-            // them recovers them for the block. Channel reasoning (if any) wins:
-            // both are the model's thinking for this reply, and a provider that
-            // streams the channel is the one that tags are leftovers from.
-            if (!fullReasoning) {
-              const inline = extractReasoning(fullContent).reasoning;
-              if (inline) {
-                fullReasoning = inline;
-                runPrimaryReasoning = fullReasoning;
-                setMessages((prev) =>
-                  prev.map((m) => (m.id === assistantMessage.id ? { ...m, reasoning: fullReasoning } : m)),
-                );
+            // them recovers them for the block. Channel + inline MERGE: a model
+            // can emit `reasoning_content` for its call AND inline tags for its
+            // answer — channel-wins dropped the second half. ChatGPT-style: all
+            // thinking lives in the block. Tail-replace (not append) because the
+            // extractor returns cumulative text that grows while dangling.
+            const inline = extractReasoning(fullContent).reasoning;
+            if (inline && inline !== lastInline) {
+              if (!fullReasoning) reasoningStartMs = Date.now();
+              if (lastInline && fullReasoning.endsWith(lastInline)) {
+                fullReasoning = fullReasoning.slice(0, -lastInline.length) + inline;
+              } else if (!fullReasoning.includes(inline.slice(0, 64))) {
+                fullReasoning = fullReasoning ? `${fullReasoning}\n\n${inline}` : inline;
               }
+              lastInline = inline;
+              runPrimaryReasoning = fullReasoning;
+              setMessages((prev) =>
+                prev.map((m) => (m.id === assistantMessage.id ? { ...m, reasoning: fullReasoning } : m)),
+              );
             }
-            const liveContent = sanitizeAssistantText(fullContent) || fullContent;
+            // NEVER fall back to raw fullContent: while the model is still
+            // thinking, sanitize returns "" and the fallback pasted raw
+            // <thinking> tags into the answer bubble — the exact leak the
+            // thinking block exists to prevent. Empty body + filled block is
+            // the correct thinking-only state.
+            const liveContent = sanitizeAssistantText(fullContent);
+            // The answer has started only when sanitized prose exists: a delta
+            // carrying only thinking tags must not stop the thinking clock.
+            if (liveContent && reasoningStartMs && thinkSeconds === undefined) {
+              thinkSeconds = Math.max(1, Math.round((Date.now() - reasoningStartMs) / 1000));
+              runPrimaryThinkSeconds = thinkSeconds;
+            }
             runPrimaryPartialText = liveContent;
             setMessages((prev) =>
               prev.map((m) => (m.id === assistantMessage.id ? { ...m, content: liveContent } : m)),
@@ -1464,13 +1523,10 @@ export default function Chat() {
           // its answer (measured: glm-5.3-free, 2026-09-12), and a block that
           // rendered whichever arrived last would flicker between the two. The
           // channel deltas come straight through here; the inline tags are
-          // fished out of fullContent by extractReasoning below, which already
+          // fished out of fullContent by extractReasoning above, which already
           // runs every chunk as part of sanitizeAssistantText — the reasoning
           // never reaches the sanitized body, so it must be caught here or it
           // is gone for good.
-          let fullReasoning = runPrimaryReasoning;
-          let reasoningStartMs = 0;
-          let thinkSeconds = runPrimaryThinkSeconds;
           const handleReasoning = (delta: string) => {
             if (!fullReasoning) reasoningStartMs = Date.now();
             fullReasoning += delta;
@@ -1494,20 +1550,30 @@ export default function Chat() {
             // the image before the second call, so the model that actually wrote
             // the reply had never seen it and could only paraphrase.
             setStatusText(deepThink ? 'Thinking deeply...' : 'Analyzing image...');
-            await generateChatResponse(
+            const r = await generateChatResponse(
               messagesForModel,
               selectedModel,
               handleDelta,
               abortControllerRef.current!.signal,
               { deepThink, onReasoning: handleReasoning },
             );
+            if (r?.finishReason === "length") runPrimaryTruncated = true;
           } else if (hasImages) {
             // Step 1: Run Vision Engine (Mistral Pixtral 12B by default) to extract raw visual breakdown
             let rawVisionOutput = '';
             setStatusText('Running vision analysis...');
             await generateVisionResponse(
               messagesForModel,
-              (delta) => { rawVisionOutput += delta; },
+              (delta) => {
+                rawVisionOutput += delta;
+                // Vision progress is proof of life too: without this a
+                // slow-but-healthy analysis trips the cold-start abort.
+                if (!receivedAssistantContent) {
+                  clearColdStartGuard();
+                  receivedAssistantContent = true;
+                }
+                armIdleWatchdog();
+              },
               abortControllerRef.current!.signal,
             );
 
@@ -1535,13 +1601,14 @@ export default function Chat() {
             ];
 
             setStatusText(deepThink ? 'Thinking deeply...' : 'Synthesizing analysis...');
-            await generateChatResponse(
+            const r2 = await generateChatResponse(
               refinedChatMessages,
               selectedModel,
               handleDelta,
               abortControllerRef.current!.signal,
               { deepThink, onReasoning: handleReasoning },
             );
+            if (r2?.finishReason === "length") runPrimaryTruncated = true;
           } else if (useAgent) {
             // The agent path. The model decides whether it needs to search,
             // render an image, or write a file, and this runs whatever it asks
@@ -1581,7 +1648,17 @@ export default function Chat() {
                 // count the tool's runtime against the stream. An image gen that
                 // takes 45s would else trip the 60s idle timer and abort the
                 // turn mid-tool. handleDelta re-arms it when the model resumes.
+                // But a hung tool must not hang forever: arm a bounded tool
+                // watchdog (3 min) so a never-returning tool still aborts.
                 disarmIdleWatchdog();
+                armIdleWatchdog();
+                if (idleTimer) {
+                  clearTimeout(idleTimer);
+                  idleTimer = setTimeout(() => {
+                    stalledMidStream = true;
+                    abortControllerRef.current?.abort();
+                  }, 180_000);
+                }
                 // The answer is not being written yet, so the status line has to
                 // say what is actually happening — otherwise it reads
                 // "Generating response" through a five-second search.
@@ -1614,6 +1691,7 @@ export default function Chat() {
               onDiscardPartial: discardStreamed,
             });
             agentArtifacts = run.artifacts;
+            if (run.truncated) runPrimaryTruncated = true;
             if (run.hitStepLimit) {
               // Not surfaced to the user: the loop still forces a prose answer
               // from whatever it gathered, so the reply is complete, just
@@ -1622,7 +1700,8 @@ export default function Chat() {
             }
           } else {
             setStatusText(deepThink ? 'Thinking deeply...' : 'Generating response...');
-            await generateChatResponse(messagesForModel, effectiveModelId, handleDelta, abortControllerRef.current!.signal, { deepThink, onReasoning: handleReasoning });
+            const r3 = await generateChatResponse(messagesForModel, effectiveModelId, handleDelta, abortControllerRef.current!.signal, { deepThink, onReasoning: handleReasoning });
+            if (r3?.finishReason === "length") runPrimaryTruncated = true;
           }
 
           return sanitizeAssistantText(fullContent);
@@ -1635,7 +1714,7 @@ export default function Chat() {
             modelId,
             (delta) => {
               fullContent2 += delta;
-              const liveContent2 = sanitizeAssistantText(fullContent2) || fullContent2;
+              const liveContent2 = sanitizeAssistantText(fullContent2);
               setMessages((prev) =>
                 prev.map((m) => {
                   if (m.id !== assistantMessage.id || !m.arenaResponses) return m;
@@ -1686,8 +1765,10 @@ export default function Chat() {
                 // The turn's thinking, frozen now the answer is in: the block
                 // collapses from "Thinking…" to its summary label, and both it
                 // and thinkSeconds go to Firestore so a reload keeps them.
-                reasoning: fullReasoning || undefined,
-                thinkSeconds,
+                // truncated drives the Continue/Resume affordance (ChatGPT-style).
+                reasoning: runPrimaryReasoning || undefined,
+                thinkSeconds: runPrimaryThinkSeconds,
+                truncated: runPrimaryTruncated || undefined,
                 imageUrl: agentImageUrl || m.imageUrl,
                 files: agentFiles.length ? agentFiles : m.files,
                 codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns,
@@ -1719,7 +1800,7 @@ export default function Chat() {
             // the explicit Image-model path has always done, and it renders the
             // same: ChatMessage hoists the markdown image out of the prose with
             // stripMarkdownImages, so this adds nothing visible to the reply.
-            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: fullReasoning, thinkSeconds });
+            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined });
             maybeExtractMemories(finalText);
           }
         } else if (agentImageUrl || agentFiles.length) {
@@ -1729,12 +1810,12 @@ export default function Chat() {
           const madeText = agentImageUrl ? 'Here you go.' : `Created ${agentFiles.map((f) => f.filename).join(', ')}.`;
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantMessage.id
-              ? { ...m, content: madeText, reasoning: fullReasoning || undefined, thinkSeconds, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns }
+              ? { ...m, content: madeText, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns }
               : m)),
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
           if (convId && isAuthenticated) {
-            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: fullReasoning, thinkSeconds });
+            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined });
             maybeExtractMemories(madeText);
           }
         } else {
@@ -1772,7 +1853,7 @@ export default function Chat() {
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantMessage.id
-                ? { ...m, content: persistedPartial, reasoning: fullReasoning || undefined, thinkSeconds }
+                ? { ...m, content: persistedPartial, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: true }
                 : m,
             ),
           );
@@ -1785,7 +1866,7 @@ export default function Chat() {
               undefined,
               assistantMessage.parentMessageId,
               assistantMessage.id,
-              { reasoning: fullReasoning, thinkSeconds },
+              { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: true },
             );
             // No `.catch` here, deliberately, and it used to have one.
             // `saveMessage` catches its own failure, toasts it and returns false
@@ -1956,28 +2037,185 @@ export default function Chat() {
     focusComposerOnType: focusComposer,
   });
 
-  // Regenerate: strip the last user+assistant turn, then resend the user's text.
+  // Regenerate: strip the last user+assistant turn, then resend the user's text
+  // WITH its attachments (image/doc follow-ups used to regenerate as text-only).
   // Uses an effect so handleSendMessage runs against the trimmed message state.
   const [regenText, setRegenText] = useState<string | null>(null);
+  const regenAttachmentsRef = useRef<Message["attachments"]>(undefined);
   const handleRegenerate = () => {
     if (isLoading) return;
     const lastUserIdx = [...messages].map((m) => m.role).lastIndexOf('user');
     if (lastUserIdx === -1) return;
-    const lastUserText = messages[lastUserIdx].content;
+    const lastUser = messages[lastUserIdx];
+    regenAttachmentsRef.current = lastUser.attachments;
     setMessages((prev) => prev.slice(0, lastUserIdx));
-    setRegenText(lastUserText || ' ');
+    setRegenText(lastUser.content || ' ');
   };
 
   useEffect(() => {
     if (regenText !== null && !isLoading) {
       const text = regenText;
+      const atts = regenAttachmentsRef.current;
+      regenAttachmentsRef.current = undefined;
       // Keep regenText set (as an in-flight flag) until handleSendMessage has
       // appended the new user + assistant placeholders, so the empty message
       // list never falls through to the WelcomeScreen ("homepage") mid-retry.
-      handleSendMessage(text).finally(() => setRegenText(null));
+      handleSendMessage(text, [], atts).finally(() => setRegenText(null));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [regenText]);
+
+  // Feedback (ChatGPT-style thumbs up/down) on a finished reply. Optimistic:
+  // the icon flips immediately, and a failed persist reverts it. Clicking the
+  // already-active thumb clears the rating — one gesture for rate, correct
+  // and unrate. Guests get the buttons too (session state only, nothing
+  // persisted) so the affordance is not an account wall.
+  const handleRate = async (messageId: string, direction: 'up' | 'down') => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId
+          ? { ...m, rating: m.rating === direction ? undefined : direction }
+          : m,
+      ),
+    );
+    if (!isAuthenticated) return; // guest: session-only, as the comment says
+    const target = messages.find((m) => m.id === messageId);
+    if (!target) return;
+    // Unrating is the persist of "clear" — the write deletes the field (see
+    // rateMessage's deleteField), and its success re-sets what is already on
+    // screen. A failure on clear reverts to the old rating rather than to
+    // blank, which would silently mislabel a rated reply as unrated.
+    const desired = target.rating === direction ? null : direction;
+    const ok = await firestoreDb.rateMessage(activeConversationId, messageId, desired);
+    if (!ok) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, rating: target.rating } : m)),
+      );
+    }
+  };
+
+  // Resume/Continue (ChatGPT-style): a truncated reply (finish_reason=length)
+  // is a prefix, not a complete answer. Continue it IN PLACE by asking the
+  // same model to pick up exactly where it left off — no repeat, no new
+  // bubble. Streams into the same message so the thinking block, sources and
+  // branch identity survive; clears `truncated` when the continuation fits.
+  const handleResume = async (messageId: string) => {
+    if (isLoading) return;
+    const idx = messages.findIndex((m) => m.id === messageId);
+    if (idx === -1) return;
+    const target = messages[idx];
+    if (target.role !== 'assistant' || !target.truncated) return;
+
+    const base = target.content || '';
+    const baseReasoning = target.reasoning || '';
+    // History for the continuation: everything before the cut, plus the cut
+    // itself as the assistant's last turn, plus an explicit continue order.
+    // The order names the failure mode (length cutoff) so the model writes
+    // shorter, completable prose rather than truncating identically again.
+    const historyForModel: AiChatMessage[] = [
+      ...messages.slice(0, idx).map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+      { role: 'assistant', content: base },
+      {
+        role: 'user',
+        content:
+          'Your previous response was cut off by the length limit. Continue from EXACTLY where you left off, do not repeat anything already said, do not summarize, just continue the response.',
+      },
+    ];
+    // Continue with the truncated turn's own model when it can be resolved by
+    // name; falling back to the picker. Otherwise a mid-thread model switch
+    // changes voice mid-answer.
+    const resumeModelId =
+      AI_MODELS.find((m) => m.name === target.modelName)?.id || selectedModel;
+    const modelMeta = AI_MODELS.find((m) => m.id === resumeModelId) || AI_MODELS[0];
+    const systemContent = deepThink
+      ? buildFlyerThinkingPrompt({
+          modelName: modelMeta.name,
+          memories: memoriesAsPromptBlock(memoriesRef.current),
+          userInstructions: instructionsAsPromptBlock(userSettingsRef.current),
+          toolsAvailable: false,
+        })
+      : buildFlyerSystemPrompt({
+          modelName: modelMeta.name,
+          memories: memoriesAsPromptBlock(memoriesRef.current),
+          userInstructions: instructionsAsPromptBlock(userSettingsRef.current),
+          toolsAvailable: false,
+        });
+
+    setIsLoading(true);
+    setStatusText('Continuing…');
+    abortControllerRef.current = new AbortController();
+    let acc = '';
+    let accReasoning = '';
+    try {
+      const res = await generateChatResponse(
+        [{ role: 'system', content: systemContent }, ...historyForModel],
+        resumeModelId,
+        (delta) => {
+          acc += delta;
+          // Sanitize the COMBINED text so a fence split across the cut
+          // renders as one block rather than two broken halves.
+          const live = sanitizeAssistantText(base + acc);
+          setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content: live } : m)));
+        },
+        abortControllerRef.current.signal,
+        {
+          deepThink,
+          onReasoning: (d) => {
+            accReasoning += d;
+            const merged = baseReasoning ? `${baseReasoning}\n\n${accReasoning}` : accReasoning;
+            setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, reasoning: merged } : m)));
+          },
+        },
+      );
+      const stillTruncated = res?.finishReason === 'length';
+      // Merge both reasoning channels like the primary path does: inline tags
+      // extracted from the combined text PLUS streamed channel deltas. The old
+      // `inline || channel` overwrote one with the other.
+      const inline = extractReasoning(base + acc).reasoning;
+      const channelPart = baseReasoning ? `${baseReasoning}${accReasoning ? `\n\n${accReasoning}` : ''}` : accReasoning;
+      const finalReasoning = [channelPart, inline].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join('\n\n') || undefined;
+      const finalText = sanitizeAssistantText(base + acc) || base + acc;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                content: finalText,
+                reasoning: finalReasoning || undefined,
+                thinkSeconds: m.thinkSeconds,
+                truncated: stillTruncated || undefined,
+              }
+            : m,
+        ),
+      );
+      ingestArtifacts(extractArtifacts(finalText, [], messageId));
+      if (activeConversationId && isAuthenticated) {
+        const ok = await firestoreDb.updateMessage(activeConversationId, messageId, withPersistedImage(finalText, undefined), {
+          reasoning: finalReasoning || undefined,
+          thinkSeconds: target.thinkSeconds,
+          truncated: stillTruncated || undefined,
+        });
+        // Older docs predate clientId (see getMessages fallback): fall back to
+        // a new save so the continued text still survives a reload.
+        if (!ok) {
+          await saveMessage(activeConversationId, 'assistant', withPersistedImage(finalText, undefined), modelMeta.name, undefined, target.parentMessageId, target.id, {
+            reasoning: finalReasoning || undefined,
+            thinkSeconds: target.thinkSeconds,
+            truncated: stillTruncated || undefined,
+          });
+        }
+      }
+      if (stillTruncated) toast.message('Still cut off — press Continue again for more.');
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      console.error('Resume failed:', e);
+      toast.error(e instanceof Error ? e.message : 'Could not continue that response.');
+    } finally {
+      setIsLoading(false);
+      setStatusText('');
+      abortControllerRef.current = null;
+    }
+  };
 
   // ── Branching (Part F) ──
   //
@@ -2006,6 +2244,8 @@ export default function Chat() {
     if (!trimmed) return;
     const idx = messages.findIndex((m) => m.id === messageId);
     if (idx === -1) return;
+    // Preserve the edited message's attachments so an edit keeps its images/files.
+    regenAttachmentsRef.current = messages[idx].attachments;
     setMessages((prev) => prev.slice(0, idx));
     // setRegenText arms the regen effect (handleRegenerate uses the same flag),
     // which calls handleSendMessage(trimmed) once the truncated state is committed.
@@ -2431,6 +2671,10 @@ export default function Chat() {
                           attachments={msg.attachments}
                           reasoning={msg.reasoning}
                           thinkSeconds={msg.thinkSeconds}
+                          truncated={msg.truncated}
+                          onResume={() => handleResume(msg.id)}
+                          rating={msg.rating}
+                          onRate={(dir) => handleRate(msg.id, dir)}
                           isStreaming={isLoading && msg.role === 'assistant' && index === messages.length - 1}
                           modelName={msg.modelName || 'AI'}
                           statusText={isLoading && msg.role === 'assistant' && index === messages.length - 1 ? statusText : undefined}

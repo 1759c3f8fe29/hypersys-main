@@ -95,10 +95,11 @@ const PROVIDER_ENDPOINTS = {
 // to look for them: it is the file whose behaviour they govern.
 export { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES, GONE_STATUSES };
 
-// Backoff between retries against the same provider. Most catalogue models have a
-// single route, so without this a 529 blip surfaces as a hard failure — the
-// "working models look permanently broken" bug api/nvidia.js (L41-42) documents
-// fixing with the same backoff.
+// Backoff between retries against the same provider. The catalogue's models
+// carry one to two routes, so without this a 529 blip against the only leg of
+// a single-route model surfaces as a hard failure — the "working models look
+// permanently broken" bug api/nvidia.js (L41-42) documents fixing with the
+// same backoff.
 const BACKOFF_MS = [600, 1500];
 
 // ---------------------------------------------------------------------------
@@ -210,7 +211,7 @@ function resolveKey(req, cfg) {
   return { key: null, byok: false };
 }
 
-async function pipeStream(upstream, res) {
+async function pipeStream(upstream, res, req) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -218,8 +219,12 @@ async function pipeStream(upstream, res) {
   });
 
   const reader = upstream.body.getReader();
+  // Client disconnect mid-stream must not hold the function to maxDuration.
+  let closed = false;
+  try { req?.on?.("close", () => { closed = true; reader.cancel().catch(() => {}); }); } catch { /* ignore */ }
   try {
     for (;;) {
+      if (closed) break;
       const { done, value } = await reader.read();
       if (done) break;
       res.write(Buffer.from(value));
@@ -454,13 +459,24 @@ export default async function handler(req, res) {
   // --- Who is calling, and may they spend from the pool? --------------------
   //
   // Counted before any upstream call, so a caller over their limit costs us
-  // nothing. Only the BYOK headers for providers actually in this chain exempt
-  // the request: an x-mistral-api-key must not buy free NVIDIA calls.
+  // nothing — but AFTER validation above, so 405/400s never burn quota.
+  // Exemption requires EVERY routed leg to be BYOK/keyless: a partial BYOK
+  // (own NVIDIA key, server Mistral fallback) must still consume quota,
+  // otherwise one key buys free fallback calls on ours.
   const byokHeaders = routes
     .map((route) => PROVIDER_ENDPOINTS[route?.provider]?.byokHeader)
     .filter(Boolean);
 
-  if (await applyMeter(req, res, { byokHeaders })) return;
+  const fullyByokOrKeyless = routes.every((route) => {
+    const cfg = PROVIDER_ENDPOINTS[route?.provider];
+    if (!cfg) return false;
+    if (cfg.keyless) return true;
+    if (!cfg.byokHeader) return false;
+    const v = header(req, cfg.byokHeader);
+    return Boolean(v) && !String(v).startsWith("your-");
+  });
+
+  if (await applyMeter(req, res, { byokHeaders: fullyByokOrKeyless ? byokHeaders : [] })) return;
 
   // --- Walk the chain -------------------------------------------------------
   //
@@ -479,7 +495,7 @@ export default async function handler(req, res) {
     stream: true,
     temperature: temperature ?? 0.7,
     top_p: top_p ?? 0.95,
-    max_tokens: Math.min(Number(max_tokens) || DEFAULT_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
+    max_tokens: Math.min(Math.max(Number(max_tokens) || DEFAULT_OUTPUT_TOKENS, 1), MAX_OUTPUT_TOKENS),
   };
 
   const attempts = [];
@@ -535,7 +551,7 @@ export default async function handler(req, res) {
       // The client reads these to show who actually served the reply.
       res.setHeader("X-Served-By", route.provider);
       res.setHeader("X-Served-Model", route.modelId);
-      await pipeStream(result.upstream, res);
+      await pipeStream(result.upstream, res, req);
       return;
     }
 

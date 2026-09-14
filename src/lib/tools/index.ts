@@ -57,12 +57,22 @@ export function toolSchemas(): ToolSchema[] {
  * JSON-stringified into the provider payload.
  */
 export function toolRecoveryInfos(): { name: string; required: string[]; properties: Record<string, unknown>; recognizeTextForm?(obj: Record<string, unknown>): boolean }[] {
-  return DEFINITIONS.map((tool) => ({
-    name: tool.schema.function.name,
-    required: tool.schema.function.parameters.required ?? [],
-    properties: tool.schema.function.parameters.properties ?? {},
-    ...(tool.recognizeTextForm ? { recognizeTextForm: (obj: Record<string, unknown>) => tool.recognizeTextForm!(obj) } : {}),
-  }));
+  return DEFINITIONS.map((tool) => {
+    const params = tool.schema.function.parameters as { required?: unknown; properties?: unknown };
+    const required = Array.isArray(params.required)
+      ? (params.required as unknown[]).filter((x): x is string => typeof x === "string")
+      : [];
+    const properties =
+      params.properties && typeof params.properties === "object" && !Array.isArray(params.properties)
+        ? (params.properties as Record<string, unknown>)
+        : {};
+    return {
+      name: tool.schema.function.name,
+      required,
+      properties,
+      ...(tool.recognizeTextForm ? { recognizeTextForm: (obj: Record<string, unknown>) => tool.recognizeTextForm!(obj) } : {}),
+    };
+  });
 }
 
 export const TOOL_NAMES = DEFINITIONS.map((tool) => tool.name);

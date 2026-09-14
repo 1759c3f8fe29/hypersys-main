@@ -104,17 +104,107 @@ export interface AgentRunResult {
    * answer.
    */
   hitStepLimit: boolean;
+  /**
+   * True when the final pass ended with `finish_reason: "length"` — the model
+   * hit max_tokens mid-answer. The streamed text is a prefix, not the whole
+   * reply, and the UI should offer Resume/Continue (ChatGPT-style) rather
+   * than presenting it as done.
+   */
+  truncated?: boolean;
+  /** The finish reason of the final pass, when the provider sent one. */
+  finishReason?: string;
 }
 
 /** Parse model-supplied arguments without trusting them to be valid JSON. */
-function parseArgs(call: ToolCall): { args: Record<string, unknown>; error?: string } {
+export function repairTruncatedJson(raw: string): string | null {
+  const text = (raw || "").trim();
+  if (!text) return null;
+  // Already valid: nothing to repair (caller checks first, kept here for tests).
   try {
-    const parsed = JSON.parse(call.argumentsJson || "{}");
+    const p = JSON.parse(text);
+    if (p && typeof p === "object" && !Array.isArray(p)) return text;
+    return null;
+  } catch {
+    // fall through to repair
+  }
+  // Walk the prefix tracking strings/escapes and brace depth. The goal is a
+  // minimal close: terminate an open string, then close open objects/arrays.
+  // This recovers the common "cut off mid-call" shape (finish_reason=length
+  // mid-arguments) without guessing content the model never sent.
+  let inString = false;
+  let escaped = false;
+  const stack: string[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") stack.push("}");
+    else if (ch === "[") stack.push("]");
+    else if (ch === "}" || ch === "]") {
+      if (stack.length && stack[stack.length - 1] === ch) stack.pop();
+    }
+  }
+  let repaired = text;
+  // A trailing odd run of backslashes would escape the quote we add; drop one.
+  // endsWith("\\") && !endsWith("\\\\") miscounts 3, 5, ... — count instead.
+  if (inString) {
+    let trailing = 0;
+    for (let i = repaired.length - 1; i >= 0 && repaired[i] === "\\"; i--) trailing++;
+    if (trailing % 2 === 1) repaired = repaired.slice(0, -1);
+  }
+  if (inString) repaired += '"';
+  for (let i = stack.length - 1; i >= 0; i--) repaired += stack[i];
+  try {
+    const p = JSON.parse(repaired);
+    if (!p || typeof p !== "object" || Array.isArray(p)) return null;
+    return repaired;
+  } catch {
+    return null;
+  }
+}
+
+function parseArgs(
+  call: ToolCall,
+  finishReason?: string,
+): { args: Record<string, unknown>; error?: string; repaired?: boolean } {
+  const raw = call.argumentsJson || "{}";
+  try {
+    const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return { args: {}, error: "arguments must be a JSON object" };
     }
     return { args: parsed as Record<string, unknown> };
   } catch {
+    // Only auto-repair when the provider said the pass was cut off by the
+    // length limit. Genuinely malformed JSON (wrong shape, not a prefix) must
+    // still fail visibly so the model retries — repairing it would run the
+    // tool on guessed arguments the model never sent.
+    if (finishReason === "length") {
+      const fixed = repairTruncatedJson(raw);
+      if (fixed) {
+        try {
+          const parsed = JSON.parse(fixed) as Record<string, unknown>;
+          console.warn(`[agent] ${call.name} arguments were cut off mid-stream — repaired`);
+          return { args: parsed, repaired: true };
+        } catch {
+          // fall through to error below
+        }
+      }
+    }
+    // Tell the model WHY it failed so the retry is smaller, not identical.
+    // A length cutoff re-sent verbatim truncates again; a shorter retry fits.
+    if (finishReason === "length") {
+      return {
+        args: {},
+        error:
+          "arguments were cut off mid-call by the length limit (truncated JSON). Retry with SHORTER arguments — split the work across two calls if needed. Send valid JSON and try again.",
+      };
+    }
     // Truncated or malformed JSON is common when a model is cut off mid-call.
     // The model can fix it on the next step if we tell it what happened.
     return { args: {}, error: "arguments were not valid JSON" };
@@ -162,7 +252,13 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
   if (!spec || !supportsTools(modelId)) {
     const plain = await generateRoutedResponse(messages, modelId, onChunk, signal, { deepThink, onReasoning });
     if (!plain.sawContent) onChunk(EMPTY_TURN_NOTICE);
-    return { artifacts, steps: 0, hitStepLimit: false };
+    return {
+      artifacts,
+      steps: 0,
+      hitStepLimit: false,
+      truncated: plain.finishReason === "length",
+      finishReason: plain.finishReason,
+    };
   }
 
   // Copied: the loop appends assistant and tool turns, and mutating the array
@@ -196,7 +292,13 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
       // exactly the ceiling doing its job, and it is the common shape of it: only
       // a provider that ignores `tool_choice: "none"` reaches the other exit
       // below. Reporting false here left the one case worth logging invisible.
-      return { artifacts, steps: step, hitStepLimit: lastStep };
+      return {
+        artifacts,
+        steps: step,
+        hitStepLimit: lastStep,
+        truncated: result.finishReason === "length",
+        finishReason: result.finishReason,
+      };
     }
 
     // A tool-calling step usually streams no prose, but some models narrate
@@ -217,7 +319,7 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
     // an abort, which should reject and take the whole turn down with it.
     const outcomes = await Promise.all(
       result.toolCalls.map(async (call) => {
-        const { args, error: parseError } = parseArgs(call);
+        const { args, error: parseError } = parseArgs(call, result.finishReason);
         onToolStart?.({ name: call.name, args });
 
         if (parseError) {
@@ -290,10 +392,16 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
       // them in — so those calls are dropped, and if the same pass also produced no
       // prose, nothing whatsoever was streamed for the whole turn.
       if (!final.sawContent) onChunk(EMPTY_TURN_NOTICE);
-      return { artifacts, steps: step + 1, hitStepLimit: true };
+      return {
+        artifacts,
+        steps: step + 1,
+        hitStepLimit: true,
+        truncated: final.finishReason === "length",
+        finishReason: final.finishReason,
+      };
     }
   }
 
   // Unreachable: the last iteration always returns.
-  return { artifacts, steps: MAX_STEPS, hitStepLimit: true };
+  return { artifacts, steps: MAX_STEPS, hitStepLimit: true, truncated: false };
 }

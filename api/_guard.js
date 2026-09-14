@@ -18,7 +18,7 @@
 
 const ALLOWED_METHODS = "GET, POST, OPTIONS";
 const ALLOWED_HEADERS =
-  "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key";
+  "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key, X-TokenRouter-Api-Key";
 const MAX_AGE_SECONDS = "3600";
 
 /** Header lookup that tolerates array values and casing. */

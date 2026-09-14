@@ -132,6 +132,8 @@ export function toTreeMessages(
     // chain-of-thought and the "Thought for Ns" label. See FirestoreMessage.
     reasoning: m.reasoning,
     thinkSeconds: m.thinkSeconds,
+    // Resume flag: a truncated reply keeps its Continue affordance reload.
+    truncated: m.truncated,
   }));
 }
 

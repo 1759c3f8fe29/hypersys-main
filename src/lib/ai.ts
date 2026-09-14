@@ -202,15 +202,14 @@ export async function generateChatResponse(
   onChunk: (text: string) => void,
   signal?: AbortSignal,
   opts?: { deepThink?: boolean; onReasoning?: (text: string) => void },
-) {
+): Promise<StreamResult> {
   // The catalogue in providers.ts is the single source of truth: a known id
   // goes through the unified /api/llm router, which walks that model's
   // provider chain and streams from the first one that answers. Every route
   // in a chain serves the SAME model, so failing over changes who served the
   // reply, never what model produced it.
   if (getModel(modelId)) {
-    await generateRoutedResponse(messages, modelId, onChunk, signal, opts);
-    return;
+    return generateRoutedResponse(messages, modelId, onChunk, signal, opts);
   }
 
   // No legacy alias layer any more: an id that is not in the catalogue is
@@ -550,8 +549,17 @@ export async function ocrImage(imageDataUrl: string, signal?: AbortSignal): Prom
   }
 
   if (!res.ok) {
+    // Read the body ONCE: json() then text() on the same Response throws
+    // because the stream is already consumed, losing the detail.
     let detail = "";
-    try { detail = (await res.json())?.detail || (await res.text()); } catch { /* ignore */ }
+    try {
+      const text = await res.text();
+      try {
+        detail = (JSON.parse(text) as { detail?: unknown })?.detail as string || text;
+      } catch {
+        detail = text;
+      }
+    } catch { /* ignore */ }
     return { text: "", error: `ocr: the OCR service rejected the request (${res.status}). ${String(detail).slice(0, 160)}` };
   }
   return flattenOcrResponse(await res.json());
@@ -695,14 +703,24 @@ export async function pumpOpenAiStream(
         // Reasoning models (kimi, nemotron, minimax) stream their thinking in
         // `reasoning_content` and the answer in `content`. Both are live now:
         // content to `onChunk`, thinking to `onReasoning` when the caller wants
-        // to show a thinking block.
-        if (delta?.content) {
+        // to show a thinking block. Two independent `if`s, not `if/else`:
+        // a single delta may carry BOTH (reasoning tail + answer head), and
+        // the else-branch used to drop the thinking half of exactly that frame.
+        if (typeof delta?.reasoning_content === "string" && delta.reasoning_content) {
+          reasoning += delta.reasoning_content;
+          opts?.onReasoning?.(delta.reasoning_content);
+        }
+        if (typeof delta?.content === "string" && delta.content) {
           sawContent = true;
           contentText += delta.content;
           onChunk(delta.content);
-        } else if (delta?.reasoning_content) {
-          reasoning += delta.reasoning_content;
-          opts?.onReasoning?.(delta.reasoning_content);
+        } else if (delta?.content) {
+          // Non-string content delta (rare provider quirk): coerce rather than
+          // drop, so sawContent still reflects "the caller has something".
+          const coerced = String(delta.content);
+          sawContent = true;
+          contentText += coerced;
+          onChunk(coerced);
         }
       } catch {
         // ignore JSON parse errors for incomplete chunks

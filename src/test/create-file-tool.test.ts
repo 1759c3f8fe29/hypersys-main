@@ -173,6 +173,7 @@ describe("prepareCreateFileRecoveredArgs — repairing a salvaged pptx emission"
     // And the executor can actually run it: a real pptx blob comes back.
     const built = await executeCreateFile(repaired as Record<string, unknown>, context);
     expect(built.ok).toBe(true);
+    if (!built.ok) throw new Error(`expected ok:true, got ${JSON.stringify(built)}`);
     expect(built.filename).toBe("ai-vs-hi-a-comparative-overview.pptx");
     expect(context.artifacts.files?.length).toBe(1);
   });

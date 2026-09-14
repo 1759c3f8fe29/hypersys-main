@@ -122,6 +122,21 @@ export interface FirestoreMessage {
   reasoning?: string;
   /** Whole seconds of pre-answer thinking; rounded on write. */
   thinkSeconds?: number;
+  /**
+   * True when the turn hit max_tokens (finish_reason=length) mid-answer.
+   * The content is a prefix; the UI offers Resume/Continue. Absent on old
+   * docs, which render as complete — the safe default for history that
+   * predates the flag.
+   */
+  truncated?: boolean;
+  /**
+   * The user's feedback on this reply (ChatGPT-style thumbs up/down):
+   * 'up' when rated good, 'down' when rated bad, absent when unrated or
+   * cleared. Absent on documents written before feedback shipped, which
+   * read as unrated — the correct presentation for a reply that was never
+   * rated.
+   */
+  rating?: 'up' | 'down';
 }
 
 export const firestoreDb = {
@@ -208,7 +223,10 @@ export const firestoreDb = {
           conversationId: data.conversationId,
           role: data.role,
           content: data.content || '',
-          createdAt: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
+          // Missing stamps previously fell back to now, reordering legacy
+          // history to the end. Epoch keeps them first in stable-sort order
+          // instead of stamping every unreadable doc with call-time now.
+          createdAt: data.createdAt?.toDate?.()?.toISOString() || "1970-01-01T00:00:00.000Z",
           modelName: data.modelName,
           attachments: data.attachments || [],
           // Provide a stable null for the threading fields when absent, so the
@@ -220,7 +238,13 @@ export const firestoreDb = {
           // reasoning, so `!msg.reasoning` means "no block" rather than "an
           // empty block" after a reload.
           reasoning: data.reasoning || undefined,
-          thinkSeconds: typeof data.thinkSeconds === 'number' ? data.thinkSeconds : undefined
+          thinkSeconds: typeof data.thinkSeconds === 'number' ? data.thinkSeconds : undefined,
+          truncated: data.truncated === true ? true : undefined,
+          // Feedback (ChatGPT-style thumbs up/down). One field, both directions:
+          // 'up' | 'down' when the reply was rated, undefined when it was not
+          // (or when the rating was cleared) — never null, so the UI's truthiness
+          // checks stay two-state.
+          rating: data.rating === 'up' || data.rating === 'down' ? data.rating : undefined
         };
       });
       // Sort client-side to avoid needing a composite index
@@ -279,7 +303,7 @@ export const firestoreDb = {
     // The thinking block's payload (see FirestoreMessage.reasoning). An object
     // so the reasoning-free call sites stay as they were rather than growing
     // two more undefineds each.
-    meta?: { reasoning?: string; thinkSeconds?: number }
+    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean }
   ): Promise<string> {
     // Compute the sibling index: how many children this parent already has.
     // This is a read-then-write (not transactional), which is fine here —
@@ -289,15 +313,16 @@ export const firestoreDb = {
     let siblingIndex = 0;
     if (parentMessageId) {
       try {
+        // Single-field query + client-side filter: the old dual-where needed a
+        // composite index, and without it every threaded reply collapsed to 0.
         const q = query(
           collection(db, 'messages'),
           where('conversationId', '==', conversationId),
-          where('parentMessageId', '==', parentMessageId)
         );
         const snap = await getDocs(q);
-        siblingIndex = snap.size;
+        siblingIndex = snap.docs.filter((d) => d.data().parentMessageId === parentMessageId).length;
       } catch {
-        // Non-fatal: a missing index or transient error just places the new
+        // Non-fatal: a transient error just places the new
         // branch at index 0; the tree still renders.
         siblingIndex = 0;
       }
@@ -339,6 +364,7 @@ export const firestoreDb = {
       // has no reasoning is the same shape as one that never gets any.
       reasoning: meta?.reasoning || null,
       thinkSeconds: typeof meta?.thinkSeconds === 'number' ? meta.thinkSeconds : null,
+      truncated: meta?.truncated === true ? true : null,
       createdAt: serverTimestamp()
     });
 
@@ -360,6 +386,74 @@ export const firestoreDb = {
     return msgRef.id;
   },
 
+  // Update a persisted message in place (Resume/Continue). Locates the doc by
+  // the client's own id (see saveMessage's clientId) rather than the Firestore
+  // doc id, because callers only ever know the client namespace. Used when a
+  // truncated reply is continued: the full text replaces the prefix, and the
+  // truncated flag clears when the continuation finishes within limits.
+  async updateMessage(
+    conversationId: string,
+    clientId: string,
+    content: string,
+    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean },
+  ): Promise<boolean> {
+    try {
+      const q = query(
+        collection(db, 'messages'),
+        where('conversationId', '==', conversationId),
+        where('clientId', '==', clientId),
+      );
+      const snap = await getDocs(q);
+      if (snap.empty) return false;
+      const ref = snap.docs[0].ref;
+      await updateDoc(ref, {
+        content,
+        reasoning: meta?.reasoning || null,
+        thinkSeconds: typeof meta?.thinkSeconds === 'number' ? meta.thinkSeconds : null,
+        truncated: meta?.truncated === true ? true : null,
+      });
+      return true;
+    } catch (e) {
+      console.error('Error updating message:', e);
+      return false;
+    }
+  },
+
+  // Rate a persisted message (thumbs up/down, ChatGPT-style). Same doc-location
+  // strategy as updateMessage: callers only ever hold the client id, so the doc
+  // is found by (conversationId, clientId) rather than by its Firestore id.
+  // Returns false on any failure; the UI keeps its optimistic state only when
+  // this resolves true, so a denied write reverts the icon rather than pinning it.
+  //
+  // The rating is stored on the message doc itself rather than in a separate
+  // collection: it is a field of the reply, survives with the thread, and needs
+  // no extra ownership rule — the messages rule already gates updates on
+  // ownsExisting && ownsIncoming, which a field merge satisfies.
+  async rateMessage(
+    conversationId: string,
+    clientId: string,
+    rating: 'up' | 'down' | null,
+  ): Promise<boolean> {
+    try {
+      const q = query(
+        collection(db, 'messages'),
+        where('conversationId', '==', conversationId),
+        where('clientId', '==', clientId),
+      );
+      const snap = await getDocs(q);
+      if (snap.empty) return false;
+      // deleteField rather than null: "cleared" should read the same as "never
+      // rated" to every consumer, and a null would be a third state to handle.
+      await updateDoc(snap.docs[0].ref, {
+        rating: rating ?? deleteField(),
+      });
+      return true;
+    } catch (e) {
+      console.error('Error rating message:', e);
+      return false;
+    }
+  },
+
   // Delete a conversation and all its messages.
   // IMPORTANT: delete the messages FIRST. The security rule for deleting a
   // message calls ownsConversation(), which get()s the parent conversation
@@ -370,12 +464,17 @@ export const firestoreDb = {
     const q = query(collection(db, 'messages'), where('conversationId', '==', conversationId));
     const snapshot = await getDocs(q);
 
+    // Firestore batches cap at 500 ops: chunk so long conversations are still
+    // deletable instead of failing the whole commit.
     if (snapshot.size > 0) {
-      const batch = writeBatch(db);
-      snapshot.docs.forEach((d) => {
-        batch.delete(d.ref);
-      });
-      await batch.commit();
+      const docs = snapshot.docs;
+      for (let i = 0; i < docs.length; i += 500) {
+        const batch = writeBatch(db);
+        docs.slice(i, i + 500).forEach((d) => {
+          batch.delete(d.ref);
+        });
+        await batch.commit();
+      }
     }
 
     // Now remove the conversation doc itself.

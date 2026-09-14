@@ -77,6 +77,7 @@ export function ArtifactPanel({ onEdit, onDownload, fetchFileText, fetchVersionT
           <button
             onClick={closeArtifact}
             title="Close"
+            aria-label="Close artifact panel"
             className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
           >
             <X className="w-4 h-4" />
@@ -141,6 +142,7 @@ function PanelHeader({
         <button
           onClick={() => onDownload(artifact)}
           title="Download"
+          aria-label={`Download ${artifact.title}`}
           className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
         >
           <Download className="w-4 h-4" />
@@ -149,6 +151,7 @@ function PanelHeader({
       <button
         onClick={onClose}
         title="Close"
+        aria-label="Close artifact panel"
         className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
       >
         <X className="w-4 h-4" />
@@ -296,7 +299,10 @@ function Preview({ content, kind }: { content: string; kind: string }) {
   return (
     <iframe
       title="artifact preview"
-      sandbox="allow-scripts"
+      // No allow-scripts: model-controlled HTML/SVG must render statically.
+      // Scripts enabled arbitrary JS (phishing UI, exfiltration, CPU loops)
+      // from model output; nothing in the preview needs them.
+      sandbox=""
       srcDoc={srcDoc}
       className="w-full h-full bg-background rounded-md"
     />

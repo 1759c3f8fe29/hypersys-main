@@ -64,6 +64,19 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
     dragging.current = false;
   }, []);
 
+  // Keyboard resize for the drag handle below: arrows move 24px, Home/End jump
+  // to min/max. Pointer-only resizing locked out keyboard and SR users.
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const step = 24;
+      if (e.key === "ArrowLeft") { e.preventDefault(); setCanvasWidth(width + step); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); setCanvasWidth(width - step); }
+      else if (e.key === "Home") { e.preventDefault(); setCanvasWidth(320); }
+      else if (e.key === "End") { e.preventDefault(); setCanvasWidth(900); }
+    },
+    [width],
+  );
+
   // Resolve the blob url for the version of the artifact the panel is showing.
   // The Artifact itself carries no url, so this is the only join between the
   // artifact store and the actual bytes — and getting it wrong is invisible,
@@ -183,11 +196,19 @@ export function ArtifactCanvas({ filesForTurn, onEdit }: Props) {
       data-artifact-canvas
     >
       <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize artifact panel"
+        aria-valuenow={Math.round(width)}
+        aria-valuemin={320}
+        aria-valuemax={900}
+        tabIndex={0}
+        onKeyDown={onKeyDown}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
         title="Drag to resize"
-        className="absolute left-0 top-0 bottom-0 w-1 -translate-x-1/2 cursor-ew-resize hover:bg-primary/40 z-[5] hidden lg:block touch-none"
+        className="absolute left-0 top-0 bottom-0 w-1 -translate-x-1/2 cursor-ew-resize hover:bg-primary/40 z-[5] hidden lg:block touch-none focus-visible:bg-primary/60 focus-visible:outline-none"
       />
       <ArtifactPanel
         onEdit={onEdit}

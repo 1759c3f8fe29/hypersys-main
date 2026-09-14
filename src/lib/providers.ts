@@ -139,16 +139,18 @@ export interface ModelSpec {
   /**
    * Where to send this model, in preference order.
    *
-   * RULE (made absolute 2026-09-13, maintainer's direction — "use real model
-   * not alias"): every entry has exactly ONE route, naming the exact model id
-   * the entry's label promises. A second route used to be allowed when it was
-   * the same weights on a different provider, or as a documented exception
-   * for service/capability names ("Flyer", "Flyer Vision"); the maintainer
-   * overruled both exceptions, so the array shape remains only because
-   * api/llm.js walks routes generically. Today every routes array in this file
-   * has length 1 — adding a second entry of ANY kind is reintroducing the
-   * alias, and the visible-failure behaviour of a dead route is the honest
-   * one: the user sees the error and picks another named model themselves.
+   * RULE (2026-09-13, maintainer's direction — "use real model not alias"):
+   * named-weight entries carry exactly ONE route naming the exact model id the
+   * label promises — a second set of weights under such a name is the alias
+   * this catalogue refuses, and a dead route fails visibly so the user picks
+   * another named model themselves.
+   *
+   * DOCUMENTED EXCEPTION (same-day correction — "keep glm, flash or other best
+   * model"): the default service entry ("Flyer"), the vision capability entry
+   * ("Flyer Vision") and the internal utility entry ("Flyer Mini") may carry
+   * fallback legs. These are service/capability names, not weights, and the
+   * exception exists so the default keeps answering when a provider is down.
+   * The array shape remains because api/llm.js walks routes generically.
    */
   routes: ModelRoute[];
   /** Total context window in tokens. Used by the token budgeter. */

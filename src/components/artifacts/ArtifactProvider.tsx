@@ -10,7 +10,7 @@
 // and without the stale-state hazards the updater side-channel had. Components
 // subscribe via `useSyncExternalStore`; the singleton owns the Map.
 
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import type { Artifact } from "@/lib/artifacts";
 import { codeArtifactFrom, fileArtifactFrom, mergeArtifacts } from "@/lib/artifacts";
 import type { MessageFile } from "@/components/chat/types";
@@ -168,7 +168,13 @@ export function useArtifacts(): State {
  * re-renders on the ingest that actually lifted it.
  */
 export function useHasArtifact(id: string | null): boolean {
-  const read = () => (id ? state.artifacts.some((a) => a.id === id) : false);
+  // Memoized snapshot: a fresh closure every render violates
+  // useSyncExternalStore's cached-snapshot contract (tearing warnings, extra
+  // renders for every CodeBlock on every ingest).
+  const read = useCallback(
+    () => (id ? state.artifacts.some((a) => a.id === id) : false),
+    [id],
+  );
   return useSyncExternalStore(subscribe, read, read);
 }
 

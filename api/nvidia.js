@@ -9,15 +9,32 @@ const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 export default async function handler(req, res) {
   if (applyGuard(req, res)) return;
-  // Spends our NVIDIA key, so the caller is attributed and counted first.
-  // A caller on their own key is exempt — they are spending their allowance.
-  if (await applyMeter(req, res, { byokHeaders: ["x-nvidia-api-key", "x-api-key"] })) return;
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;
   }
 
-  const key = req.headers["x-nvidia-api-key"] || req.headers["x-api-key"] || req.headers["authorization"]?.split(" ")[1] || process.env.VITE_NVIDIA_API_KEY || process.env.NVIDIA_API_KEY;
+  const body = typeof req.body === "string" ? safeParse(req.body) : req.body || {};
+  const { messages, model, temperature, top_p, max_tokens } = body;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    res.status(400).json({ error: "`messages` array is required" });
+    return;
+  }
+
+  if (!model) {
+    res.status(400).json({ error: "`model` is required" });
+    return;
+  }
+
+  // Spends our NVIDIA key, so the caller is attributed and counted first.
+  // A caller on their own key is exempt — they are spending their allowance.
+  // Validated BEFORE metering so 405/400s never burn quota.
+  if (await applyMeter(req, res, { byokHeaders: ["x-nvidia-api-key", "x-api-key"] })) return;
+
+  // Never read `authorization` here: that header carries the Firebase ID token
+  // for identity, and forwarding it as a provider key breaks signed-in calls
+  // and leaks the credential to a third party.
+  const key = header(req, "x-nvidia-api-key") || header(req, "x-api-key") || process.env.VITE_NVIDIA_API_KEY || process.env.NVIDIA_API_KEY;
   if (!key) {
     res.status(500).json({ error: "NVIDIA_API_KEY is not configured" });
     return;
@@ -44,6 +61,16 @@ export default async function handler(req, res) {
   // giving up; a single attempt made working models look permanently broken.
   const RETRY_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
   const BACKOFF_MS = [600, 1500, 3000];
+  // Clamp client max_tokens: unbounded values are a cost attack on our key.
+  const safeMaxTokens = Math.min(Math.max(Number(max_tokens) || 2048, 1), 8192);
+
+  // Upstream timeout so a hung provider can't hang the function: each attempt
+  // gets 25s to first byte, then we fail over / retry.
+  const fetchWithTimeout = (url, opts, ms = 25000) => {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), ms);
+    return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(t));
+  };
 
   let upstream = null;
   let lastStatus = 0;
@@ -51,7 +78,7 @@ export default async function handler(req, res) {
 
   for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
     try {
-      upstream = await fetch(NVIDIA_URL, {
+      upstream = await fetchWithTimeout(NVIDIA_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -64,21 +91,21 @@ export default async function handler(req, res) {
           stream: true,
           temperature: temperature ?? 0.7,
           top_p: top_p ?? 0.95,
-          max_tokens: max_tokens ?? 2048,
+          max_tokens: safeMaxTokens,
         }),
       });
     } catch (e) {
       console.error(`NVIDIA NIM model ${model} fetch failed (attempt ${attempt + 1}):`, e);
       upstream = null;
       lastStatus = 502;
-      lastDetail = String(e);
+      lastDetail = String(e).slice(0, 300);
     }
 
     if (upstream && upstream.ok && upstream.body) break;
 
     if (upstream) {
       lastStatus = upstream.status;
-      lastDetail = await upstream.text().catch(() => "");
+      lastDetail = (await upstream.text().catch(() => "")).slice(0, 300);
       // A real "model not found" / bad request must not be retried.
       if (!RETRY_STATUSES.has(upstream.status)) break;
       upstream = null;
@@ -110,6 +137,9 @@ export default async function handler(req, res) {
   res.setHeader("Connection", "keep-alive");
 
   const reader = upstream.body.getReader();
+  // If the client disconnects mid-stream, stop reading upstream instead of
+  // holding the function to maxDuration.
+  try { req.on?.("close", () => reader.cancel().catch(() => {})); } catch { /* ignore */ }
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -123,4 +153,9 @@ export default async function handler(req, res) {
 
 function safeParse(s) {
   try { return JSON.parse(s); } catch { return {}; }
+}
+
+function header(req, name) {
+  const raw = req.headers?.[name] ?? req.headers?.[name.toLowerCase()];
+  return Array.isArray(raw) ? raw[0] : raw || undefined;
 }

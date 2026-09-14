@@ -124,7 +124,7 @@ function localApiProxy(): Plugin {
           res.setHeader("Vary", "Origin");
         }
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key, X-TokenRouter-Api-Key");
         res.setHeader("Access-Control-Max-Age", "3600");
 
         if (req.method === "OPTIONS") {

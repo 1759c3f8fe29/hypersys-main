@@ -625,7 +625,12 @@ async function buildPdf(content: string): Promise<Blob> {
 
   const blocks = parseMarkdownBlocks(content);
 
+  // Ordered-list counter: parseMarkdownBlocks strips the `1.` markers, so
+  // without our own counter every step renders as an undifferentiated
+  // indented paragraph and order is lost.
+  let numberedCounter = 0;
   blocks.forEach((block, index) => {
+    if (block.type !== "numbered") numberedCounter = 0;
     switch (block.type) {
       case "heading": {
         const size = [20, 16, 13, 12][block.level - 1];
@@ -643,7 +648,8 @@ async function buildPdf(content: string): Promise<Blob> {
         break;
 
       case "numbered":
-        write(stripInlineMarkers(block.text), { indent: 14 + block.depth * 14 });
+        numberedCounter += 1;
+        write(`${numberedCounter}.  ${stripInlineMarkers(block.text)}`, { indent: 14 + block.depth * 14 });
         break;
 
       case "quote":

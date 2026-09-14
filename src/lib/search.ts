@@ -102,7 +102,11 @@ export function buildSearchContext(search: SearchResponse | null): string | null
   results.forEach((r, i) => {
     if (!r?.title && !r?.snippet) return;
     const dated = r.date ? ` (${r.date})` : "";
-    parts.push(`[${i + 1}] ${r.title}${dated}\n${r.snippet}\nSource: ${r.link}`);
+    // Allowlist http(s) only: a provider link like `javascript:` or `data:`
+    // would otherwise become a clickable markdown link in the reply (XSS).
+    const rawLink = String(r.link || "");
+    const link = /^https?:\/\//i.test(rawLink) ? rawLink : "";
+    parts.push(`[${i + 1}] ${r.title}${dated}\n${r.snippet}\nSource: ${link}`);
   });
 
   if (parts.length === 0) return null;

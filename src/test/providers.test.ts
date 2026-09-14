@@ -52,13 +52,10 @@ describe("model catalogue", () => {
   // THE aliasing bug: "llama-4-maverick" and "qwen-3-next-80b" were distinct
   // picker entries that both resolved to meta/llama-3.1-70b-instruct. Two names
   // for one set of weights means at least one of them is lying about what
-  // answered. Historically this guard was narrowed to *primary* routes so the
-  // default model's fallback chain could borrow other entries' weights under
-  // the "Flyer" service name — a narrowing retired 2026-09-13 when the
-  // maintainer overruled the service-name exception ("use real model not
-  // alias"). The single-route test below is now the stronger guard; this one
-  // remains because two entries sharing a primary is still its own lie, and
-  // the seeded control below proves the matcher still has teeth.
+  // answered. This is the same rule the "primary no other entry claims" test
+  // below pins, with its own teeth-control; kept as a second, independent
+  // walk of the catalogue because the seeded control proves the matcher trips
+  // on the original shape of the bug.
   it("never points two models at the same upstream model id as primary", () => {
     const owner = new Map<string, string>();
     for (const model of MODELS) {

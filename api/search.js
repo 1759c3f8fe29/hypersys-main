@@ -14,11 +14,6 @@ import { runSearch } from "./_search-providers.js";
 
 export default async function handler(req, res) {
   if (applyGuard(req, res)) return;
-  // SerpApi searches are metered per call against our plan, and the keyless
-  // providers rate limit by IP — an unmetered search route is worth abusing, and
-  // abusing it is also what gets our IP blocked on the fallbacks. Callers are
-  // attributed and counted.
-  if (await applyMeter(req, res)) return;
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;
@@ -30,6 +25,13 @@ export default async function handler(req, res) {
     res.status(400).json({ error: "`query` string is required" });
     return;
   }
+  if (query.length > 500) {
+    res.status(400).json({ error: "`query` is too long (max 500 characters)" });
+    return;
+  }
+
+  // Meter AFTER validation so 405/400s never burn quota.
+  if (await applyMeter(req, res)) return;
 
   const payload = await runSearch(query, num, process.env, (msg) => console.warn(msg));
 

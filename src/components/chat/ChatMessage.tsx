@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -44,6 +44,11 @@ interface ChatMessageProps {
   onFollowUp?: (question: string) => void;
   onRegenerate?: () => void;
   canRegenerate?: boolean;
+  // Resume/Continue (ChatGPT-style): set when the turn hit max_tokens
+  // (finish_reason=length) mid-answer. The streamed text is a prefix; Resume
+  // continues it in place rather than regenerating from scratch.
+  truncated?: boolean;
+  onResume?: () => void;
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
   // Branching (Part F). branchIndex is this message's 1-based position among
@@ -66,6 +71,12 @@ interface ChatMessageProps {
   // How long the model thought, in whole seconds. The collapsed block's label
   // ("Thought for 12s") reads it; undefined falls back to "Thought process".
   thinkSeconds?: number;
+  // Feedback on a finished reply (ChatGPT-style thumbs up/down). The state is
+  // owned by the parent because it is persisted per message and must survive
+  // branch switches and reloads; this component only renders it. Both halves
+  // are optional so every other call site of this component compiles.
+  rating?: 'up' | 'down';
+  onRate?: (direction: 'up' | 'down') => void;
 }
 
 function hostOf(link: string): string {
@@ -173,7 +184,9 @@ function ThinkingBlock({ reasoning, thinkSeconds, isThinking }: {
   // null means "no user click yet"; the stream's own state decides. Once set,
   // it is the decision forever — the stream will not re-open or re-close it.
   const [manual, setManual] = useState<boolean | null>(null);
-  const [autoOpen, setAutoOpen] = useState(true);
+  // Init from the live state, not always-open: a completed reload rendered one
+  // open frame before the effect corrected it.
+  const [autoOpen, setAutoOpen] = useState(isThinking);
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
   // Auto-collapse: open only while there is no answer to show. `isThinking`
@@ -477,9 +490,9 @@ function FinishedRun({ run, index }: { run: MessageCodeRun; index: number }) {
 function FileChips({ files }: { files: MessageFile[] }) {
   return (
     <div className="mt-4 pt-3 border-t border-border/30 flex flex-wrap gap-2">
-      {files.map((file) => (
+      {files.map((file, i) => (
         <div
-          key={file.url}
+          key={`${file.filename}-${file.url}-${i}`}
           className="group flex items-center gap-2 px-3 py-2 rounded-xl bg-secondary/40 hover:bg-secondary border border-border/30 hover:border-primary/30 transition-colors active:scale-[0.99]"
         >
           <FileText className="w-4 h-4 shrink-0 text-primary/80" />
@@ -747,9 +760,16 @@ export function buildMarkdownComponents(): Components {
   },
   ul: ({ children }) => <ul className="space-y-2 my-3 pl-1 list-none">{children}</ul>,
   ol: ({ children }) => <ol className="space-y-2 my-3 pl-5 list-decimal marker:text-primary/70 marker:font-semibold text-[15.5px] sm:text-[16.5px]">{children}</ol>,
-  li: ({ children, className }) => {
+  li: ({ children, className, ordered }: { children?: React.ReactNode; className?: string; ordered?: boolean }) => {
     if (className?.includes('task-list-item')) {
       return <li className="flex items-center gap-2.5 text-[15.5px] sm:text-[16.5px] font-normal text-foreground/90 my-1">{children}</li>;
+    }
+    // Ordered items must stay list-item so the <ol> counter renders; the old
+    // flex + bullet dot turned 1.2.3. into bullets.
+    if (ordered) {
+      return (
+        <li className="text-[15.5px] sm:text-[16.5px] font-normal leading-[1.75] text-foreground/90 py-0.5 pl-1">{children}</li>
+      );
     }
     return (
       <li className="flex items-start gap-2.5 text-[15.5px] sm:text-[16.5px] font-normal leading-[1.75] text-foreground/90 py-0.5 px-0.5 transition-transform duration-200 group/li">
@@ -768,11 +788,16 @@ export function buildMarkdownComponents(): Components {
     </blockquote>
   ),
   code: ({ className, children }) => {
-    const match = /language-(\w+)/.exec(className || '');
+    // \w+ missed c++, c#, f#, lang names with dots/dashes — those fell back to
+    // an inline chip, losing block formatting, Copy/Run and canvas affordance.
+    const match = /language-([\w+.#-]+)/.exec(className || '');
     if (!match) {
       return <code className="px-1.5 py-0.5 mx-0.5 rounded-md bg-secondary/60 border border-border/40 text-foreground font-mono text-[13.5px]">{children}</code>;
     }
-    return <CodeBlock language={match[1]}>{String(children).replace(/\n$/, '')}</CodeBlock>;
+    // Prism names differ from markdown tags for C-family languages.
+    const raw = match[1].toLowerCase();
+    const language = raw === 'c++' ? 'cpp' : raw === 'c#' ? 'csharp' : raw === 'f#' ? 'fsharp' : match[1];
+    return <CodeBlock language={language}>{String(children).replace(/\n$/, '')}</CodeBlock>;
   },
   pre: ({ children }) => <>{children}</>,
   a: ({ href, children }) => (
@@ -803,7 +828,7 @@ export function buildMarkdownComponents(): Components {
  };
 }
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, onFollowUp, onRegenerate, canRegenerate, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedArenaIdx, setCopiedArenaIdx] = useState<number | null>(null);
@@ -845,7 +870,9 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
     if (isUser) return;
     if (!isStreaming) {
       // Final state: snap to the complete content immediately so there is no
-      // one-frame lag where the last chunk is absent.
+      // one-frame lag where the last chunk is absent. Also resyncs when the
+      // prop changes while idle (e.g. branch switch), which the old
+      // [isStreaming,isUser] deps missed, leaving stale sibling text on screen.
       const next = liveContentRef.current;
       if (renderedContent !== next) setRenderedContent(next);
       return;
@@ -872,8 +899,10 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
     };
     // Re-subscribing only on streaming-state change (not on every chunk) keeps
     // the timer stable across the whole turn rather than churning per token.
+    // strippedContent is included so an idle prop change (branch switch) still
+    // resyncs via the snap branch above instead of showing stale text.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isStreaming, isUser]);
+  }, [isStreaming, isUser, strippedContent]);
 
   // During streaming we drop remark-math + rehype-katex. KaTeX is the heaviest
   // transform here and partial LaTeX (e.g. a lone "$" mid-token) renders jumpy
@@ -1098,12 +1127,42 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                 )}
               </div>
               <div className="flex items-center gap-1.5">
+                {truncated && onResume && !isStreaming && (
+                  <button type="button" onClick={onResume}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-primary/15 hover:bg-primary/25 text-xs text-primary hover:text-primary transition-all border border-primary/30 hover:border-primary/50"
+                    title="Continue the cut-off response">
+                    <Play className="w-3.5 h-3.5" /><span className="hidden sm:inline">Continue</span>
+                  </button>
+                )}
                 {canRegenerate && onRegenerate && !isStreaming && (
                   <button type="button" onClick={onRegenerate}
                     className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-secondary/50 hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all border border-border/30 hover:border-primary/30"
                     title="Regenerate response">
                     <RefreshCw className="w-3.5 h-3.5" /><span className="hidden sm:inline">Retry</span>
                   </button>
+                )}
+                {/* Feedback (ChatGPT-style): rating is parent-owned state — the
+                    parent persists it per message, so it survives branch switches
+                    and reloads. Clicking the active thumb clears the rating, so one
+                    control covers rate/correct/unrate. Icon-only, so both carry
+                    state-tracking aria-labels (see the read-aloud button's note). */}
+                {onRate && !isStreaming && (
+                  <>
+                    <button type="button"
+                      onClick={() => onRate('up')}
+                      aria-label={rating === 'up' ? 'Remove good rating' : 'Rate this response as good'}
+                      title={rating === 'up' ? 'Remove rating' : 'Good response'}
+                      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${rating === 'up' ? 'bg-primary/20 text-primary border-primary/30' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
+                      <ThumbsUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button type="button"
+                      onClick={() => onRate('down')}
+                      aria-label={rating === 'down' ? 'Remove bad rating' : 'Rate this response as bad'}
+                      title={rating === 'down' ? 'Remove rating' : 'Bad response'}
+                      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${rating === 'down' ? 'bg-destructive/20 text-destructive border-destructive/30' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
+                      <ThumbsDown className="w-3.5 h-3.5" />
+                    </button>
+                  </>
                 )}
                 {/* Named, because it is icon-only and it is *the* control a screen
                     reader user reaches for: unlabelled it announced as "button".
@@ -1137,8 +1196,11 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   reasoning={reasoning}
                   thinkSeconds={thinkSeconds}
                   // The block stays open only while there is no answer to read;
-                  // the first content token is the model handing over.
-                  isThinking={isStreaming && !content}
+                  // the first ANSWER token is the handover — not the first raw
+                  // delta, which may be thinking tags the sanitizer strips.
+                  // textOnlyContent is the sanitized body, so thinking-only
+                  // streams keep "Thinking…" instead of flipping early.
+                  isThinking={isStreaming && !textOnlyContent}
                 />
               )}
 
@@ -1161,6 +1223,18 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   animate={{ opacity: [1, 0.3, 1] }}
                   transition={{ duration: 0.6, repeat: Infinity }}
                 />
+              )}
+              {!isUser && truncated && onResume && !isStreaming && (
+                <div className="mt-3 flex items-center gap-2 rounded-xl border border-primary/25 bg-primary/[0.06] px-3 py-2.5">
+                  <span className="text-xs text-muted-foreground">Response was cut off.</span>
+                  <button
+                    type="button"
+                    onClick={onResume}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
+                  >
+                    <Play className="w-3.5 h-3.5" />Continue
+                  </button>
+                </div>
               )}
             </div>
 

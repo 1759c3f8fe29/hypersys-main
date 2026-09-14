@@ -39,7 +39,7 @@ function assistant(overrides: Record<string, unknown> = {}) {
 const block = () =>
   screen.queryByText(/Thinking|Thought/)?.closest('[data-thinking-block]') ?? null;
 // The collapsed/expanded toggle inside a rendered block.
-const blockToggle = () => within(block()!).getByRole("button");
+const blockToggle = () => within(block()! as HTMLElement).getByRole("button");
 
 describe("the thinking block's presence", () => {
   it("renders when the reply carries reasoning", () => {

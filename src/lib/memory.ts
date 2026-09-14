@@ -138,6 +138,10 @@ export function dedupeMemories(existing: string[], candidates: string[]): string
   return candidates.filter((c) => {
     const n = norm(c);
     if (!n) return false;
-    return !pool.some((p) => p === n || p.includes(n) || n.includes(p));
+    if (pool.some((p) => p === n || p.includes(n) || n.includes(p))) return false;
+    // Track in-batch accepts so near-dupes within one extractor batch don't
+    // both persist as separate Firestore rows.
+    pool.push(n);
+    return true;
   });
 }

@@ -23,22 +23,15 @@ import { applyMeter } from "./_meter.js";
 const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const OCR_MODEL = "nvidia/nemotron-parse";
 
+function header(req, name) {
+  const raw = req.headers?.[name] ?? req.headers?.[name.toLowerCase()];
+  return Array.isArray(raw) ? raw[0] : raw || undefined;
+}
+
 export default async function handler(req, res) {
   if (applyGuard(req, res)) return;
-  if (await applyMeter(req, res, { byokHeaders: ["x-nvidia-api-key", "x-api-key"] })) return;
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
-
-  const key =
-    req.headers["x-nvidia-api-key"] ||
-    req.headers["x-api-key"] ||
-    req.headers["authorization"]?.split(" ")[1] ||
-    process.env.VITE_NVIDIA_API_KEY ||
-    process.env.NVIDIA_API_KEY;
-  if (!key) {
-    res.status(500).json({ error: "NVIDIA_API_KEY is not configured" });
     return;
   }
 
@@ -49,11 +42,30 @@ export default async function handler(req, res) {
     return;
   }
 
+  if (await applyMeter(req, res, { byokHeaders: ["x-nvidia-api-key", "x-api-key"] })) return;
+
+  // Never read `authorization`: Firebase ID token, not a provider key.
+  const key =
+    header(req, "x-nvidia-api-key") ||
+    header(req, "x-api-key") ||
+    process.env.VITE_NVIDIA_API_KEY ||
+    process.env.NVIDIA_API_KEY;
+  if (!key) {
+    res.status(500).json({ error: "NVIDIA_API_KEY is not configured" });
+    return;
+  }
+
   // Serve exactly nemotron-parse. The caller is responsible for sending the
   // image-only content the model accepts; we pass messages through verbatim so
   // the route does not become a silent shape-substitutor.
   const RETRY_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
   const BACKOFF_MS = [600, 1500, 3000];
+  const safeMaxTokens = Math.min(Math.max(Number(max_tokens) || 2000, 1), 8192);
+  const fetchWithTimeout = (url, opts, ms = 25000) => {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), ms);
+    return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(t));
+  };
 
   let upstream = null;
   let lastStatus = 0;
@@ -61,7 +73,7 @@ export default async function handler(req, res) {
 
   for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
     try {
-      upstream = await fetch(NVIDIA_URL, {
+      upstream = await fetchWithTimeout(NVIDIA_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -72,21 +84,21 @@ export default async function handler(req, res) {
           model: OCR_MODEL,
           messages,
           stream: false,
-          max_tokens: max_tokens ?? 2000,
+          max_tokens: safeMaxTokens,
         }),
       });
     } catch (e) {
       console.error(`nemotron-parse fetch failed (attempt ${attempt + 1}):`, e);
       upstream = null;
       lastStatus = 502;
-      lastDetail = String(e);
+      lastDetail = String(e).slice(0, 300);
     }
 
     if (upstream && upstream.ok) break;
 
     if (upstream) {
       lastStatus = upstream.status;
-      lastDetail = await upstream.text().catch(() => "");
+      lastDetail = (await upstream.text().catch(() => "")).slice(0, 300);
       // A real bad request (no text input, oversized image, etc.) must not be
       // retried — only the transient gateway statuses.
       if (!RETRY_STATUSES.has(upstream.status)) break;
@@ -113,7 +125,12 @@ export default async function handler(req, res) {
   }
 
   // Return the full JSON so the client can flatten the markdown_bbox tool_call.
-  res.status(200).json(await upstream.json());
+  // Guarded: a 200 with non-JSON (gateway HTML, truncation) must 502, not throw.
+  try {
+    res.status(200).json(await upstream.json());
+  } catch {
+    res.status(502).json({ error: "ocr_upstream_error", status: 502, detail: "OCR returned a non-JSON response." });
+  }
 }
 
 function safeParse(s) {

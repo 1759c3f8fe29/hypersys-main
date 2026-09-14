@@ -210,11 +210,15 @@ function nameLooksTextual(file: File): boolean {
 
 function truncate(text: string): { text: string; truncated: boolean } {
   if (text.length <= MAX_CHARS_PER_DOC) return { text, truncated: false };
-  return {
-    // Cut at a line boundary so the model doesn't receive a half-token tail.
-    text: text.slice(0, MAX_CHARS_PER_DOC).replace(/\n[^\n]*$/, ""),
-    truncated: true,
-  };
+  // Cut at a line boundary so the model doesn't receive a half-token tail.
+  let cut = text.slice(0, MAX_CHARS_PER_DOC).replace(/\n[^\n]*$/, "");
+  if (!cut) {
+    // Single-line blob (minified JSON/CSV/log): no newline to cut at, so fall
+    // back to a word boundary rather than slicing mid-token with no marker.
+    cut = text.slice(0, MAX_CHARS_PER_DOC).replace(/\s+\S*$/, "");
+    if (!cut) cut = text.slice(0, MAX_CHARS_PER_DOC);
+  }
+  return { text: cut, truncated: true };
 }
 
 /** Whether this file should be sent as an image rather than extracted as text. */
@@ -333,7 +337,14 @@ function formatBytes(size: number): string {
     value /= 1024;
     unit++;
   }
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+  // Carry rounding overflow: 1048575B rounded to 1024KB, display as 1.0MB.
+  let out = value < 10 ? Number(value.toFixed(1)) : Math.round(value);
+  if (out >= 1024 && unit < units.length - 1) {
+    out = out / 1024;
+    unit++;
+    out = out < 10 ? Number(out.toFixed(1)) : Math.round(out);
+  }
+  return `${out} ${units[unit]}`;
 }
 
 /**
@@ -814,7 +825,8 @@ function htmlToText(html: string): string {
  * sentence. The model can read around that, but it costs tokens and invites it to
  * quote control words back as if they were the user's words.
  */
-async function extractRtf(file: File): Promise<{ text: string }> {
+async function extractRtf(file: File): Promise<{ text: string; sliced?: boolean }> {
+  const sliced = file.size > MAX_TEXT_BYTES;
   const raw = decodeText(await file.slice(0, MAX_TEXT_BYTES).arrayBuffer());
 
   const text = raw
@@ -839,7 +851,7 @@ async function extractRtf(file: File): Promise<{ text: string }> {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  return { text };
+  return { text, sliced };
 }
 
 /**
@@ -972,9 +984,9 @@ export function scavengeText(bytes: Uint8Array, minRun = 6): string {
     .trim();
 }
 
-async function extractLegacyOffice(file: File): Promise<{ text: string }> {
+async function extractLegacyOffice(file: File): Promise<{ text: string; sliced?: boolean }> {
   const bytes = new Uint8Array(await file.slice(0, MAX_TEXT_BYTES).arrayBuffer());
-  return { text: scavengeText(bytes) };
+  return { text: scavengeText(bytes), sliced: file.size > MAX_TEXT_BYTES };
 }
 
 /**
@@ -1197,7 +1209,11 @@ export async function extractDocument(
     }
 
     const { text, truncated } = truncate(raw.text);
-    return { ...base, text, truncated, units: raw.units };
+    // Markup-heavy inputs (RTF/OLE2) are pre-sliced at MAX_TEXT_BYTES before
+    // text extraction: a 5MB file whose first slice yields <120k text would
+    // otherwise report truncated:false while losing its tail.
+    const sliced = (raw as { sliced?: boolean }).sliced === true;
+    return { ...base, text, truncated: truncated || sliced, units: raw.units };
   } catch (err) {
     console.error(`[documents] failed to extract ${file.name}:`, err);
     return {
@@ -1223,13 +1239,20 @@ export async function extractDocument(
 export function buildDocumentContext(docs: ExtractedDocument[]): string | null {
   if (docs.length === 0) return null;
 
+  // Filenames/errors are attacker-controlled (upload names): strip newlines and
+  // the `--- FILE:` marker so a crafted name can't forge trusted file blocks.
+  const safeName = (s: string) =>
+    String(s || "file").replace(/[\r\n]+/g, " ").replace(/---\s*FILE:/gi, "FILE:").slice(0, 200);
+  const safeDetail = (s: string) =>
+    String(s || "").replace(/[\r\n]+/g, " ").replace(/---\s*FILE:/gi, "FILE:").slice(0, 200);
+
   const blocks = docs.map((doc) => {
     if (doc.error) {
-      return `--- FILE: ${doc.name} ---\n[Could not be read: ${doc.error}]`;
+      return `--- FILE: ${safeName(doc.name)} ---\n[Could not be read: ${safeDetail(doc.error)}]`;
     }
     if (doc.binary) {
       return [
-        `--- FILE: ${doc.name}${doc.detail ? ` (${doc.detail})` : ""} ---`,
+        `--- FILE: ${safeName(doc.name)}${doc.detail ? ` (${safeDetail(doc.detail)})` : ""} ---`,
         "[This file holds no readable text, so none is included. This is not an error and nothing failed:",
         "it is simply a binary format. Say what the file is and answer whatever the user asked about it.",
         "Do NOT guess at, summarise, or describe its contents.]",
@@ -1239,7 +1262,7 @@ export function buildDocumentContext(docs: ExtractedDocument[]): string | null {
     if (doc.id) notes.push(`attachment_id: ${doc.id}`);
     if (doc.units) notes.push(`${doc.units} ${doc.units === 1 ? "part" : "parts"}`);
     if (doc.truncated) notes.push("truncated to fit the context window");
-    const header = notes.length > 0 ? `${doc.name} (${notes.join(", ")})` : doc.name;
+    const header = notes.length > 0 ? `${safeName(doc.name)} (${notes.join(", ")})` : safeName(doc.name);
 
     return `--- FILE: ${header} ---\n${doc.text}`;
   });

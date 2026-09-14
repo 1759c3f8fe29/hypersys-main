@@ -214,8 +214,8 @@ export default function ChatInput({
     }
   };
 
-  const removeFile = (fileName: string) => {
-    setSelectedFiles((prev) => prev.filter((file) => `${file.name}-${file.size}` !== fileName));
+  const removeFile = (index: number) => {
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleStop = () => {
@@ -325,8 +325,12 @@ export default function ChatInput({
             <div className="relative px-1.5 py-1 sm:px-2 sm:py-1.5">
               {previews.length > 0 && (
                 <div className="flex gap-2 overflow-x-auto pb-1 pt-1 px-1 scrollbar-thin">
-                  {previews.map(({ file, url }) => {
-                    const fileKey = `${file.name}-${file.size}`;
+                  {previews.map(({ file, url }, idx) => {
+                    // Index-scoped key: name+size alone collides for two distinct
+                    // files with the same name/size (and lastModified can match
+                    // for batch-added files), which merged previews and removed
+                    // both on one click.
+                    const fileKey = `${file.name}-${file.size}-${file.lastModified}-${idx}`;
 
                     return (
                       <div key={fileKey} className="group/file relative w-14 h-14 sm:w-16 sm:h-16 rounded-xl overflow-hidden border border-primary/20 bg-background/50 flex-shrink-0 shadow-md transition-transform hover:scale-[1.03] hover:border-primary/50 hover:shadow-primary/20">
@@ -342,7 +346,7 @@ export default function ChatInput({
                         )}
                         <button
                           type="button"
-                          onClick={() => removeFile(fileKey)}
+                          onClick={() => removeFile(idx)}
                           /* max-hover: keeps this visible on touch devices, where
                              group-hover never fires and the only way to remove an
                              attachment would otherwise be to send it. */

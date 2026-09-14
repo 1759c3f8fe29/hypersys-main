@@ -68,6 +68,13 @@ const UA =
 
 const clampNum = (num) => Math.min(Math.max(Number(num) || 5, 1), 10);
 
+// Bounded fetch so one hung provider can't hang the route (and the dev proxy).
+function fetchWithTimeout(url, opts = {}, ms = 12000) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(t));
+}
+
 // ── shared text helpers ────────────────────────────────────────────────────
 
 export function stripTags(s) {
@@ -84,7 +91,10 @@ export function decodeEntities(s) {
     .replace(/&amp;/g, "&");
 }
 
-const clean = (s) => decodeEntities(stripTags(s));
+// Decode THEN strip: strip-then-decode lets `&lt;img onerror=&gt;` survive the
+// strip (no literal <) and become a real tag via decode — an XSS vector if a
+// client renders snippets as HTML.
+const clean = (s) => stripTags(decodeEntities(s));
 
 /**
  * Drop rows with no usable content and rows repeating a link already seen.
@@ -148,7 +158,7 @@ export async function searchSerpApi(query, num, key) {
       num: String(clampNum(num)),
       api_key: key,
     });
-    const res = await fetch(`https://serpapi.com/search.json?${params}`);
+    const res = await fetchWithTimeout(`https://serpapi.com/search.json?${params}`);
     if (!res.ok) {
       // Surface the real reason (bad key, quota exhausted, rate limit) rather than
       // falling through silently to an empty result set, which reads to the model
@@ -251,7 +261,7 @@ export async function searchDuckDuckGo(query) {
   try {
     // A form POST rather than a GET: the GET endpoint answers with the anomaly page
     // unconditionally, so the query goes in the body.
-    const res = await fetch("https://lite.duckduckgo.com/lite/", {
+    const res = await fetchWithTimeout("https://lite.duckduckgo.com/lite/", {
       method: "POST",
       headers: {
         "User-Agent": UA,
@@ -295,7 +305,7 @@ export async function searchWikipedia(query, limit = 4) {
       format: "json",
       srlimit: String(limit),
     });
-    const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, {
+    const res = await fetchWithTimeout(`https://en.wikipedia.org/w/api.php?${params}`, {
       headers: { "User-Agent": "Flyer/1.0 (chat assistant; web search fallback)" },
     });
     if (!res.ok) return [];
@@ -343,7 +353,7 @@ async function stackExchangeQuery(query, limit) {
       pagesize: String(limit),
       filter: "withbody",
     });
-    const res = await fetch(`https://api.stackexchange.com/2.3/search/advanced?${params}`);
+    const res = await fetchWithTimeout(`https://api.stackexchange.com/2.3/search/advanced?${params}`);
     if (!res.ok) return [];
     const data = await res.json();
     return (data.items || []).map((it) => ({
