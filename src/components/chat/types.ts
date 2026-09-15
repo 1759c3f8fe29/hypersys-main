@@ -45,3 +45,12 @@ export interface MessageCodeRun {
   stderr?: string;
   images?: string[];
 }
+
+// A staged implementation checklist (batch #9, `task_list`). One per message:
+// the newest staging wins, because a re-issued plan is a correction, not an
+// addition. `done` is UI state — the model never sees ticks — so ticks are
+// session-only and not written to the Firestore doc (same rule as codeRuns).
+export interface MessageTaskList {
+  title: string;
+  tasks: Array<{ text: string; done: boolean }>;
+}

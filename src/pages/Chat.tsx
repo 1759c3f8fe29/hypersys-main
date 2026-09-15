@@ -44,7 +44,7 @@ import { UNAVAILABLE_REASONS } from '@/lib/shortcuts';
 import { conversationDocumentTitle } from '@/hooks/useDocumentTitle';
 import { ShortcutsDialog } from '@/components/chat/ShortcutsDialog';
 import { Button } from '@/components/ui/button';
-import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource } from '@/components/chat/types';
+import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource, MessageTaskList } from '@/components/chat/types';
 import { Menu, ArrowDown, Sparkles, AlertTriangle, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -78,6 +78,10 @@ interface Message {
   // these carry the script, not its output, and the block's Run button is the only
   // thing that starts the interpreter. Session-only, like `files`.
   codeRuns?: MessageCodeRun[];
+  // A staged implementation checklist (batch #9). `title` and `tasks` persist to
+  // the Firestore doc so a reload keeps the plan; tick state is UI-only (the
+  // model cannot see ticks — see TaskListBlock), so it is not carried here.
+  taskList?: MessageTaskList;
   // Arena Mode
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
@@ -1750,6 +1754,8 @@ export default function Chat() {
         const agentFiles = agentArtifacts.files || [];
         objectUrlsRef.current.push(...agentFiles.map((f) => f.url));
         const agentCodeRuns = agentArtifacts.codeRuns || [];
+        // Staged plan (batch #9): one checklist per message, newest call wins.
+        const agentTaskList = agentArtifacts.taskList;
 
         if (cleaned) {
           const finalText = usedVisionFallback
@@ -1772,6 +1778,7 @@ export default function Chat() {
                 imageUrl: agentImageUrl || m.imageUrl,
                 files: agentFiles.length ? agentFiles : m.files,
                 codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns,
+                taskList: agentTaskList ?? m.taskList,
                 sources: mergedSources.length ? mergedSources : undefined,
                 followUps: mergedFollowUps.length ? mergedFollowUps : undefined,
                 arenaResponses: activeArenaMode && m.arenaResponses
@@ -1810,7 +1817,7 @@ export default function Chat() {
           const madeText = agentImageUrl ? 'Here you go.' : `Created ${agentFiles.map((f) => f.filename).join(', ')}.`;
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantMessage.id
-              ? { ...m, content: madeText, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns }
+              ? { ...m, content: madeText, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns, taskList: agentTaskList ?? m.taskList }
               : m)),
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
@@ -2682,6 +2689,7 @@ export default function Chat() {
                           followUps={msg.followUps}
                           files={msg.files}
                           codeRuns={msg.codeRuns}
+                          taskList={msg.taskList}
                           onFollowUp={(q) => handleSendMessage(q)}
                           onRegenerate={handleRegenerate}
                           canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}

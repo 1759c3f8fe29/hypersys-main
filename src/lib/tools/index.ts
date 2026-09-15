@@ -17,6 +17,7 @@ import { EDIT_FILE_SCHEMA, executeEditFile } from "./edit-file";
 import { GENERATE_IMAGE_SCHEMA, executeGenerateImage } from "./generate-image";
 import { OCR_IMAGE_SCHEMA, executeOcrImage } from "./ocr-image";
 import { RUN_CODE_SCHEMA, executeRunCode } from "./run-code";
+import { TASK_LIST_TOOL } from "./task-list";
 import { WEB_SEARCH_SCHEMA, executeWebSearch } from "./web-search";
 import type { ToolSchema } from "@/lib/ai";
 
@@ -34,6 +35,12 @@ const DEFINITIONS: ToolDefinition[] = [
   },
   { name: "edit_file", schema: EDIT_FILE_SCHEMA, execute: executeEditFile },
   { name: "run_code", schema: RUN_CODE_SCHEMA, execute: executeRunCode },
+  {
+    name: "task_list",
+    schema: TASK_LIST_TOOL.schema,
+    execute: TASK_LIST_TOOL.execute,
+    recognizeTextForm: TASK_LIST_TOOL.recognizeTextForm,
+  },
   { name: "ocr_image", schema: OCR_IMAGE_SCHEMA, execute: executeOcrImage },
 ];
 

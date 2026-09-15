@@ -137,6 +137,9 @@ export function toTreeMessages(
     rating: m.rating,
     // Resume flag: a truncated reply keeps its Continue affordance reload.
     truncated: m.truncated,
+    // Staged checklist (batch #9): carried through so the rendered forest
+    // keeps the model's plan after a reload. Untouched — no field repair here.
+    taskList: m.taskList,
   }));
 }
 

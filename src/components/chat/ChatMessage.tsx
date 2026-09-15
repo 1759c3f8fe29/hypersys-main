@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown, ListChecks } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -16,7 +16,7 @@ import { artifactIdForCode, isSubstantialCodeBlock } from '@/lib/artifacts';
 import { openCodeArtifact, openFileArtifact, useHasArtifact } from '@/components/artifacts/ArtifactProvider';
 import { LOGO_URL } from '@/lib/assets';
 import { formatElapsed } from '@/lib/duration';
-import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource } from './types';
+import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource, MessageTaskList } from './types';
 import { RunButton, RunOutput } from './CodeRunner';
 import { isRunnableLanguage, useCodeRunner } from './use-code-runner';
 
@@ -41,6 +41,11 @@ interface ChatMessageProps {
   // each entry renders as a runnable block whose Run button — beside Copy — is
   // the only thing that starts the interpreter.
   codeRuns?: MessageCodeRun[];
+  // A staged implementation checklist (batch #9). Renders between the prose and
+  // the sources; ticks are local to the component, so the model's plan survives
+  // a reload (persisted text) while tick state resets — the honest behavior for
+  // state the model cannot see and the user owns.
+  taskList?: MessageTaskList;
   onFollowUp?: (question: string) => void;
   onRegenerate?: () => void;
   canRegenerate?: boolean;
@@ -516,6 +521,62 @@ function FileChips({ files }: { files: MessageFile[] }) {
   );
 }
 
+// The staged implementation checklist (batch #9). The model plans, the user
+// ticks: tick state lives in this component because it is UI state the model
+// cannot see, and starting it fresh on mount is honest — the ticks reset when
+// the page reloads, exactly the way the model's next turn cannot know about
+// them. The plan itself renders from the persisted message, so a reload keeps
+// what the model wrote and loses what the user did to it, which is the only
+// combination that never lies to either party.
+function TaskListBlock({ list }: { list: MessageTaskList }) {
+  // Seed once from the prop; a parent re-render (e.g. another streaming delta)
+  // must not un-tick boxes the user has already ticked.
+  const [done, setDone] = useState<Record<number, boolean>>(() =>
+    Object.fromEntries(list.tasks.map((t, i) => [i, t.done])),
+  );
+  const doneCount = list.tasks.filter((_, i) => done[i]).length;
+
+  return (
+    <div className="mt-4 pt-3 border-t border-border/30">
+      <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-muted-foreground">
+        <ListChecks className="w-3.5 h-3.5" />
+        <span className="truncate">{list.title}</span>
+        <span className="ml-auto shrink-0 tabular-nums">{doneCount}/{list.tasks.length}</span>
+      </div>
+      <ul className="space-y-1">
+        {list.tasks.map((t, i) => {
+          const checked = !!done[i];
+          return (
+            <li key={i}>
+              <button
+                type="button"
+                onClick={() => setDone((prev) => ({ ...prev, [i]: !prev[i] }))}
+                className={`w-full text-left flex items-start gap-2.5 px-2.5 py-1.5 rounded-lg transition-colors hover:bg-secondary/50 group ${
+                  checked ? 'opacity-55' : ''
+                }`}
+                aria-pressed={checked}
+              >
+                <span
+                  className={`mt-0.5 w-4 h-4 shrink-0 rounded-[5px] border flex items-center justify-center transition-colors ${
+                    checked
+                      ? 'bg-primary border-primary text-primary-foreground'
+                      : 'border-border group-hover:border-primary/50'
+                  }`}
+                >
+                  {checked && <Check className="w-3 h-3" strokeWidth={3} />}
+                </span>
+                <span className={`text-[15px] leading-snug ${checked ? 'line-through' : ''}`}>
+                  {t.text}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function SourceChips({ sources }: { sources: MessageSource[] }) {
   const [expanded, setExpanded] = useState(false);
   const shown = expanded ? sources : sources.slice(0, 3);
@@ -828,7 +889,7 @@ export function buildMarkdownComponents(): Components {
  };
 }
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, taskList, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedUser, setCopiedUser] = useState(false);
@@ -1206,6 +1267,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
 
             {!isUser && files && files.length > 0 && <FileChips files={files} />}
             {!isUser && codeRuns && codeRuns.length > 0 && <CodeRunBlocks runs={codeRuns} />}
+            {!isUser && taskList && taskList.tasks.length > 0 && <TaskListBlock list={taskList} />}
             {!isUser && sources && sources.length > 0 && <SourceChips sources={sources} />}
 
             {/* Post-response actions (#7): Retry, Copy, rate, read aloud, and

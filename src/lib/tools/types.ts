@@ -56,6 +56,14 @@ export interface ToolArtifacts {
    * the code is gone by then and must never be handed values it did not see.
    */
   codeRuns?: MessageCodeRun[];
+  /**
+   * One checklist per reply (batch #9). Staged by `task_list`, rendered as an
+   * interactive checklist under the prose. `done` starts false for every row:
+   * the model cannot see the user's ticks, so it never stages progress — it
+   * stages the plan, and the state belongs to the UI (the same division
+   * codeRuns uses for Run).
+   */
+  taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> };
 }
 
 /**

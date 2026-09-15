@@ -130,6 +130,12 @@ export interface FirestoreMessage {
    */
   truncated?: boolean;
   /**
+   * A staged implementation checklist (batch #9), persisted so a reload keeps
+   * the plan. `done` is always false on a read from the DB — ticks are
+   * UI state the model cannot see, and only TaskListBlock holds them.
+   */
+  taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> } | null;
+  /**
    * The user's feedback on this reply (ChatGPT-style thumbs up/down):
    * 'up' when rated good, 'down' when rated bad, absent when unrated or
    * cleared. Absent on documents written before feedback shipped, which
@@ -240,6 +246,24 @@ export const firestoreDb = {
           reasoning: data.reasoning || undefined,
           thinkSeconds: typeof data.thinkSeconds === 'number' ? data.thinkSeconds : undefined,
           truncated: data.truncated === true ? true : undefined,
+          // Staged checklist (batch #9). Same two-state discipline as rating:
+          // undefined when absent, an object when the model staged a plan. The
+          // `done` flags come back as written (always false) — ticks never
+          // persist, by design (see FirestoreMessage.taskList).
+          taskList: data.taskList && typeof data.taskList === 'object'
+            ? {
+                title: typeof data.taskList.title === 'string' ? data.taskList.title : 'Plan',
+                tasks: Array.isArray(data.taskList.tasks)
+                  ? data.taskList.tasks
+                      .map((t: { text?: unknown; done?: unknown }) => ({
+                        text: typeof t?.text === 'string' ? t.text : '',
+                        done: t?.done === true,
+                      }))
+                      .filter((t: { text: string }) => t.text)
+                      .slice(0, 15)
+                  : [],
+              }
+            : undefined,
           // Feedback (ChatGPT-style thumbs up/down). One field, both directions:
           // 'up' | 'down' when the reply was rated, undefined when it was not
           // (or when the rating was cleared) — never null, so the UI's truthiness
@@ -300,10 +324,10 @@ export const firestoreDb = {
     // survives a reload. See the comment on `id` in getMessages — without it, the
     // parentMessageId written above pointed at nothing after a refresh.
     clientId?: string | null,
-    // The thinking block's payload (see FirestoreMessage.reasoning). An object
-    // so the reasoning-free call sites stay as they were rather than growing
-    // two more undefineds each.
-    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean }
+    // The thinking block's payload (see FirestoreMessage.reasoning), plus the
+    // staged checklist (batch #9). An object so the reasoning-free call sites
+    // stay as they were rather than growing two more undefineds each.
+    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> } }
   ): Promise<string> {
     // Compute the sibling index: how many children this parent already has.
     // This is a read-then-write (not transactional), which is fine here —
@@ -365,6 +389,11 @@ export const firestoreDb = {
       reasoning: meta?.reasoning || null,
       thinkSeconds: typeof meta?.thinkSeconds === 'number' ? meta.thinkSeconds : null,
       truncated: meta?.truncated === true ? true : null,
+      // The staged checklist, persisted so a reload keeps the plan the model
+      // wrote (the user's ticks are UI state and deliberately are not — see
+      // TaskListBlock). `done` writes as false always: the model cannot see
+      // ticks, so a doc can never honestly carry a true.
+      taskList: meta?.taskList ?? null,
       createdAt: serverTimestamp()
     });
 
