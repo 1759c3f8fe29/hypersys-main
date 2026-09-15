@@ -831,6 +831,7 @@ export function buildMarkdownComponents(): Components {
 export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
+  const [copiedUser, setCopiedUser] = useState(false);
   const [copiedArenaIdx, setCopiedArenaIdx] = useState<number | null>(null);
   const [downloaded, setDownloaded] = useState(false);
   // Inline-edit mode for a user message. Editing is non-destructive upstream
@@ -1073,6 +1074,31 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
               </button>
             </div>
           )}
+          {/* Copy for the user's own prompt (#8 in the task list). Below the
+              bubble rather than inside it: the bubble is the words, and the
+              control belongs to the turn, not the typography. Muted until hover
+              so it doesn't compete with the message it copies — the same
+              quiet-icon language the assistant footer uses. Hidden while the
+              inline edit is open, since the textarea holds the text then. */}
+          {!isEditing && content && (
+            <div className="mt-1 flex justify-end">
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!(await copyText(content))) return;
+                  setCopiedUser(true);
+                  setTimeout(() => setCopiedUser(false), 2000);
+                }}
+                className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-foreground/35 hover:text-foreground/80 hover:bg-secondary/40 transition-colors"
+                title="Copy message"
+                aria-label={copiedUser ? 'Copied' : 'Copy message'}
+              >
+                {copiedUser
+                  ? <><Check className="w-3.5 h-3.5" /> Copied</>
+                  : <><Copy className="w-3.5 h-3.5" /> Copy</>}
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div
@@ -1126,59 +1152,11 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   </div>
                 )}
               </div>
-              <div className="flex items-center gap-1.5">
-                {truncated && onResume && !isStreaming && (
-                  <button type="button" onClick={onResume}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-primary/15 hover:bg-primary/25 text-xs text-primary hover:text-primary transition-all border border-primary/30 hover:border-primary/50"
-                    title="Continue the cut-off response">
-                    <Play className="w-3.5 h-3.5" /><span className="hidden sm:inline">Continue</span>
-                  </button>
-                )}
-                {canRegenerate && onRegenerate && !isStreaming && (
-                  <button type="button" onClick={onRegenerate}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-secondary/50 hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all border border-border/30 hover:border-primary/30"
-                    title="Regenerate response">
-                    <RefreshCw className="w-3.5 h-3.5" /><span className="hidden sm:inline">Retry</span>
-                  </button>
-                )}
-                {/* Feedback (ChatGPT-style): rating is parent-owned state — the
-                    parent persists it per message, so it survives branch switches
-                    and reloads. Clicking the active thumb clears the rating, so one
-                    control covers rate/correct/unrate. Icon-only, so both carry
-                    state-tracking aria-labels (see the read-aloud button's note). */}
-                {onRate && !isStreaming && (
-                  <>
-                    <button type="button"
-                      onClick={() => onRate('up')}
-                      aria-label={rating === 'up' ? 'Remove good rating' : 'Rate this response as good'}
-                      title={rating === 'up' ? 'Remove rating' : 'Good response'}
-                      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${rating === 'up' ? 'bg-primary/20 text-primary border-primary/30' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
-                      <ThumbsUp className="w-3.5 h-3.5" />
-                    </button>
-                    <button type="button"
-                      onClick={() => onRate('down')}
-                      aria-label={rating === 'down' ? 'Remove bad rating' : 'Rate this response as bad'}
-                      title={rating === 'down' ? 'Remove rating' : 'Bad response'}
-                      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${rating === 'down' ? 'bg-destructive/20 text-destructive border-destructive/30' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
-                      <ThumbsDown className="w-3.5 h-3.5" />
-                    </button>
-                  </>
-                )}
-                {/* Named, because it is icon-only and it is *the* control a screen
-                    reader user reaches for: unlabelled it announced as "button".
-                    The label tracks state — one control does both, and "Read aloud"
-                    on a button that stops the audio is worse than no label. */}
-                <button type="button" onClick={handleSpeak} disabled={isTTSLoading}
-                  aria-label={isTTSLoading ? 'Preparing audio' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
-                  title={isTTSLoading ? 'Preparing audio…' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
-                  className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${isSpeaking ? 'bg-primary/20 text-primary border-primary/30' : isTTSLoading ? 'bg-primary/10 text-primary border-primary/20' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
-                  {isTTSLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : isSpeaking ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                </button>
-                <button type="button" onClick={handleCopyAll}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-secondary/50 hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all border border-border/30 hover:border-primary/30">
-                  {copiedAll ? <><Check className="w-3.5 h-3.5 text-primary" /><span className="text-primary font-medium">Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
-                </button>
-              </div>
+              {/* The header carries identity (model, branch) only. The actions
+                  users reach *after reading* — Retry, Copy, rate, read aloud,
+                  Continue — live in the footer under the content, where the eye
+                  lands when the reply ends. This is the ChatGPT placement: the
+                  task list item #7. */}
             </div>
 
             {/* Content */}
@@ -1224,23 +1202,76 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   transition={{ duration: 0.6, repeat: Infinity }}
                 />
               )}
-              {!isUser && truncated && onResume && !isStreaming && (
-                <div className="mt-3 flex items-center gap-2 rounded-xl border border-primary/25 bg-primary/[0.06] px-3 py-2.5">
-                  <span className="text-xs text-muted-foreground">Response was cut off.</span>
-                  <button
-                    type="button"
-                    onClick={onResume}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
-                  >
-                    <Play className="w-3.5 h-3.5" />Continue
-                  </button>
-                </div>
-              )}
             </div>
 
             {!isUser && files && files.length > 0 && <FileChips files={files} />}
             {!isUser && codeRuns && codeRuns.length > 0 && <CodeRunBlocks runs={codeRuns} />}
             {!isUser && sources && sources.length > 0 && <SourceChips sources={sources} />}
+
+            {/* Post-response actions (#7): Retry, Copy, rate, read aloud, and
+                Continue when the reply was cut off. Under the content, where the
+                eye lands when reading ends — ChatGPT's placement — instead of the
+                old header row, which sat above the answer it acts on. Hidden while
+                streaming (nothing to retry or copy yet, and rating mid-stream
+                persists a rating for text that may still change). */}
+            {!isUser && !isStreaming && (
+              <div className="flex items-center gap-1.5 pt-1.5">
+                {truncated && onResume && (
+                  <button type="button" onClick={onResume}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-primary/15 hover:bg-primary/25 text-xs text-primary hover:text-primary transition-all border border-primary/30 hover:border-primary/50"
+                    title="The response hit its length limit; continue it">
+                    <Play className="w-3.5 h-3.5" />
+                    <span>Continue cut-off response</span>
+                  </button>
+                )}
+                {canRegenerate && onRegenerate && (
+                  <button type="button" onClick={onRegenerate}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all"
+                    title="Regenerate response">
+                    <RefreshCw className="w-3.5 h-3.5" />Retry
+                  </button>
+                )}
+                <button type="button" onClick={handleCopyAll}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all"
+                  title="Copy response">
+                  {copiedAll ? <><Check className="w-3.5 h-3.5 text-primary" /><span className="text-primary font-medium">Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
+                </button>
+                {/* Feedback (ChatGPT-style): rating is parent-owned state — the
+                    parent persists it per message, so it survives branch switches
+                    and reloads. Clicking the active thumb clears the rating, so one
+                    control covers rate/correct/unrate. Icon-only, so both carry
+                    state-tracking aria-labels (see the read-aloud button's note). */}
+                {onRate && (
+                  <>
+                    <button type="button"
+                      onClick={() => onRate('up')}
+                      aria-label={rating === 'up' ? 'Remove good rating' : 'Rate this response as good'}
+                      title={rating === 'up' ? 'Remove rating' : 'Good response'}
+                      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${rating === 'up' ? 'bg-primary/20 text-primary border-primary/30' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
+                      <ThumbsUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button type="button"
+                      onClick={() => onRate('down')}
+                      aria-label={rating === 'down' ? 'Remove bad rating' : 'Rate this response as bad'}
+                      title={rating === 'down' ? 'Remove rating' : 'Bad response'}
+                      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${rating === 'down' ? 'bg-destructive/20 text-destructive border-destructive/30' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
+                      <ThumbsDown className="w-3.5 h-3.5" />
+                    </button>
+                  </>
+                )}
+                {/* Named, because it is icon-only and it is *the* control a screen
+                    reader user reaches for: unlabelled it announced as "button".
+                    The label tracks state — one control does both, and "Read aloud"
+                    on a button that stops the audio is worse than no label. */}
+                <button type="button" onClick={handleSpeak} disabled={isTTSLoading}
+                  aria-label={isTTSLoading ? 'Preparing audio' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
+                  title={isTTSLoading ? 'Preparing audio…' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
+                  className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${isSpeaking ? 'bg-primary/20 text-primary border-primary/30' : isTTSLoading ? 'bg-primary/10 text-primary border-primary/20' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
+                  {isTTSLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : isSpeaking ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+            )}
+
             {!isUser && !isStreaming && followUps && followUps.length > 0 && onFollowUp && (
               <FollowUpChips followUps={followUps} onFollowUp={onFollowUp} />
             )}
@@ -1264,12 +1295,6 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                       ⚔️ MODEL {modelLabel}
                     </span>
                   </div>
-                  {arenaText && (
-                    <button type="button" onClick={() => handleCopyArena(aIdx, arenaText)}
-                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-secondary/50 hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all border border-border/30 hover:border-accent/30">
-                      {copiedArenaIdx === aIdx ? <><Check className="w-3.5 h-3.5 text-accent" /><span className="text-accent font-medium">Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
-                    </button>
-                  )}
                 </div>
 
                 <div className="prose prose-sm sm:prose-base prose-invert max-w-none pt-1">
@@ -1281,6 +1306,15 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                     <StreamingStatus label="Generating response..." tone="accent" />
                   ) : null}
                 </div>
+                {/* Per-card Copy under the card's content (#7): same placement
+                    rule as the primary card's action row. */}
+                {arenaText && !isStreaming && (
+                  <button type="button" onClick={() => handleCopyArena(aIdx, arenaText)}
+                    className="mt-2 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all"
+                    title="Copy this response">
+                    {copiedArenaIdx === aIdx ? <><Check className="w-3.5 h-3.5 text-accent" /><span className="text-accent font-medium">Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
+                  </button>
+                )}
               </div>
             );
           })}

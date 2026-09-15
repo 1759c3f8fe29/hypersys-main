@@ -162,6 +162,32 @@ describe("verifyRequest — a token that can be replaced", () => {
     expect(result.error).toBe("token_expired");
   });
 
+  it("fetches certs from a Google endpoint that actually exists", async () => {
+    // THE 2026-09-14 DEPLOYMENT FAULT, PINNED. The URL was
+    // /service_accounts/v1/publicKeys/securetoken@… — a path Google does not
+    // serve. Every fetch 404'd, getGooglePublicKeys threw, and the deployment
+    // answered 503 auth_unavailable for every signed-in request. The tests here
+    // stub fetch, so a typo'd URL never failed anything — this suite was green
+    // while the auth chain was hard down. This test cannot reach the network,
+    // but it CAN assert the host and path shape of what is fetched, and that is
+    // what caught nothing last time. The real endpoints are
+    //   /robot/v1/metadata/x509/securetoken@…  (PEM certs keyed by kid — used)
+    //   /service_accounts/v1/jwk/securetoken@… (JWKs)
+    // Anything else under googleapis.com that this module fetches is a suspect.
+    const { verifyRequest: fresh, calls } = await withJwks(() =>
+      jsonResponse({ "a-completely-different-kid": "-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----" }),
+    );
+    await fresh(req(`Bearer ${token({}, { kid: "no-such-kid" })}`));
+
+    expect(calls.length).toBe(1);
+    expect(new URL(calls[0]).host).toBe("www.googleapis.com");
+    expect(calls[0]).toBe(
+      "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com",
+    );
+    // And the dead path, so a "fix" back to it fails here rather than in production.
+    expect(calls[0]).not.toContain("/service_accounts/v1/publicKeys/");
+  });
+
   it("does not blame the credential when Google's JWKS endpoint is unreachable", async () => {
     // The token here is perfect. Only the network is broken.
     const { verifyRequest: fresh } = await withJwks(() => Promise.reject(new Error("getaddrinfo ENOTFOUND")));

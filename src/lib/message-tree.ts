@@ -132,6 +132,9 @@ export function toTreeMessages(
     // chain-of-thought and the "Thought for Ns" label. See FirestoreMessage.
     reasoning: m.reasoning,
     thinkSeconds: m.thinkSeconds,
+    // Feedback: a rated reply keeps its thumbs state across a reload.
+    // See FirestoreMessage.rating.
+    rating: m.rating,
     // Resume flag: a truncated reply keeps its Continue affordance reload.
     truncated: m.truncated,
   }));

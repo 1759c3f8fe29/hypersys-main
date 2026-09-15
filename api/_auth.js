@@ -24,8 +24,17 @@ import { createHash } from "node:crypto";
 // admin SDK needs a service-account credential and adds a heavy cold start to
 // every serverless invocation, while token verification only needs the public
 // keys.
-const GOOGLE_JWKS_URL =
-  "https://www.googleapis.com/service_accounts/v1/publicKeys/securetoken@system.gserviceaccount.com";
+//
+// THE URL, FIXED 2026-09-14: this used to point at
+// /service_accounts/v1/publicKeys/securetoken@…, which does not exist — every
+// fetch 404'd, getGooglePublicKeys threw, and every signed-in request on the
+// deployment was answered 503 auth_unavailable. Measured with curl: the old
+// path 404s; the two real endpoints below answer 200. The x509 metadata
+// endpoint is used rather than the JWK form because it returns PEM
+// certificates keyed by kid — the exact shape `createVerify` consumes below —
+// so no JWK→PEM conversion is needed.
+const GOOGLE_CERTS_URL =
+  "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
 
 let jwksCache = { keys: null, fetchedAt: 0 };
 const JWKS_TTL_MS = 60 * 60 * 1000;
@@ -38,8 +47,8 @@ async function getGooglePublicKeys() {
   if (jwksCache.keys && now - jwksCache.fetchedAt < JWKS_TTL_MS) {
     return jwksCache.keys;
   }
-  const res = await fetch(GOOGLE_JWKS_URL);
-  if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
+  const res = await fetch(GOOGLE_CERTS_URL);
+  if (!res.ok) throw new Error(`cert fetch failed: ${res.status}`);
   const keys = await res.json();
   jwksCache = { keys, fetchedAt: now };
   return keys;
