@@ -3887,3 +3887,216 @@ clean. The dead prose classes were left on the chat containers — the native-se
 from entry 34 keys on `.prose` as a selector, and the classes do no harm as no-ops. Registering the
 plugin without removing the component classes would visibly double every size; the test header
 names that trap.
+
+### 50. "Try again" on a failed image could only ever work once
+
+The button under *"That image didn't come through"* remounted the `<img>` with a changed key and a
+cache-buster, `retry=${attempt}`, and both halves of that are real: the key forces a new request and
+the query string does change. What it never did was change the bytes the server sends back.
+
+Probed directly against image.pollinations.ai (md5 of the returned body, three runs):
+
+```
+?…              -> 69f72faf…          bare
+?…&retry=1      -> f21df2dd…          different from bare
+?…&retry=2      -> f21df2dd…   <--    same as retry=1
+?…&retry=3      -> f21df2dd…   <--    same
+?…&retry=99     -> f21df2dd…   <--    same
+?…&seed=1       -> 0c376da9…
+?…&seed=2       -> f350655d…   <--    different
+?…&seed=3       -> 2b7b0f12…   <--    different
+?…&seed=1 again -> 0c376da9… in 286ms against 42s cold   (cached, keyed by value)
+```
+
+The host keys an unknown parameter on its **presence**, not its value. So the first press bought one
+alternative generation and every press after it replayed that one response — and the user is pressing
+a button that appeared *because* generation failed, so the response it latched onto was frequently the
+failure itself. A dead button that still animates, still remounts, still looks like it did something.
+
+`seed` is the one parameter whose value is keyed, which makes it the only usable buster here. The fix
+is `src/lib/image-url.ts` (dependency-free, like chat-format, so the render path does not pull `ai.ts`
+and through it Firebase): `retryImageUrl` **sets** rather than appends the seed — two `seed` params in
+one query leaves the winner to the server, so a second press would be a coin flip — and returns
+anything that is not http(s) untouched, because a `data:` URL has no cache to bust and re-serialising
+one through `URL` corrupts it. `freshSeed()` starts the walk at a random point rather than 1: the seed
+space is shared, so a constant start serves whatever `seed=1` already cached for that prompt, possibly
+the very failure being retried. The first request still carries no seed at all — a seed there would
+miss the cache every time and make reopening a conversation pay 42s for an image already held at 286ms.
+
+Red first: 8 of 10 passed before the change and the 2 that mattered failed —
+`expected null not to be null` for the seed, and `expected 1 to be 3` for three presses producing three
+distinct seeds, which is the replay stated as a number. Mutation-checked three ways, each killing
+exactly its own test and leaving the other nine green: `seedBase.current + attempt` → `seedBase.current`
+(one seed forever — the old defect's shape) killed only the three-presses test; `searchParams.set` →
+`append` killed only the replace test; dropping the `attempt === 0` guard killed only the
+no-seed-on-first-load test. Gates: tsc clean, 911 tests green, vite build clean, eslint clean.
+
+### 51. The default model resolved to nothing
+
+`getModel(DEFAULT_MODEL_ID)` returned `undefined`. An uncommitted edit had renamed the default
+catalogue entry's id from `glm-5.3-free` to `deepseek-v4.1-flash` and replaced its two-leg chain with a
+single NVIDIA leg, without touching `DEFAULT_MODEL_ID` (both the comment above it and the constant
+still said `glm-5.3-free`), the entry's own comment three lines below the rename (*"The id stays
+glm-5.3-free (the stable key for stored selections), so nothing breaks for users who already have it
+selected"*), the chain comment above it documenting both legs, or `providers.test.ts`. The description
+was left as `"The default model. "`, trailing space and all.
+
+Three tests named it and had simply never been run after the edit: `resolves every named default`
+failed with *default "glm-5.3-free" is not in the catalogue*, and two chain assertions failed with
+*Cannot read properties of undefined (reading 'routes')*. This is the state the pasted
+`[llm] all providers failed` logs were produced in.
+
+Re-converged rather than completed in the new direction, and the reason is in the code: the rename
+breaks the stored-selection invariant its own neighbouring comment states, and the leg it left behind
+is the one documented as usable in **LAST position only** — 144s measured TTFB, `firstByteAllowanceMs:
+90_000`, viable only because the server's `isLastRoute` relaxation lets the final leg spend the whole
+chain budget. Promoting it to sole leg makes the slow insurance into the primary path. The entry is
+back to `glm-5.3-free` with `z-ai/glm-5.3-free` (TokenRouter, 2.9s) first and
+`deepseek-ai/deepseek-v4-flash-0731` last, and carries a comment recording what was found so the next
+reader does not re-apply it. `deepseek-ai/deepseek-v4.1-flash` was **not** adopted anywhere: naming an
+unprobed model id is the silent-substitution ban, and the id this chain already carries is the one with
+a measured number against it.
+
+No new test — the guard existed and worked. The gate was what was missing.
+
+### 52. Two files in the deploy surface that no local gate reads
+
+`api/` is the one directory no gate opens. The typecheck runs `tsconfig.app.json`, which is `src/`
+only; `vite build` bundles the browser entry and never compiles a function; the dev server
+re-implements the provider routes inside `vite.config.ts` rather than importing them; and the suite
+imports an api module only where a test names one. Vercel, meanwhile, treats the directory as its
+function surface and compiles what it finds. Two things were sitting in it.
+
+**`api/nvidia.js` could not be parsed — committed.** A validation block had been *copied* above the
+metering call (a real improvement, and its comment says why: *"Validated BEFORE metering so 405/400s
+never burn quota"*) and the original was never deleted. The result was `const body`, `messages`,
+`model`, `temperature`, `top_p` and `max_tokens` each declared twice in one scope — six
+`has already been declared` errors, a SyntaxError at module load, so every request to `/api/nvidia`
+on the deployed origin answered 500 before a line of the handler ran. Nothing in the client posts
+there today (all chat goes through `/api/llm`), which is why it stayed invisible; the file is still a
+function Vercel builds, and `api/ocr.js` documents itself as its sibling. The duplicate block is gone.
+
+**`api/providers.ts` was a corrupted copy of the model catalogue.** Untracked, imported by nothing,
+and byte-identical to `src/lib/providers.ts` except that every `deepseek`/`DeepSeek` had become
+`large-2512` **followed by a newline** — what `sed 's/DeepSeek/…\n/gi'` does to a replacement string —
+leaving 21 unterminated string literals:
+
+```
+    id: "large-2512
+-v4.1-flash",
+```
+
+Verified as pure corruption before deleting: undoing the substitution with perl left only
+case differences against the canonical file, so it carried nothing unique. A normalised copy is kept
+outside the repo. The sweep for the same damage elsewhere came back clean — every other
+`large-2512` in the tree is the real `mistral-large-2512`.
+
+`src/test/api-surface.test.ts` is the gate that was missing. It parses every file under `api/` with
+esbuild (node environment, not jsdom: esbuild's startup invariant rejects jsdom's cross-realm
+`TextEncoder`), asserts the sweep saw at least 8 files so a glob that matches nothing cannot read as a
+clean codebase, carries a control proving the parser rejects a bad literal, and asserts no file in
+`api/` exports `MODELS` or `DEFAULT_MODEL_ID` — a serverless copy of the catalogue is how the two
+sides drift, and the constants that genuinely must exist on both live in the dependency-free
+`api/_failover.js`. Mutation-checked: restoring the duplicated block in `nvidia.js` killed only the
+parse test; a one-line `api/_mutation-probe.js` exporting `MODELS` killed only the catalogue test.
+
+### 53. The seventh tool was advertised to the model and never documented to it
+
+`task_list` (batch #9) was registered in `TOOL_REGISTRY`, schema-advertised on every request, and
+rendered by `ChatMessage` — but `toolsBlock()` listed six tools and closed with *"The rules below
+govern all six."* So the model was handed a tool whose policy it had never been given, which is the
+one thing that block exists to prevent. `prompts.test.ts`'s drift guard said so out loud
+(*expected … to contain `task_list`*) and was red.
+
+The added line states the two rules the tool's own design turns on, both of them failure modes rather
+than features: the user ticks the steps and the model never sees the ticks, so claiming a step is done
+on their behalf is the `run_code` lesson again; and a second call *replaces* the list, which makes it
+the way to correct a plan and not a way to report progress. The closing count is now seven.
+
+### 54. The reply's buttons arrived before the reply was even in flight
+
+Reported as: *"when user send any message it show the like unlike, copy or other btn then after
+sometime show the generating"*. Both halves are one ordering mistake, and it is a long window on a
+real account.
+
+`handleSendMessage` renders the user message and an empty assistant placeholder immediately (its own
+comment calls that the INSTANT UI UPDATE) and then called `setIsLoading(true)` **about 150 lines
+later**, past `await createConversation(...)` and `await saveMessage(...)`. Three things read that flag:
+
+```
+isStreaming   = isLoading && last && assistant        ->  the thinking state
+canRegenerate = last && assistant && !isLoading       ->  the Retry button
+handleSendMessage's own `if (… || isLoading) return`  ->  the re-entry guard
+```
+
+So for the length of two Firestore round-trips the placeholder was an assistant message that was *not
+streaming*: the footer rendered in full over an empty bubble (Retry, Copy, thumbs up/down, read
+aloud), the content area rendered `null` because the "Generating response…" branch is gated on
+`isStreaming`, and a second Enter in that window started a second turn. When the writes landed the
+flag flipped, the buttons vanished and the dots appeared, which is exactly the sequence the user
+described.
+
+Fixed in two independent places, because they fail independently:
+
+**The footer now requires a reply to act on.** `hasReplyBody` (text, a generated image, reasoning,
+files, code runs, a task list or sources) gates Copy, the two rating thumbs and read aloud. That is
+the durable half: it holds no matter when any future flag arrives, and it ends a class of control that
+acts on nothing (Copy that copies the empty string, a thumbs-up persisted against text that does not
+exist). Retry and Continue are deliberately **outside** the gate, because they act on the turn rather
+than on its text, and a turn stopped before its first token is precisely when Retry is the only
+control that helps.
+
+**The turn is in flight from the frame the placeholder appears.** `setIsLoading(true)` and the
+AbortController both moved up beside the placeholder push. That required two things the old position
+got for free: the `!convId` early return now clears the flag itself (it is upstream of the
+try/finally), and the point where the provider request begins now honours an abort that arrived during
+the writes instead of handing the request a fresh controller, which is how a Stop pressed in that
+window used to be dropped and the request go out anyway.
+
+**Two unrelated throws on the send path, found by the test.** `createSparkleBurst()` is the first
+statement of `handleSendMessage`, and it called `particle.animate(...)` unguarded; `scrollToBottom`
+called `el.scrollTo({...})` unguarded. On any engine missing either API the throw propagates out of
+the click handler *before the message is added to the list*, so the symptom is not a missing sparkle
+or a missing scroll, it is a send button that silently does nothing. Both are feature-detected now,
+with the scroll falling back to the `scrollTop` assignment the streaming layout effect already uses.
+jsdom is such an engine, which is how they surfaced: the first version of the parent test timed out on
+`particle.animate is not a function`, then on `el.scrollTo is not a function`.
+
+Red first, six tests. Five render `ChatMessage` directly in the exact pre-flight state (empty content,
+`isStreaming` false) and assert no Copy/rating/read-aloud, with three controls: Retry survives, a
+reply brings every action back, and an image-only turn still counts as a reply so it can be rated. The
+sixth renders the real page with `saveMessage` held as a deferred promise and asserts the page is
+already in flight while the write is pending; it stubs `ChatInput` down to a send button and a flag
+readout, because reading the state through framer-motion and a virtualised list in jsdom puts a lot of
+machinery between the subject and the assertion. Mutation-checked both ways: moving `setIsLoading`
+back to its old position killed only the parent test, and forcing `hasReplyBody` true killed only the
+empty-footer test.
+
+### 55. Asked for a spreadsheet, it wrote a script that would make one
+
+Reported as: *"improve its file creation, as it is wrting py cod instead of writing file"*.
+
+`create_file`'s own schema description is explicit and correct, so the gap was in the system prompt:
+the tools block listed `run_code` and `create_file` as peers, one line apart, with nothing ordering
+them. Nothing said which tool a request for a file belongs to, and "make me an xlsx of this" reads to
+a model as a programming task, because for every assistant it has imitated it was one.
+
+On the `run_code` path the result is worse than a detour. That sandbox has no download and nothing
+executes until the user presses Run, so a staged openpyxl script in place of a workbook is a
+deliverable that does not exist anywhere. The new section says so in those terms, names the libraries
+the model actually reaches for (openpyxl, python-docx, reportlab, fpdf), keeps `run_code` fully intact
+for analysis and plotting (the split is the deliverable, not the subject matter, and one turn may
+legitimately compute the figures and then write them into the file), and preserves the real exception:
+when the code *is* what was asked for, the code is the deliverable.
+
+The test that matters here is not the presence check on the rule, which is honest about being one. It
+is the second: every format `create_file` can build, read from the generator's own `SUPPORTED_FORMATS`
+rather than from a list typed into a test, must be named in the block. A ninth renderer added without
+touching the prompt fails it, which is the mechanical half of the same defect since a model that does
+not know it can build a format will reach for code to produce it. Mutation-checked by dropping `pptx`
+from the prompt's format list: the failure names the format (*format "pptx" is buildable but unnamed in
+the tools block*). Two controls: `run_code`'s own purpose must survive the fix, and the whole rule must
+stay out of the tool-less prompt, where promising a download would be the fabrication this codebase
+bans.
+
+Gates for 54 and 55: tsc clean, 66 files / 921 tests green, vite build clean, eslint clean.

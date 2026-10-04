@@ -490,7 +490,15 @@ export default function Chat() {
       if (!el) return;
       // scrollTop rather than scrollIntoView: scrollIntoView on a child can also
       // scroll ancestor containers and shift the whole page on mobile.
-      el.scrollTo({ top: el.scrollHeight, behavior });
+      //
+      // Guarded the same way the sparkle burst is, and for the same reason: this
+      // runs inside handleSendMessage before the turn starts, so an engine without
+      // `Element.scrollTo` (jsdom, and older WebKit for the options form) turns a
+      // missing scroll into a send that throws on the way out. The fallback is the
+      // assignment the streaming layout effect below already uses — same end
+      // position, no smooth animation.
+      if (typeof el.scrollTo === 'function') el.scrollTo({ top: el.scrollHeight, behavior });
+      else el.scrollTop = el.scrollHeight;
     }
     isPinnedToBottomRef.current = true;
     setShowScrollToBottom(false);
@@ -590,20 +598,30 @@ export default function Chat() {
       particle.style.borderRadius = '50%';
       particle.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
       particle.style.boxShadow = `0 0 10px ${particle.style.backgroundColor}`;
-      
+
       const angle = Math.random() * Math.PI * 2;
       const velocity = Math.random() * 90 + 40;
       const dx = Math.cos(angle) * velocity;
       const dy = Math.sin(angle) * velocity;
 
-      particle.animate([
-        { transform: 'translate(0, 0) scale(1)', opacity: 1 },
-        { transform: `translate(${dx}px, ${dy}px) scale(0)`, opacity: 0 }
-      ], {
-        duration: Math.random() * 600 + 500,
-        easing: 'cubic-bezier(0.1, 0.8, 0.3, 1)',
-        fill: 'forwards'
-      });
+      // Feature-detected, because this is confetti on the critical path. It is
+      // the FIRST statement of handleSendMessage, and a throw here propagates out
+      // of the click handler before the message is even added to the list — so on
+      // any engine without the Web Animations API the symptom is not a missing
+      // sparkle, it is a send button that silently does nothing. (jsdom is one
+      // such engine, which is how this was found: the send test timed out on
+      // `particle.animate is not a function`.) Decoration must never be able to
+      // take the message with it.
+      if (typeof particle.animate === 'function') {
+        particle.animate([
+          { transform: 'translate(0, 0) scale(1)', opacity: 1 },
+          { transform: `translate(${dx}px, ${dy}px) scale(0)`, opacity: 0 }
+        ], {
+          duration: Math.random() * 600 + 500,
+          easing: 'cubic-bezier(0.1, 0.8, 0.3, 1)',
+          fill: 'forwards'
+        });
+      }
 
       container.appendChild(particle);
     }
@@ -1044,6 +1062,24 @@ export default function Chat() {
     scrollToBottom('smooth');
     setStatusText('Understanding your request...');
 
+    // The turn is in flight from HERE — the frame the placeholder appears — not
+    // after the two Firestore round-trips below.
+    //
+    // This used to sit ~150 lines down, past `await createConversation` and
+    // `await saveMessage`, and three things read it:
+    //
+    //   isStreaming   = isLoading && last && assistant   -> the thinking state
+    //   canRegenerate = last && assistant && !isLoading  -> the Retry button
+    //   this function's own `if (… || isLoading) return` -> the re-entry guard
+    //
+    // So for the length of two network writes the placeholder was an assistant
+    // message that was not streaming: no "Generating response…", a full action
+    // footer over an empty bubble, and a second Enter starting a second turn. The
+    // AbortController is created here with it, because a `Stop` offered while the
+    // ref is still null is a button that does nothing.
+    abortControllerRef.current = new AbortController();
+    setIsLoading(true);
+
     // ── What this turn needs is now the model's call, not a pre-flight guess ──
     //
     // The classifier that used to run here (evaluateUserIntent) is gone. Two
@@ -1143,6 +1179,13 @@ export default function Chat() {
       if (!convId) {
         // Revert messages on UI if creation failed
         setMessages((prev) => prev.slice(0, -2));
+        // The turn was marked in flight before this write (so the thinking state
+        // is immediate); this return is upstream of the try/finally that normally
+        // clears it, so it has to clear it itself or the composer keeps offering
+        // Stop for a turn that no longer exists.
+        setIsLoading(false);
+        setStatusText('');
+        abortControllerRef.current = null;
         return;
       }
       isNewConversationRef.current = convId;
@@ -1190,8 +1233,17 @@ export default function Chat() {
     }
 
     setStatusText('Preparing response...');
-    setIsLoading(true);
-    abortControllerRef.current = new AbortController();
+
+    // Stop is reachable during the two writes above, because the turn has been in
+    // flight since the placeholder appeared. Honour it here rather than handing a
+    // fresh controller to the provider: re-creating it was how a Stop pressed in
+    // that window got dropped and the request went out anyway.
+    if (abortControllerRef.current?.signal.aborted) {
+      setIsLoading(false);
+      setStatusText('');
+      abortControllerRef.current = null;
+      return;
+    }
 
     const timeoutMs = isImageGen
       ? SLOW_REQUEST_TIMEOUT_MS

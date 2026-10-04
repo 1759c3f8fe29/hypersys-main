@@ -40,18 +40,6 @@ export default async function handler(req, res) {
     return;
   }
 
-  const body = typeof req.body === "string" ? safeParse(req.body) : req.body || {};
-  const { messages, model, temperature, top_p, max_tokens } = body;
-  if (!Array.isArray(messages) || messages.length === 0) {
-    res.status(400).json({ error: "`messages` array is required" });
-    return;
-  }
-
-  if (!model) {
-    res.status(400).json({ error: "`model` is required" });
-    return;
-  }
-
   // Serve exactly the model that was asked for. Substituting a different model
   // on failure used to mask outages and answer with the wrong model entirely.
   //

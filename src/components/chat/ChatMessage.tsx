@@ -1,5 +1,11 @@
 import { motion } from 'framer-motion';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown, ListChecks } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown, ListChecks, Ellipsis } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@/components/ui/dropdown-menu';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -16,6 +22,7 @@ import { artifactIdForCode, isSubstantialCodeBlock } from '@/lib/artifacts';
 import { openCodeArtifact, openFileArtifact, useHasArtifact } from '@/components/artifacts/ArtifactProvider';
 import { LOGO_URL } from '@/lib/assets';
 import { formatElapsed } from '@/lib/duration';
+import { freshSeed, retryImageUrl } from '@/lib/image-url';
 import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource, MessageTaskList } from './types';
 import { RunButton, RunOutput } from './CodeRunner';
 import { isRunnableLanguage, useCodeRunner } from './use-code-runner';
@@ -307,9 +314,15 @@ function GeneratedImage({ url, onDownload, downloaded }: {
   // Remounts the <img> on retry. A plain re-render would reuse the cached failed
   // response; a changed key forces a fresh request.
   const [attempt, setAttempt] = useState(0);
+  // Where this message's retry seeds start. Held in a ref rather than derived
+  // from `attempt`, because the seed has to be unpredictable *once* and then walk
+  // forward predictably: see `freshSeed` for why a shared constant start would
+  // serve the very failure the user is retrying away from.
+  const seedBase = useRef(freshSeed());
   // A new URL is a new image, so the state has to reset or a second generation
-  // in the same message renders under the first one's verdict.
-  useEffect(() => { setState('loading'); setAttempt(0); }, [url]);
+  // in the same message renders under the first one's verdict. The seed base is
+  // re-rolled with it — the old one's walk belongs to the image that is gone.
+  useEffect(() => { setState('loading'); setAttempt(0); seedBase.current = freshSeed(); }, [url]);
 
   if (state === 'failed') {
     return (
@@ -341,10 +354,15 @@ function GeneratedImage({ url, onDownload, downloaded }: {
       )}
       <img
         key={attempt}
-        // The cache-buster is added only on a retry: the endpoint sends
-        // `immutable`, so without it "try again" would replay the same failure
-        // out of the HTTP cache.
-        src={attempt === 0 ? url : `${url}${url.includes('?') ? '&' : '?'}retry=${attempt}`}
+        // Only a retry carries a seed. Sending one on the first request would
+        // miss the host's cache every time, so reopening a conversation would pay
+        // a cold generation (42s measured) for an image it already has (286ms).
+        //
+        // And it is a *seed*, not the `retry=${attempt}` this used to be: the host
+        // keys an unknown param on its presence and not its value, so every press
+        // after the first replayed the first press's response — including when that
+        // response was itself the failure. `src/lib/image-url.ts` has the md5s.
+        src={attempt === 0 ? url : retryImageUrl(url, seedBase.current + attempt)}
         alt="Generated image"
         // Reserves height while loading so the spinner has a box and the
         // conversation does not jump when the pixels land.
@@ -972,6 +990,30 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
   const streamingPlugins = isStreaming && !isUser;
   const textOnlyContent = renderedContent;
 
+  // Is there a reply here yet?
+  //
+  // The footer's text actions — Copy, rate, read aloud — all act on content, so
+  // this is what they key on. They used to key on `!isStreaming`, which is a
+  // different question and answers it wrong at exactly the wrong moment: the
+  // placeholder is rendered one Firestore round-trip BEFORE the send marks the
+  // turn in flight (see `handleSendMessage`), so for that whole window an empty
+  // reply wore a full toolbar — Copy that copies nothing, a thumbs-up that rates
+  // nothing, Read aloud with nothing to read — and the thinking state, gated on
+  // the same flag, had not appeared yet. That ordering is the reported bug.
+  //
+  // Retry and Continue sit deliberately outside this gate. They act on the *turn*
+  // rather than on its text, and a turn stopped before its first token is the case
+  // where Retry is the only control that helps.
+  const hasReplyBody = Boolean(
+    textOnlyContent ||
+      generatedImageUrl ||
+      reasoning ||
+      files?.length ||
+      codeRuns?.length ||
+      taskList?.tasks.length ||
+      sources?.length,
+  );
+
   const handleCopyAll = async () => {
     if (!(await copyText(textOnlyContent || displayContent))) return;
     setCopiedAll(true);
@@ -1093,25 +1135,43 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             ) : (
               content && <p className="text-[15.5px] sm:text-[16.5px] font-normal leading-[1.75] text-foreground whitespace-pre-wrap break-words">{content}</p>
             )}
-            {/* Hover edit affordance — only while not editing and not streaming.
-                Editing is non-destructive, so the original wording stays reachable
-                via the branch switcher after the conversation reloads. */}
-            {!isEditing && canEdit && onEdit && (
-              <button
-                type="button"
-                onClick={() => { setEditDraft(content); setIsEditing(true); }}
-                className="absolute -left-9 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-foreground/40 hover:text-foreground hover:bg-secondary/60 opacity-0 group-hover/user:opacity-100 transition-all"
-                title="Edit message"
-                aria-label="Edit message"
-              >
-                <Pencil className="w-3.5 h-3.5" />
-              </button>
+            {/* Hover actions beside the user's bubble: Copy and Edit, revealed
+              together on hover — ChatGPT's placement. Lives INSIDE the
+              group/user bubble so group-hover/user actually reaches it (the
+              old below-bubble Copy sat outside and could only fake hover with
+              its own hover state). Both icon-only with state-tracking names.
+              Hidden while the inline edit is open, since the textarea holds
+              the text then, and Edit needs no second entry point into the
+              mode it is already in. */}
+            {!isEditing && content && (
+              <div className="absolute -bottom-9 right-0 flex items-center gap-0.5 opacity-0 group-hover/user:opacity-100 focus-within:opacity-100 transition-opacity">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!(await copyText(content))) return;
+                    setCopiedUser(true);
+                    setTimeout(() => setCopiedUser(false), 2000);
+                  }}
+                  className="flex items-center justify-center w-7 h-7 rounded-lg text-foreground/40 hover:text-foreground hover:bg-secondary/60 transition-all"
+                  title="Copy message"
+                  aria-label={copiedUser ? 'Copied' : 'Copy message'}
+                >
+                  {copiedUser ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                </button>
+                {canEdit && onEdit && (
+                  <button
+                    type="button"
+                    onClick={() => { setEditDraft(content); setIsEditing(true); }}
+                    className="flex items-center justify-center w-7 h-7 rounded-lg text-foreground/40 hover:text-foreground hover:bg-secondary/60 transition-all"
+                    title="Edit message"
+                    aria-label="Edit message"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             )}
           </div>
-          {/* Branch switcher: shows 1/1 guard counts so we only render when this
-              message is genuinely one of several siblings. Lives under the bubble
-              so it reads visually as belonging to this turn, and disappears for a
-              live new send (branchCount undefined → treated as a sole branch). */}
           {branchCount && branchCount > 1 && onSwitchBranch && (
             <div className="mt-1.5 flex items-center justify-center gap-1 text-xs text-muted-foreground">
               <button
@@ -1132,31 +1192,6 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                 aria-label="Next branch"
               >
                 <ChevronRight className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-          {/* Copy for the user's own prompt (#8 in the task list). Below the
-              bubble rather than inside it: the bubble is the words, and the
-              control belongs to the turn, not the typography. Muted until hover
-              so it doesn't compete with the message it copies — the same
-              quiet-icon language the assistant footer uses. Hidden while the
-              inline edit is open, since the textarea holds the text then. */}
-          {!isEditing && content && (
-            <div className="mt-1 flex justify-end">
-              <button
-                type="button"
-                onClick={async () => {
-                  if (!(await copyText(content))) return;
-                  setCopiedUser(true);
-                  setTimeout(() => setCopiedUser(false), 2000);
-                }}
-                className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-foreground/35 hover:text-foreground/80 hover:bg-secondary/40 transition-colors"
-                title="Copy message"
-                aria-label={copiedUser ? 'Copied' : 'Copy message'}
-              >
-                {copiedUser
-                  ? <><Check className="w-3.5 h-3.5" /> Copied</>
-                  : <><Copy className="w-3.5 h-3.5" /> Copy</>}
               </button>
             </div>
           )}
@@ -1276,7 +1311,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                 old header row, which sat above the answer it acts on. Hidden while
                 streaming (nothing to retry or copy yet, and rating mid-stream
                 persists a rating for text that may still change). */}
-            {!isUser && !isStreaming && (
+            {!isUser && !isStreaming && (hasReplyBody || (truncated && onResume) || (canRegenerate && onRegenerate)) && (
               <div className="flex items-center gap-1.5 pt-1.5">
                 {truncated && onResume && (
                   <button type="button" onClick={onResume}
@@ -1293,17 +1328,19 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                     <RefreshCw className="w-3.5 h-3.5" />Retry
                   </button>
                 )}
-                <button type="button" onClick={handleCopyAll}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all"
-                  title="Copy response">
-                  {copiedAll ? <><Check className="w-3.5 h-3.5 text-primary" /><span className="text-primary font-medium">Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
-                </button>
+                {hasReplyBody && (
+                  <button type="button" onClick={handleCopyAll}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all"
+                    title="Copy response">
+                    {copiedAll ? <><Check className="w-3.5 h-3.5 text-primary" /><span className="text-primary font-medium">Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
+                  </button>
+                )}
                 {/* Feedback (ChatGPT-style): rating is parent-owned state — the
                     parent persists it per message, so it survives branch switches
                     and reloads. Clicking the active thumb clears the rating, so one
                     control covers rate/correct/unrate. Icon-only, so both carry
                     state-tracking aria-labels (see the read-aloud button's note). */}
-                {onRate && (
+                {onRate && hasReplyBody && (
                   <>
                     <button type="button"
                       onClick={() => onRate('up')}
@@ -1325,12 +1362,14 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                     reader user reaches for: unlabelled it announced as "button".
                     The label tracks state — one control does both, and "Read aloud"
                     on a button that stops the audio is worse than no label. */}
-                <button type="button" onClick={handleSpeak} disabled={isTTSLoading}
-                  aria-label={isTTSLoading ? 'Preparing audio' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
-                  title={isTTSLoading ? 'Preparing audio…' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
-                  className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${isSpeaking ? 'bg-primary/20 text-primary border-primary/30' : isTTSLoading ? 'bg-primary/10 text-primary border-primary/20' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
-                  {isTTSLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : isSpeaking ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                </button>
+                {hasReplyBody && (
+                  <button type="button" onClick={handleSpeak} disabled={isTTSLoading}
+                    aria-label={isTTSLoading ? 'Preparing audio' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
+                    title={isTTSLoading ? 'Preparing audio…' : isSpeaking ? 'Stop reading aloud' : 'Read aloud'}
+                    className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${isSpeaking ? 'bg-primary/20 text-primary border-primary/30' : isTTSLoading ? 'bg-primary/10 text-primary border-primary/20' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
+                    {isTTSLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : isSpeaking ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                  </button>
+                )}
               </div>
             )}
 

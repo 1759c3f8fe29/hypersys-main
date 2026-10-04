@@ -259,6 +259,19 @@ export const MODELS: ModelSpec[] = [
   // firstByteAllowanceMs: 90_000 below is what keeps the client's guard ahead
   // of the 190s chain budget the server grants this entry.
   {
+    // RE-CONVERGED 2026-10-04. An uncommitted edit had renamed this id to
+    // "deepseek-v4.1-flash" and replaced the two-leg chain with a single NVIDIA
+    // leg, without touching DEFAULT_MODEL_ID below (still "glm-5.3-free"), the
+    // three comments around it, or `providers.test.ts`. The result was not a
+    // slower default — it was **no default at all**: `getModel(DEFAULT_MODEL_ID)`
+    // returned undefined, which is the state the user's "[llm] all providers
+    // failed" logs were produced in. Three tests named it (`resolves every named
+    // default` among them) and were simply never run after the edit.
+    //
+    // Restored rather than completed in the new direction, because the rename
+    // breaks the invariant the next comment states — stored selections key on
+    // this id — and because the leg it left behind is the one documented three
+    // lines down as usable in LAST position only.
     id: "glm-5.3-free",
     // The picker name is "Flyer" (user-directed, 2026-09-07). The id stays
     // glm-5.3-free (the stable key for stored selections), so nothing breaks

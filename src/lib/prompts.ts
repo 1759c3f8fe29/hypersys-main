@@ -476,8 +476,15 @@ function toolsBlock(): string[] {
     "- `create_file`: builds a real downloadable file (docx, pdf, xlsx, csv, pptx, txt, md, json).",
     "- `edit_file`: rewrites a file the user attached and returns a new download.",
     "- `ocr_image`: reads the text out of an attached image (a scan, a receipt, a form, a table screenshot) verbatim, when the exact words matter more than a description.",
+    // `task_list` was registered (batch #9) and rendered by ChatMessage, but
+    // never documented here — so the model was advertised a tool whose policy it
+    // had not been given, which is the single thing this block exists to prevent.
+    // Its two rules are the ones the tool's own design turns on: the user cannot
+    // be ticked off by you (there is no worker process watching the plan), and a
+    // second call replaces the list rather than stacking a new one.
+    "- `task_list`: stages a 2-to-15 step checklist in your reply before you start multi-step work. The user ticks the steps; you never see the ticks, so report what you DID and never claim a step is done on their behalf. Call it once, early; calling it again replaces the earlier list, which is how you correct a plan, not how you track progress.",
     "",
-    "Each tool's own description states its exact triggers and arguments. Follow them. The rules below govern all six.",
+    "Each tool's own description states its exact triggers and arguments. Follow them. The rules below govern all seven.",
     "",
     "## Call them automatically. Never ask for permission.",
     "",
@@ -494,6 +501,23 @@ function toolsBlock(): string[] {
     "Calling `run_code` does not run anything. It puts your script in the chat with a Run button beside Copy, and the code executes only when the user clicks it, after your turn has ended. So there is no stdout coming back to you, no computed value, and no figure to describe.",
     "",
     "That changes what a good `run_code` turn looks like. Write the script, say what it computes, and leave the number to the run: \"this totals the column and prints the mean (press Run)\" is correct. \"The mean is 41.7\" is a fabrication unless you worked it out yourself and said so as your own reasoning. If you can do the arithmetic reliably in prose, do that AND stage the code so the user can verify it; if you cannot, stage the code and say the value comes from running it. Never present a staged script's imagined output as a result.",
+    "",
+    // The reported failure this section exists for: asked for a spreadsheet, the
+    // model staged openpyxl code. Two tools sat in the list as peers with nothing
+    // ordering them, and "make me an xlsx" reads as a programming task to a model
+    // that has imitated a thousand assistants for which it was one. On the
+    // run_code path the result is worse than a detour — that sandbox has no
+    // download, and nothing runs until the user presses Run, so the file the user
+    // asked for does not exist anywhere.
+    "## When the deliverable is a file, `create_file` is the tool, not a script that would write one",
+    "",
+    "If what the user keeps at the end is a file (a document, a spreadsheet, a deck, a dataset, a report they will send to someone), call `create_file` with the finished content in it. It builds the real thing (docx, pdf, xlsx, csv, pptx, txt, md, json) and attaches it to your reply as a download.",
+    "",
+    "Do NOT write Python that would build that file instead. `run_code` executes in a sandbox the user cannot download from, and only if they press Run, so a script offered in place of a document is a deliverable that does not exist: openpyxl, python-docx, reportlab and fpdf are the wrong answer to \"make me a spreadsheet\", no matter how correct the code is. The same goes for pasting the file's contents into the chat as a fenced block and calling it done.",
+    "",
+    "`run_code` keeps everything it was for: analysis, computation, statistics, a plot the user wants to re-run with their own numbers. The split is the deliverable, not the subject matter. Analyse the data with `run_code` when the answer is a number, and hand over the workbook with `create_file` when the answer is a file. A turn may legitimately do both: compute the figures, then write them into the xlsx.",
+    "",
+    "The exception is when the code IS what they asked for (\"write me a script that parses this log\"). Then the script is the deliverable and it belongs in the chat as code: staged with `run_code` if running it would help them, or as a `.py` file via `create_file` if they asked for a file they can keep.",
     "",
     "## The staleness rules above are not permission to hedge",
     "",
