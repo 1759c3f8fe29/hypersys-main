@@ -4100,3 +4100,76 @@ stay out of the tool-less prompt, where promising a download would be the fabric
 bans.
 
 Gates for 54 and 55: tsc clean, 66 files / 921 tests green, vite build clean, eslint clean.
+
+### 56. The picker cut to the current generation, and the retired entries kept their bylines
+
+Maintainer-directed, 2026-10-04: *"completely remove the outdated models and keep glm 5.3 flash and
+glm 5.3 and deepseek v4.1 and plus 1 or 2 max"*, *"remove vision and img models from model listing in
+ui instead make them integrated in ai"*.
+
+The picker went from 17 entries to five: the **Flyer** default (`glm-5.3-free`), `glm-5.3-flash`,
+`glm-5.3`, `deepseek-v4.1-flash`, and `flux`. Nineteen entries are now `hidden: true`.
+
+Hidden, not deleted, and that is the whole of the mechanic: `getModel` resolves against the full
+`MODELS` list, so every reply already in Firestore keeps its byline. A delete would turn every past
+message from a retired model into an unnamed one, which is the failure the glm-5.2 entry documents at
+length. Two entries retired this pass carry their own note — the V4 pair, dead on the maintainer's
+report, and both **featured with a single route**, which is the worst configuration a dead id can
+have: the user picks it off the front of the list and gets a hard failure with no failover.
+
+The vision and image entries are hidden for a different reason, and it is not the same claim. Their
+capabilities are untouched and never depended on the picker: vision routes through
+`DEFAULT_VISION_MODEL` whenever an attachment reaches a model that cannot see, and images are produced
+by the `generate_image` tool. What disappears is the ability to *select* one by hand, which is the
+thing the maintainer asked to remove. `flux` stays visible because it is the image model the tool path
+resolves to by default.
+
+The default's chain was rebuilt behind the name, since its last leg was one of the retired ids:
+
+```
+z-ai/glm-5.3-free   (tokenrouter, the measured 2.9s leg)
+z-ai/glm-5.3-flash  (nvidia)
+deepseek-ai/deepseek-v4.1-flash  (nvidia, last, firstByteAllowanceMs: 90_000)
+```
+
+GLM before DeepSeek so a failover lands on the same family and voice as the primary. **The provenance
+is weaker than this file's usual bar and the entry says so in as many words**: none of the three NVIDIA
+ids was probed, because this session's key read was denied, so they rest on the maintainer's word. That
+is exactly why the chain is three legs rather than one — 404 is in `FAILOVER_STATUSES`, so a wrong id
+costs a failover hop instead of the turn. The three standalone picker entries are single-route on the
+long-standing rule that an entry answering under its own name must not fail over to different weights;
+the "Flyer" default is the documented exception because it is a service name.
+
+Tests re-pinned to the new invariant rather than to the new literals: the chain assertion (primary is
+the measured leg, the slow NIM leg is last), a new one that no retired V4 id survives anywhere in the
+chain (a chain that still names a 410 spends a hop on it every time the primary is down), and one that
+both retired entries remain in `MODELS` with `hidden` set. `resolves every named default`, `has no
+duplicate ids` and the image-fallback-chain test were the three that caught the first, wrong attempt at
+this edit — see entry 57 for what went wrong there.
+
+### 57. Two failed passes at hiding nineteen entries, and why the second one worked
+
+Worth recording because the first two attempts each produced a file that **parsed as valid TypeScript
+and had lost entries**.
+
+The task is mechanical: for each of nineteen entries in a 966-line array, insert `hidden: true,` before
+`routes:`. Both naive attempts used a regex over the entry blocks and both broke on the same fact about
+the shape of the file: an entry contains nested braces, so a non-greedy `\{…\}` match ends at the first
+inner block it finds rather than at the entry's close. The insertions landed in the middle of comments
+and route objects, and the visible result was `PICKER: ...` printing entries that were no longer in the
+array at all (4 of 9, then 5 of 24).
+
+What made the third attempt correct was not a better regex. It was a **brace-depth scan** over the
+lines: walk to the next line at 2-space indent that is exactly `  {`, then count braces until depth
+returns to zero, and treat exactly that span as the entry. Depth is the only thing that can distinguish
+"the end of the entry" from "the end of its routes array", and the file's own indentation is the only
+thing that says where an entry starts.
+
+The second lesson is the check. Each attempt was verified by *parsing* the file — and both broken
+versions parsed, because the damage was a deleted entry rather than a syntax error. The check that
+found it was counting the entries and reading the ids, against the list from `git show HEAD:…` taken
+before the first edit. A structural edit to a data array needs a structural assertion on the data, not
+a syntax check on the file.
+
+Cost: `src/lib/providers.ts` was restored from HEAD twice. The HEAD copy is kept at
+`~/.claude/scratch/providers.head.ts` while this work is live.

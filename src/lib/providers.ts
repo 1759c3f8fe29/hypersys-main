@@ -280,12 +280,26 @@ export const MODELS: ModelSpec[] = [
     shortLabel: "Flyer",
     description: "The default model. GLM 5.3 reasoning with tools.",
     routes: [
+      // 1. The measured leg: 2.9s bare / 2.2s with tools (2026-09-07).
       { provider: "tokenrouter", modelId: "z-ai/glm-5.3-free" },
+      // 2-3. The NVIDIA legs, maintainer-directed 2026-10-04: "remove v4 as they
+      // gone; use ds v4.1 or glm 5.3 flash or glm 5.3 from nim nvidia". GLM
+      // before the DS leg so a failover lands on the same family and voice.
+      //
+      // PROVENANCE, stated plainly because it is weaker than this file's usual
+      // bar: none of the three ids below was probed in this session (the key read
+      // was denied), so they rest on the maintainer's word rather than on a
+      // measured TTFB. That is why the chain is three legs and not one: 404 is in
+      // FAILOVER_STATUSES, so an id that turns out wrong costs a hop instead of
+      // the whole turn. Swap this paragraph for numbers the moment a probe runs.
+      { provider: "nvidia", modelId: "z-ai/glm-5.3-flash" },
       {
         provider: "nvidia",
-        modelId: "deepseek-ai/deepseek-v4-flash-0731",
-        // LAST leg only — this position's server-side isLastRoute relaxation
-        // is what lets it spend the whole chain budget (144s TTFB measured).
+        modelId: "deepseek-ai/deepseek-v4.1-flash",
+        // LAST leg only: this position's server-side isLastRoute relaxation is
+        // what lets it spend the whole chain budget. The allowance is carried
+        // over from the leg it replaces, where 144s was measured — a ceiling,
+        // not a promise, so it costs nothing if this model is quicker.
         firstByteAllowanceMs: 90_000,
       },
     ],
@@ -316,6 +330,12 @@ export const MODELS: ModelSpec[] = [
     // through its own 144s cold start), and there it is insurance under a
     // service name — the exception the maintainer has always granted the
     // default model.
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [
       {
         provider: "nvidia",
@@ -341,6 +361,12 @@ export const MODELS: ModelSpec[] = [
     label: "DeepSeek V4 Pro",
     shortLabel: "DS V4 Pro",
     description: "DeepSeek's frontier reasoning model.",
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "nvidia", modelId: "deepseek-ai/deepseek-v4-pro-0813" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -398,6 +424,12 @@ export const MODELS: ModelSpec[] = [
     // and answers in under a second, but the reasoning was luckier than it was
     // sound. `node scripts/probe-id.mjs moonshotai/kimi-k3 --times 3` settles it
     // if k3 is ever wanted back.
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "nvidia", modelId: "moonshotai/kimi-k3" }],
     contextWindow: 256_000,
     maxOutputTokens: 8192,
@@ -436,6 +468,12 @@ export const MODELS: ModelSpec[] = [
     // this pool does not. Adding it as a *route* here would have been wrong —
     // different weights answering under this model's name is the one substitution
     // this catalogue refuses.
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3-ultra-550b-a55b" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -450,6 +488,12 @@ export const MODELS: ModelSpec[] = [
     id: "minimax-m3",
     label: "MiniMax M3",
     description: "MiniMax flagship chat model.",
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "nvidia", modelId: "minimaxai/minimax-m3" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -537,6 +581,12 @@ export const MODELS: ModelSpec[] = [
     id: "codestral",
     label: "Codestral",
     description: "Code and programming specialist.",
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "mistral", modelId: "codestral-latest" }],
     contextWindow: 256_000,
     maxOutputTokens: 8192,
@@ -550,6 +600,12 @@ export const MODELS: ModelSpec[] = [
     id: "mistral-medium",
     label: "Mistral Medium",
     description: "Balanced Mistral. Reads images.",
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "mistral", modelId: "mistral-medium-latest" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -562,6 +618,12 @@ export const MODELS: ModelSpec[] = [
     id: "mistral-small",
     label: "Mistral Small",
     description: "Fast, lightweight Mistral.",
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "mistral", modelId: "mistral-small-latest" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -575,6 +637,12 @@ export const MODELS: ModelSpec[] = [
     label: "Nemotron Super 49B",
     shortLabel: "Nemotron 49B",
     description: "NVIDIA mid-tier reasoning.",
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "nvidia", modelId: "nvidia/llama-3.3-nemotron-super-49b-v1" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -595,6 +663,12 @@ export const MODELS: ModelSpec[] = [
     // featured single-route flagship with no failover available. A 120B-A12B sits
     // between the two and, with only 12B parameters active per token, should hold
     // capacity far better than a 550B-A55B pool.
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3-super-120b-a12b" }],
     // 128k is the nemotron-3 family default used by every other NVIDIA entry
     // here; it was NOT independently confirmed for this id. It feeds the token
@@ -644,6 +718,12 @@ export const MODELS: ModelSpec[] = [
     // difference between a fix and a mistaken deletion (see `nemotron-ultra`'s
     // 503 and the two cold starts cleared in 3.9). One probe of a route nobody
     // has warmed measures the scheduler, not the model.
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3.5-lightning-30b-a3b" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -663,6 +743,12 @@ export const MODELS: ModelSpec[] = [
     // Pollinations needs no key or account, so this model answers even when the
     // keyed providers are unconfigured or rate limited. Its ids are Pollinations'
     // own model names, not shared with NVIDIA/Mistral, so nothing is duplicated.
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "pollinations", modelId: "openai" }],
     contextWindow: 128_000,
     maxOutputTokens: 4096,
@@ -743,6 +829,12 @@ export const MODELS: ModelSpec[] = [
     // maintainer's correction — they did not ask for fallbacks to go, and this
     // entry is exactly the situation insurance exists for: one fast leg with
     // measured reliability, one slower leg with headroom.
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [
       { provider: "nvidia", modelId: "meta/llama-3.2-11b-vision-instruct" },
       { provider: "nvidia", modelId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" },
@@ -810,6 +902,12 @@ export const MODELS: ModelSpec[] = [
     id: "turbo",
     label: "FLUX Turbo",
     description: "Fastest image generation. Keyless.",
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "pollinations", modelId: "turbo" }],
     contextWindow: 0,
     maxOutputTokens: 0,
@@ -822,6 +920,12 @@ export const MODELS: ModelSpec[] = [
     id: "stable-diffusion",
     label: "Stable Diffusion",
     description: "Classic versatile image model. Keyless.",
+    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
+    // generation. The entry stays in MODELS so every reply already carrying this id keeps
+    // its byline (getModel resolves against the full list), and nothing it provided is
+    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
+    // generate_image tool, neither of which needed a picker entry.
+    hidden: true,
     routes: [{ provider: "pollinations", modelId: "stable-diffusion" }],
     contextWindow: 0,
     maxOutputTokens: 0,
@@ -830,8 +934,71 @@ export const MODELS: ModelSpec[] = [
     emoji: "🌈",
     kind: "Image",
   },
+  // The current generation, maintainer-named 2026-10-04. Single route each, and
+  // that is the rule rather than an oversight: an entry that answers under its own
+  // name must not fail over to different weights, or the byline on the reply is a
+  // lie. The documented exception is the "Flyer" default above, which is a service
+  // name and says so. The cost is that an id that turns out wrong fails the turn
+  // outright instead of degrading, which is the trade this file has always made
+  // for honest naming.
+  //
+  // Not probed here either (same denied key read). If one answers 404/410, the
+  // glm-5.2 precedent applies: set `hidden`, record the status and the date, and
+  // leave the entry in MODELS so existing replies keep their byline.
+  {
+    id: "glm-5.3-flash",
+    label: "GLM 5.3 Flash",
+    shortLabel: "GLM Flash",
+    description: "Fast GLM 5.3 reasoning on NVIDIA NIM.",
+    routes: [{ provider: "nvidia", modelId: "z-ai/glm-5.3-flash" }],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "⚡",
+    kind: "Chat",
+    featured: true,
+  },
+  {
+    id: "glm-5.3",
+    label: "GLM 5.3",
+    shortLabel: "GLM 5.3",
+    description: "Full GLM 5.3 reasoning on NVIDIA NIM.",
+    routes: [{ provider: "nvidia", modelId: "z-ai/glm-5.3" }],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "🧠",
+    kind: "Chat",
+    featured: true,
+  },
+  {
+    id: "deepseek-v4.1-flash",
+    label: "DeepSeek V4.1 Flash",
+    shortLabel: "DS V4.1",
+    description: "DeepSeek's compact reasoning model, current generation.",
+    routes: [
+      {
+        provider: "nvidia",
+        modelId: "deepseek-ai/deepseek-v4.1-flash",
+        // Carried over from the V4 Flash entry this supersedes, where 144s cold
+        // TTFB was measured.
+        firstByteAllowanceMs: 90_000,
+      },
+    ],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "🐋",
+    kind: "Chat",
+    featured: true,
+  },
 ];
-
 // No legacy alias map any more (removed in 3.12 at the maintainer's direction).
 // Old conversations whose modelId was renamed or retired simply do not resolve
 // in getModel(); their byline falls back to a generic label and reopening one

@@ -80,7 +80,14 @@ export default {
         ],
       },
       colors: {
-        border: "hsl(var(--border))",
+        border: {
+          DEFAULT: "hsl(var(--border))",
+          /* The control tier (WCAG 1.4.11, 3:1). `border-border-strong` reads
+             oddly but is what Tailwind generates from a nested key, and the
+             alternative — a second top-level colour — would also produce
+             `bg-*`/`text-*` utilities for something that is only ever a border. */
+          strong: "hsl(var(--border-strong))",
+        },
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
         background: "hsl(var(--background))",
@@ -105,6 +112,10 @@ export default {
           DEFAULT: "hsl(var(--accent))",
           foreground: "hsl(var(--accent-foreground))",
         },
+        /* The second brand hue. Separate from `accent` on purpose: `accent` is
+           shadcn's hover surface and the two roles were collapsed onto one token
+           until 2026-10-04. See the note on --accent in index.css. */
+        brand2: "hsl(var(--brand-2))",
         popover: {
           DEFAULT: "hsl(var(--popover))",
           foreground: "hsl(var(--popover-foreground))",

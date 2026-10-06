@@ -534,7 +534,7 @@ export default function ChatSidebar({
                 className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl border border-sidebar-border/50 bg-sidebar-accent/10 hover:bg-sidebar-accent/30 transition-all duration-300 group"
                 aria-expanded={modelPanelOpen}
               >
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform">
+                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/20 to-brand2/20 flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform">
                   <Bot className="w-4 h-4 text-primary/80" />
                 </div>
                 <span className="flex flex-col items-start min-w-0 flex-1">

@@ -25,6 +25,15 @@ const formatSize = (bytes: number) => {
 
 interface ChatInputProps {
   onSend: (message: string, files?: File[]) => void;
+  /**
+   * Namespace this composer's draft. Changes when the user switches conversation,
+   * which is what makes the text follow the thread rather than the tab.
+   */
+  draftKey?: string;
+  /** Called on every keystroke with the current text, and with "" after a send. */
+  onDraftChange?: (text: string, key: string) => void;
+  /** The stored draft for `draftKey`, read once when that key becomes current. */
+  initialDraft?: string;
   isLoading: boolean;
   disabled?: boolean;
   onStop?: () => void;
@@ -38,6 +47,9 @@ interface ChatInputProps {
 
 export default function ChatInput({
   onSend,
+  draftKey,
+  onDraftChange,
+  initialDraft = '',
   isLoading,
   disabled,
   onStop,
@@ -48,11 +60,37 @@ export default function ChatInput({
   webSearch = false,
   onToggleWebSearch,
 }: ChatInputProps) {
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState(initialDraft);
   const [isFocused, setIsFocused] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [plusOpen, setPlusOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Which draft is currently loaded. A ref rather than state because it is not
+  // rendered and must not cause a second pass: this is bookkeeping for "have I
+  // already swapped the text for this conversation".
+  const loadedDraftKeyRef = useRef<string | undefined>(draftKey);
+  /**
+   * Swap in the incoming conversation's draft when the user switches threads.
+   *
+   * Keyed on the change and NOT on the value, which is the whole subtlety: an
+   * effect that re-syncs whenever `initialDraft` arrives would fight the user's
+   * typing, because every keystroke writes a draft and every draft write would
+   * come back as a new prop. Guarding on the key means one swap per switch — and
+   * the outgoing text is already saved, since the keystroke that typed it wrote
+   * its own draft on the way.
+   */
+  useEffect(() => {
+    if (loadedDraftKeyRef.current === draftKey) return;
+    loadedDraftKeyRef.current = draftKey;
+    setMessage(initialDraft);
+    // The height has to follow, or a restored multi-line draft renders in a
+    // one-line box until the next keystroke measures it.
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 120)}px`;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftKey]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
 
@@ -169,6 +207,11 @@ export default function ChatInput({
       // phrase landed after the message the user thought they had finished.
       if (isRecording) stop();
       setMessage('');
+      // The draft goes with it, and as a write rather than a skip: leaving the
+      // stored text in place is how a sent message reappears in the composer on
+      // the next mount, which users report as "it keeps putting my old message
+      // back" rather than as a drafts bug.
+      if (draftKey && onDraftChange) onDraftChange('', draftKey);
       setSelectedFiles([]);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -472,7 +515,13 @@ export default function ChatInput({
                   <textarea
                     ref={textareaRef}
                     value={message}
-                    onChange={(e) => setMessage(e.target.value)}
+                    onChange={(e) => {
+                        setMessage(e.target.value);
+                        // Written per keystroke: a draft that only saves on blur
+                        // is lost by exactly the case it exists for — the app
+                        // being closed, reloaded, or backgrounded on a phone.
+                        if (draftKey && onDraftChange) onDraftChange(e.target.value, draftKey);
+                      }}
                     onFocus={() => setIsFocused(true)}
                     onBlur={() => setIsFocused(false)}
                     placeholder={
@@ -628,7 +677,7 @@ export default function ChatInput({
                           relative w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center
                           transition-all duration-150 overflow-hidden
                           ${canSend
-                            ? 'bg-gradient-to-br from-primary via-primary to-accent text-primary-foreground shadow-[0_1px_3px_hsl(0_0%_0%/0.3)] border border-primary/50'
+                            ? 'bg-gradient-to-br from-primary via-primary to-brand2 text-primary-foreground shadow-[0_1px_3px_hsl(0_0%_0%/0.3)] border border-primary/50'
                             : 'bg-muted/50 text-muted-foreground/30 cursor-not-allowed'
                           }
                         `}

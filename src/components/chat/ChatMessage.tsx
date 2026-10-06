@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown, ListChecks, Ellipsis } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Maximize2, X, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown, ListChecks, Ellipsis } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -146,8 +147,8 @@ function StreamingStatus({ label, tone }: { label: string; tone: "primary" | "ac
     return () => clearInterval(id);
   }, []);
 
-  const dot = tone === "primary" ? "bg-primary" : "bg-accent";
-  const text = tone === "primary" ? "text-primary/90" : "text-accent/80";
+  const dot = tone === "primary" ? "bg-primary" : "bg-brand2";
+  const text = tone === "primary" ? "text-primary/90" : "text-brand2/80";
 
   return (
     <div className="flex items-center gap-3 py-2">
@@ -324,6 +325,45 @@ function GeneratedImage({ url, onDownload, downloaded }: {
   // re-rolled with it — the old one's walk belongs to the image that is gone.
   useEffect(() => { setState('loading'); setAttempt(0); seedBase.current = freshSeed(); }, [url]);
 
+  // Full-size viewing. The state lives with the image rather than in the parent:
+  // the lightbox belongs to this picture and nothing else needs to know it is open.
+  const [isFullSize, setIsFullSize] = useState(false);
+  const thumbRef = useRef<HTMLButtonElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  /**
+   * A generated image is the whole answer for an image turn, and in a chat column
+   * it is shown at a fraction of the size it was generated at — under half, on a
+   * phone. So the thumbnail opens a full-viewport view.
+   *
+   * Focus and Escape are the parts a screenshot cannot show, and they are why this
+   * is an effect rather than two inline handlers. Opening a full-screen surface
+   * without moving focus leaves a keyboard user tabbing through the conversation
+   * behind it; closing without restoring leaves them at the top of the document,
+   * having lost the message they were reading.
+   */
+  useEffect(() => {
+    if (!isFullSize) return;
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setIsFullSize(false); };
+    document.addEventListener('keydown', onKey);
+    // The page behind must not scroll under the overlay: on a phone, a drag over a
+    // fixed full-screen image otherwise scrolls the conversation behind it.
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isFullSize]);
+
+  const closeFullSize = () => {
+    setIsFullSize(false);
+    // Back to the control that opened it, so the reader looks at the same message
+    // they were on rather than at the top of the document.
+    thumbRef.current?.focus();
+  };
+
   if (state === 'failed') {
     return (
       <div className="mb-4 rounded-2xl liquid-surface border border-border/30 p-5 flex flex-col items-center gap-3 text-center">
@@ -371,17 +411,93 @@ function GeneratedImage({ url, onDownload, downloaded }: {
         onError={() => setState('failed')}
       />
       {state === 'loaded' && (
-        <button
-          type="button"
-          onClick={onDownload}
-          /* max-hover: on touch there is no hover, so without this the
-             only way to save a generated image is a long-press. */
-          className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-2 rounded-xl bg-background/70 backdrop-blur-md border border-border/40 text-xs font-medium text-foreground/90 hover:text-primary hover:border-primary/40 opacity-0 group-hover/image:opacity-100 max-hover:opacity-100 transition-all duration-200"
-          title="Download image"
-          aria-label="Download image"
+        <>
+          {/* The thumbnail is a control, not a picture, and three separate things
+              say so. The button wrapper makes it focusable and gives it a name a
+              screen reader announces; `cursor-zoom-in` says it to a mouse; the hint
+              bar says it in words to someone who has never used this app. An image
+              with no affordance is one nobody clicks, which was the state this
+              replaces — the full-size pixels were always there, nothing said so. */}
+          <button
+            ref={thumbRef}
+            type="button"
+            onClick={() => setIsFullSize(true)}
+            aria-label="View image full size"
+            className="absolute inset-0 cursor-zoom-in transition-colors hover:bg-black/5"
+          >
+            <span className="absolute inset-x-0 bottom-0 flex items-center justify-center gap-1.5 py-2 text-[11px] font-medium text-white/90 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover/image:opacity-100 max-hover:opacity-100 transition-opacity duration-200">
+              <Maximize2 className="w-3 h-3" />
+              Click to view full size
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={onDownload}
+            /* max-hover: on touch there is no hover, so without this the
+               only way to save a generated image is a long-press. */
+            className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-2 rounded-xl bg-background/70 backdrop-blur-md border border-border/40 text-xs font-medium text-foreground/90 hover:text-primary hover:border-primary/40 opacity-0 group-hover/image:opacity-100 max-hover:opacity-100 transition-all duration-200"
+            title="Download image"
+            aria-label="Download image"
+          >
+            {downloaded ? <><Check className="w-4 h-4 text-primary" />Saved</> : <><Download className="w-4 h-4" />Download</>}
+          </button>
+        </>
+      )}
+
+      {/* Portal to the body, not inline: the message row lives inside a
+          virtualised, transformed, overflow-hidden container, and a `fixed`
+          child of a transformed ancestor is positioned against that ancestor
+          rather than the viewport. Portalling is what makes "full screen" mean
+          the screen. */}
+      {isFullSize && createPortal(
+        <div
+          className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-black/90 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Generated image, full size"
+          data-testid="image-lightbox-backdrop"
+          // The backdrop is the dismiss target, and only the backdrop: the click
+          // is matched against the event target so a click that lands on the
+          // picture (the one place a user clicks while looking closely) does not
+          // close the view they just opened.
+          onClick={(e) => { if (e.target === e.currentTarget) closeFullSize(); }}
         >
-          {downloaded ? <><Check className="w-4 h-4 text-primary" />Saved</> : <><Download className="w-4 h-4" />Download</>}
-        </button>
+          <img
+            // Same URL, same attempt: the full-size copy is the bytes already on
+            // screen. Re-requesting here would pay a cold generation (42s
+            // measured) for an image the page is holding.
+            src={attempt === 0 ? url : retryImageUrl(url, seedBase.current + attempt)}
+            alt="Generated image, full size"
+            // `object-contain` in a full viewport: nothing is cropped, and the
+            // shape is whatever the model produced rather than a fixed box.
+            className="max-w-[96vw] max-h-[80vh] w-auto h-auto object-contain rounded-lg shadow-2xl"
+          />
+          <div className="mt-4 flex items-center gap-2">
+            {/* The lightbox is where a user decides they want the file, so
+                Download is here too rather than only on the thumbnail behind. */}
+            <button
+              type="button"
+              onClick={onDownload}
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/20 text-sm font-medium text-white transition-all"
+            >
+              {downloaded ? <><Check className="w-4 h-4" />Saved</> : <><Download className="w-4 h-4" />Download</>}
+            </button>
+            {/* Named, and where focus lands on open, so the state is announced
+                and Escape has a visible counterpart for anyone not using a
+                keyboard shortcut. */}
+            <button
+              ref={closeRef}
+              type="button"
+              onClick={closeFullSize}
+              aria-label="Close full size view"
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/20 text-sm font-medium text-white transition-all"
+            >
+              <X className="w-4 h-4" />
+              Close
+            </button>
+          </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -880,7 +996,7 @@ export function buildMarkdownComponents(): Components {
   },
   pre: ({ children }) => <>{children}</>,
   a: ({ href, children }) => (
-    <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-accent font-medium underline underline-offset-4 decoration-primary/30 hover:decoration-accent transition-colors">{children}</a>
+    <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-brand2 font-medium underline underline-offset-4 decoration-primary/30 hover:decoration-brand2 transition-colors">{children}</a>
   ),
   table: ({ children }) => (
     <div className="my-4 overflow-x-auto rounded-xl border border-border/40 shadow-md">
@@ -1198,7 +1314,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
         </div>
       ) : (
         <div
-          className={isArenaMode ? 'w-full grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 relative before:hidden md:before:block md:before:absolute md:before:left-1/2 md:before:top-0 md:before:bottom-0 md:before:w-[1px] md:before:bg-gradient-to-b md:before:from-primary/50 md:before:via-accent/40 md:before:to-transparent md:before:-translate-x-1/2' : 'w-full flex flex-col md:flex-row gap-6'}
+          className={isArenaMode ? 'w-full grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 relative before:hidden md:before:block md:before:absolute md:before:left-1/2 md:before:top-0 md:before:bottom-0 md:before:w-[1px] md:before:bg-gradient-to-b md:before:from-primary/50 md:before:via-brand2/40 md:before:to-transparent md:before:-translate-x-1/2' : 'w-full flex flex-col md:flex-row gap-6'}
           /* Announce the reply to assistive tech as it streams in. Without a
              live region a screen-reader user hears nothing until they manually
              navigate to the message — they have no cue the answer has arrived.
@@ -1215,7 +1331,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                 <div className="w-7 h-7 rounded-xl flex items-center justify-center overflow-hidden bg-black/10 shadow-md shadow-primary/20 border border-primary/30">
                   <img src={LOGO_URL} alt="Flyer AI" className="w-full h-full object-cover" />
                 </div>
-                <span className="text-sm font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">{modelName}</span>
+                <span className="text-sm font-bold bg-gradient-to-r from-primary to-brand2 bg-clip-text text-transparent">{modelName}</span>
                 {isArenaMode && (
                   <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-primary bg-primary/20 border border-primary/40 rounded-full px-2.5 py-0.5 shadow-sm">
                     👑 MODEL A
@@ -1383,16 +1499,16 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             const arenaText = sanitizeAssistantText(arena.content);
             const modelLabel = String.fromCharCode(66 + aIdx);
             return (
-              <div key={arena.modelId} className="flex-1 min-w-0 rounded-2xl border border-accent/40 bg-gradient-to-b from-accent/10 via-secondary/20 to-background/60 p-4 sm:p-5 shadow-2xl shadow-accent/10 backdrop-blur-xl relative overflow-hidden transition-all duration-300 hover:border-accent/60 border-t-4 border-t-accent">
-                <div className="flex items-center gap-2 mb-3 justify-between pb-2.5 border-b border-accent/20">
+              <div key={arena.modelId} className="flex-1 min-w-0 rounded-2xl border border-brand2/40 bg-gradient-to-b from-brand2/10 via-secondary/20 to-background/60 p-4 sm:p-5 shadow-2xl shadow-brand2/10 backdrop-blur-xl relative overflow-hidden transition-all duration-300 hover:border-brand2/60 border-t-4 border-t-brand2">
+                <div className="flex items-center gap-2 mb-3 justify-between pb-2.5 border-b border-brand2/20">
                   <div className="flex items-center gap-2.5">
-                    <div className="w-7 h-7 rounded-xl liquid-icon flex items-center justify-center bg-accent/20 border border-accent/30 shadow-md shadow-accent/20">
-                      <Sparkles className="w-4 h-4 text-accent" />
+                    <div className="w-7 h-7 rounded-xl liquid-icon flex items-center justify-center bg-brand2/20 border border-brand2/30 shadow-md shadow-brand2/20">
+                      <Sparkles className="w-4 h-4 text-brand2" />
                     </div>
-                    <span className="text-sm font-bold bg-gradient-to-r from-accent via-primary to-accent bg-clip-text text-transparent">
+                    <span className="text-sm font-bold bg-gradient-to-r from-brand2 via-primary to-brand2 bg-clip-text text-transparent">
                       {arena.modelName || 'AI'}
                     </span>
-                    <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-accent bg-accent/20 border border-accent/40 rounded-full px-2.5 py-0.5 shadow-sm">
+                    <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-brand2 bg-brand2/20 border border-brand2/40 rounded-full px-2.5 py-0.5 shadow-sm">
                       ⚔️ MODEL {modelLabel}
                     </span>
                   </div>
@@ -1413,7 +1529,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   <button type="button" onClick={() => handleCopyArena(aIdx, arenaText)}
                     className="mt-2 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-secondary text-xs text-muted-foreground hover:text-foreground transition-all"
                     title="Copy this response">
-                    {copiedArenaIdx === aIdx ? <><Check className="w-3.5 h-3.5 text-accent" /><span className="text-accent font-medium">Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
+                    {copiedArenaIdx === aIdx ? <><Check className="w-3.5 h-3.5 text-brand2" /><span className="text-brand2 font-medium">Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
                   </button>
                 )}
               </div>

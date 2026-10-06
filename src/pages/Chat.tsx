@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
+import { useState, useEffect, useRef, useCallback, useLayoutEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { useAuth } from '@/hooks/useAuth';
@@ -51,6 +51,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { extractFirstMarkdownImage, sanitizeAssistantText, withPersistedImage, closeUnterminatedFence, extractReasoning } from '@/lib/chat-format';
 import { buildMessageForest, linearizeForest, switchBranch, toTreeMessages, type TreeNode } from '@/lib/message-tree';
 import { extractMemories, dedupeMemories } from '@/lib/memory';
+import { clearDraft, draftKeyFor, loadDraft, saveDraft } from '@/lib/composer-drafts';
+import { loadReadingPrefs, saveReadingPrefs, steppedScale, readingPrefsStyle, type ReadingPrefs } from '@/lib/reading-prefs';
 
 interface ArenaResponse {
   modelId: string;
@@ -373,6 +375,46 @@ export default function Chat() {
   // Firestore. Silent context loss, presented as a normal screen.
   const [messagesError, setMessagesError] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  // ---- drafts and reading preferences (both localStorage, both best-effort) ----
+  //
+  // Reads are behind `typeof window`, which is the same guard the sidebar
+  // preference uses: this file is imported by tests under jsdom (fine) and could
+  // be imported during SSR (not fine), and the difference is not worth a crash.
+  const [readingPrefs, setReadingPrefs] = useState<ReadingPrefs>(() =>
+    typeof window === 'undefined' ? loadReadingPrefs({ getItem: () => null, setItem: () => {} }) : loadReadingPrefs(window.localStorage),
+  );
+  const applyReadingPrefs = useCallback((next: ReadingPrefs) => {
+    setReadingPrefs(next);
+    if (typeof window !== 'undefined') saveReadingPrefs(window.localStorage, next);
+  }, []);
+
+  /**
+   * The draft key for the thread on screen, and the text stored under it.
+   *
+   * Derived rather than held in state, deliberately. A copy in state would need
+   * invalidating on every switch, every new conversation and every send, and the
+   * three of those that were missed would show as another thread's text appearing
+   * in the composer. A read is a few hundred bytes out of localStorage.
+   */
+  const currentDraftKey = draftKeyFor(activeConversationId, user?.uid ?? null);
+  const draftForActiveThread = useMemo(() => {
+    if (typeof window === 'undefined') return '';
+    return loadDraft(window.localStorage, currentDraftKey);
+  }, [currentDraftKey]);
+
+  const handleDraftChange = useCallback((text: string, key: string) => {
+    if (typeof window === 'undefined') return;
+    saveDraft(window.localStorage, key, text, Date.now());
+  }, []);
+
+  /**
+   * The reading preferences, as inline custom properties on the scroll surface.
+   *
+   * Custom properties rather than a context or a prop drill: the values land on
+   * one element and every descendant that wants them reads `var(--flyer-…)`, which
+   * keeps the message components unaware that a preference exists at all.
+   */
+  const readingStyle = useMemo(() => readingPrefsStyle(readingPrefs), [readingPrefs]);
   const [statusText, setStatusText] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   // Explicit user overrides for the automatic intent classifier. DeepThink
@@ -1028,6 +1070,11 @@ export default function Chat() {
     // shouldn't become a branch root either.
     const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant' && m.content.trim() !== '');
     const userParentId = lastAssistant?.id ?? null;
+
+    // The draft has done its job. Cleared here as well as in the composer, because
+    // a send can be triggered from elsewhere (a follow-up chip, a shortcut) and
+    // the stored copy does not know which path it came through.
+    if (typeof window !== 'undefined') clearDraft(window.localStorage, draftKeyFor(activeConversationId, user?.uid ?? null));
 
     const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: trimmedContent || requestContent, attachments: pendingAttachments, parentMessageId: userParentId };
     const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', modelName: selectedModelMeta.name, parentMessageId: userMessage.id };
@@ -2461,7 +2508,7 @@ export default function Chat() {
             <div className="w-20 h-20 rounded-3xl bg-primary/20 border border-primary/40 flex items-center justify-center shadow-2xl shadow-primary/30 mb-4 animate-bounce">
               <Sparkles className="w-10 h-10 text-primary" />
             </div>
-            <h3 className="text-2xl font-bold bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent mb-2">
+            <h3 className="text-2xl font-bold bg-gradient-to-r from-primary via-brand2 to-primary bg-clip-text text-transparent mb-2">
               Drop Files to Analyze
             </h3>
             <p className="text-sm text-muted-foreground max-w-md text-center">
@@ -2577,7 +2624,7 @@ export default function Chat() {
                 onClick={() => setIsArenaMode(!isArenaMode)}
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all duration-300 ${
                   isArenaMode
-                    ? 'bg-gradient-to-r from-primary/25 via-accent/20 to-primary/25 text-primary border border-primary/40 shadow-[0_0_16px_hsla(var(--primary)/0.35)]'
+                    ? 'bg-gradient-to-r from-primary/25 via-brand2/20 to-primary/25 text-primary border border-primary/40 shadow-[0_0_16px_hsla(var(--primary)/0.35)]'
                     : 'hover:bg-secondary/80 text-foreground/70'
                 }`}
                 title="AI Arena: Compare models side-by-side"
@@ -2597,7 +2644,7 @@ export default function Chat() {
               <AnimatePresence>
                 {isArenaMode && compareModels.map((mId, idx) => (
                   <motion.div key={`compare-${idx}`} initial={{ opacity: 0, width: 0, scale: 0.8 }} animate={{ opacity: 1, width: 'auto', scale: 1 }} exit={{ opacity: 0, width: 0, scale: 0.8 }} transition={{ duration: 0.3 }} className="flex items-center gap-2 overflow-hidden">
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-widest bg-gradient-to-r from-primary/20 via-accent/20 to-primary/20 text-primary border border-primary/30 shadow-sm flex-shrink-0">VS</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-widest bg-gradient-to-r from-primary/20 via-brand2/20 to-primary/20 text-primary border border-primary/30 shadow-sm flex-shrink-0">VS</span>
                     <ModelSelector 
                       selectedModel={mId} 
                       onSelectModel={(newId) => {
@@ -2636,7 +2683,7 @@ export default function Chat() {
             keeps scroll from chaining to the document while re-enabling iOS
             momentum, which the document-level -webkit-overflow-scrolling reset
             had killed for this region too. */}
-        <div ref={scrollContainerRef} style={canvasGutter} className={`relative z-10 flex-1 min-h-0 touch-scroll-y ${canvasGutterClass}`}>
+        <div ref={scrollContainerRef} style={{ ...canvasGutter, ...readingStyle }} className={`relative z-10 flex-1 min-h-0 touch-scroll-y ${canvasGutterClass}`}>
           <AnimatePresence mode="wait">
             {isMessagesLoading ? (
               <div key="loading-messages" className="flex flex-col items-center justify-center h-full min-h-[50dvh] overflow-y-auto scrollbar-thin">
@@ -2718,7 +2765,7 @@ export default function Chat() {
                   increaseViewportBy={{ top: 400, bottom: 400 }}
                   computeItemKey={(_index, msg) => msg.id}
                   itemContent={(index, msg) => (
-                    <div className={`${isArenaMode ? 'max-w-full px-2' : 'max-w-4xl px-3 sm:px-4 lg:px-6'} mx-auto py-4 sm:py-6 lg:py-8`}>
+                    <div className={`${isArenaMode ? 'max-w-full px-2' : 'mx-auto px-3 sm:px-4 lg:px-6'} py-4 sm:py-6 lg:py-8`} style={isArenaMode ? undefined : { maxWidth: 'var(--flyer-content-width)' }}>
                       {/* Each row owns its own vertical rhythm instead of the old
                           gap-y on a flex parent: Virtuoso lays items flush, so the
                           spacing must live inside each rendered row. */}
@@ -2794,6 +2841,13 @@ export default function Chat() {
           </AnimatePresence>
           <ChatInput
             onSend={handleSendMessage}
+            /* The draft namespace, recomputed on every render so a switch of
+               conversation is followed by the draft. `new:<uid>` for a chat that
+               does not exist yet, which is the first message and the one with
+               nowhere else to be recovered from. */
+            draftKey={draftKeyFor(activeConversationId, user?.uid ?? null)}
+            initialDraft={draftForActiveThread}
+            onDraftChange={handleDraftChange}
             isLoading={isLoading}
             onStop={handleStopGeneration}
             /* Sending is blocked while the history read is failed, and this is the

@@ -108,13 +108,40 @@ describe("model catalogue", () => {
   // two-leg chain: GLM 5.3 primary, flash last (flash must be last: only the
   // final position gets the isLastRoute relaxation past the 22s first-byte
   // cap, and its 144s cold start needs it).
-  it("keeps the default model's chain: GLM primary, flash last", () => {
+  //
+  // RE-PINNED 2026-10-04, maintainer-directed: "remove v4 as they gone use ds
+  // v4.1 or glm 5.3 flash or glm 5.3 from nim nvidia". The old last leg
+  // (deepseek-ai/deepseek-v4-flash-0731) is now hidden as dead, and the NVIDIA
+  // half of the chain is rebuilt from the three ids named. The invariant the
+  // test defends is unchanged and is why it is written out rather than derived:
+  // the primary must be the measured 2.9s leg, and the slow NIM leg must be
+  // LAST, because only the final position gets the isLastRoute relaxation.
+  it("keeps the default model's chain: GLM primary, NIM legs behind it", () => {
     const spec = getModel(DEFAULT_MODEL_ID)!;
     expect(spec.routes.map((r) => r.modelId)).toEqual([
       "z-ai/glm-5.3-free",
-      "deepseek-ai/deepseek-v4-flash-0731",
+      "z-ai/glm-5.3-flash",
+      "deepseek-ai/deepseek-v4.1-flash",
     ]);
-    expect(spec.routes.map((r) => r.provider)).toEqual(["tokenrouter", "nvidia"]);
+    expect(spec.routes.map((r) => r.provider)).toEqual(["tokenrouter", "nvidia", "nvidia"]);
+  });
+
+  it("does not route the default model through a retired V4 leg", () => {
+    // The half of the re-pin a chain assertion cannot see: the dead ids must not
+    // survive anywhere in the chain, including as insurance. A chain that still
+    // names a 410 id spends a failover hop on it every time the primary is down.
+    const spec = getModel(DEFAULT_MODEL_ID)!;
+    expect(spec.routes.some((r) => /deepseek-v4-(flash|pro)/.test(r.modelId))).toBe(false);
+  });
+
+  it("hides every retired V4 entry rather than deleting it", () => {
+    // Hidden, not deleted: `getModel` resolves against the full list, so the
+    // replies already in Firestore that carry these ids keep their byline.
+    for (const id of ["deepseek-v4-flash-0731", "deepseek-v4-pro-0813"]) {
+      const spec = getModel(id);
+      expect(spec, `${id} must stay in MODELS for old replies`).toBeDefined();
+      expect(spec!.hidden, `${id} still retires a featured single-route entry`).toBe(true);
+    }
   });
 
   // The mistral leg is deliberately NOT in the default chain (see the entry's

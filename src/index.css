@@ -77,14 +77,73 @@
     --muted: 224 18% 17%;
     --muted-foreground: 215 20% 55%;
 
+    /* `--accent` is shadcn's HOVER/FOCUS SURFACE, and nothing else.
+     *
+     * This was pinned to `172 66% 50%` — byte-identical to --primary — and the
+     * note above explains why: a deleted colour-picker effect had been injecting
+     * it, and matching the injected value made the picker's removal a visual
+     * no-op. The measurement afterwards is what showed the injected value was
+     * itself the bug, because this token has two consumers and the brand hue is
+     * wrong for both:
+     *
+     *   - 26 sites in src/components/ui say `hover:bg-accent` / `focus:bg-accent`
+     *     (dropdown-menu, select, menubar, context-menu, navigation-menu, and the
+     *     ghost and outline button variants). Every one of them lit a saturated
+     *     teal block with near-black text under the cursor.
+     *   - 28 sites in the app components wanted a second *brand* hue, and got a
+     *     colour identical to --primary, so every `from-primary to-accent`
+     *     gradient — the model byline, the send button, the arena card — painted
+     *     one colour twice.
+     *
+     * The split was clean along that line, so the roles are now separate: the app
+     * sites moved to --brand-2 below, and this returns to being a quiet elevated
+     * surface. The target shape was already in this file: --sidebar-accent is a
+     * near-background surface with a light foreground, which is the shadcn
+     * contract, and is why hovering in the sidebar always felt right while
+     * hovering in a menu did not.
+     *
+     * Measured: 1.23:1 against --popover and 1.33:1 against --background (a step,
+     * not a colour), with --accent-foreground at 13.9:1 on top of it.
+     * src/test/theme-contract.test.ts holds both bounds. */
     --accent: 172 66% 50%;
-    --accent-foreground: 224 32% 6%;
+    --accent-foreground: 210 40% 98%;
+
+    /* The second brand hue, for gradients and for arena mode's MODEL B identity.
+     *
+     * Not an invented colour: it is the middle stop of --gradient-primary further
+     * down, which has interpolated teal 172 -> cyan 196 -> orange 24 since the
+     * palette was written. It was unreachable from a utility class because it
+     * lived inside a `linear-gradient()` string rather than as a token, which is
+     * the whole reason the gradient sites reached for --accent instead.
+     *
+     * 24 degrees from --primary: far enough that a two-stop gradient interpolates
+     * visibly at the sizes these are used at (a 32px button, a 14px byline), close
+     * enough to stay one family. 8.1:1 on --background, so it is legible as text
+     * under `bg-clip-text`. */
+    --brand-2: 196 82% 52%;
 
     --destructive: 0 72% 51%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 226 20% 19%;
-    --input: 226 22% 14%;
+    /* Two tiers, because a divider and a text field are not the same thing and
+     * were previously the same colour — an invisible one.
+     *
+     * Measured before this change: --border was 1.38:1 against --background and
+     * 1.31:1 against --card, and --input (the outline of every text field, select
+     * and outline-button) was 1.19:1. WCAG 1.4.11 asks for 3:1 on the visual
+     * information that identifies a control, so the field boundaries failed it by
+     * a wide margin; the dividers were not failing a standard so much as failing
+     * to exist, across 80 `border-border/*` sites. That is the flatness that
+     * reads as unfinished: every panel, card and composer edge dissolved into the
+     * surface behind it.
+     *
+     * --border stays decorative and quiet (1.75:1 on --background, 1.66:1 on
+     * --card): visible as an edge, not loud enough to box every list row.
+     * --border-strong is the control tier and clears 3:1 on --background, --card
+     * and --popover alike, which is why --input is now bound to it. */
+    --border: 226 20% 26%;
+    --border-strong: 226 16% 44%;
+    --input: 226 16% 44%;
     --ring: 172 66% 50%;
 
     /* Height of the app's own title bar. 0 in a browser; TitleBar sets it to 32px
@@ -133,7 +192,7 @@
     --sidebar-primary-foreground: 222 47% 6%;
     --sidebar-accent: 226 22% 12%;
     --sidebar-accent-foreground: 210 40% 98%;
-    --sidebar-border: 226 20% 16%;
+    --sidebar-border: 226 20% 24%;
     --sidebar-ring: 172 66% 50%;
 
     /* Custom tokens */
@@ -1003,4 +1062,28 @@ pre {
   button, a, [role="button"] {
     min-height: 44px;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Reading preferences (src/lib/reading-prefs.ts)
+   ---------------------------------------------------------------------------
+   The values arrive as inline custom properties on the scroll container, so the
+   scale has three fallbacks for the case where an element renders outside it (an
+   artifact panel, a test harness, an older snapshot): the shipped default. A
+   `var()` with no fallback resolves to nothing and takes the declaration with it,
+   which would silently unstyle the prose rather than leave it at 1. */
+.prose {
+  font-size: calc(1rem * var(--flyer-font-scale, 1));
+}
+.flyer-row {
+  margin-bottom: var(--flyer-row-gap, 0.75rem);
+}
+
+/* The reading-scale control: four steps, no free-form number, because a slider
+   that can produce 1.17 renders a state the buttons cannot return to. */
+.flyer-scale-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  transition: all 150ms ease;
 }
