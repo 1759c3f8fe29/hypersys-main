@@ -26,7 +26,7 @@
 // import ships three sets of integers to the browser and nothing else.
 import { FAILOVER_STATUSES } from "../../api/_failover.js";
 
-export type ProviderId = "nvidia" | "mistral" | "pollinations" | "tokenrouter";
+export type ProviderId = "nvidia" | "mistral" | "pollinations" | "tokenrouter" | "groq";
 
 export interface ProviderMeta {
   id: ProviderId;
@@ -94,6 +94,27 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
     supportsTools: false,
     supportsVision: false,
     freeTier: "Keyless and free — no account or key. Used as the final fallback.",
+  },
+  // Groq Cloud (OpenAI-compatible). Added 2026-10-07.
+  //
+  // `envKey` names the POOL variable, not a single key: GROQ_API_KEYS holds a
+  // comma-separated list because Groq's free tier limits per credential, and
+  // api/llm.js rotates to the next one on a 429 instead of failing the route.
+  //
+  // Probed live 2026-10-07 (scripts/probe-groq-generate.mjs): all four keys 200,
+  // qwen/qwen3.8-27b answers in 486ms bare and 190ms with a tools payload, and
+  // openai/gpt-oss-120b in 763ms with a real budget — its first empty reply was
+  // a 16-token probe cap spending the whole budget on `reasoning` tokens, not a
+  // broken model.
+  groq: {
+    id: "groq",
+    label: "Groq",
+    baseUrl: "https://api.groq.com/openai/v1/chat/completions",
+    envKey: "GROQ_API_KEYS",
+    byokHeader: "x-groq-api-key",
+    supportsTools: true,
+    supportsVision: false,
+    freeTier: "Free tier, key-pooled. gpt-oss reasoning models included.",
   },
 };
 
@@ -276,22 +297,42 @@ export const MODELS: ModelSpec[] = [
     // The picker name is "Flyer" (user-directed, 2026-09-07). The id stays
     // glm-5.3-free (the stable key for stored selections), so nothing breaks
     // for users who already have it selected.
+    //
+    // THE DEFAULT IS NOW QWEN 3.8 27B (maintainer-directed 2026-10-07: "make the
+    // default model qwen 3.8 27 b from groq"). That is a change of ROUTE, not of
+    // id, and the difference matters: `id` is the key every stored selection and
+    // every persisted message byline is written against, while the first route is
+    // what a new conversation actually runs on. Renaming the id would strand
+    // every existing selection *and* — as the re-converged edit recorded below
+    // already demonstrated — leave `getModel(DEFAULT_MODEL_ID)` undefined, which
+    // is the app with no default at all.
     label: "Flyer",
     shortLabel: "Flyer",
-    description: "The default model. GLM 5.3 reasoning with tools.",
+    description: "The default model. Qwen 3.8 27B on Groq, with fallback.",
     routes: [
-      // 1. The measured leg: 2.9s bare / 2.2s with tools (2026-09-07).
+      // 1. Qwen 3.8 27B — the best-measured leg in this file: 486ms bare and
+      // 190ms with a five-tool payload, across four pooled keys
+      // (scripts/probe-groq-generate.mjs, 2026-10-07). Going first is what makes
+      // it the default; the pool means the free tier's per-credential limit
+      // costs a rotation rather than a route.
+      { provider: "groq", modelId: "qwen/qwen3.8-27b" },
+      // 2. openai/gpt-oss-120b on the same pool, 763ms. A DIFFERENT FAMILY from
+      // the leg above on purpose: a chain of near-identical models fails together
+      // when one family has a bad afternoon, and this is the position that
+      // answers when the first one is down.
+      { provider: "groq", modelId: "openai/gpt-oss-120b" },
+      // 3. GLM 5.3 free, 2.9s bare / 2.2s with tools (measured 2026-09-07). The
+      // default until today, kept as the third leg rather than dropped: it is a
+      // different provider entirely, which is what a chain is for.
       { provider: "tokenrouter", modelId: "z-ai/glm-5.3-free" },
-      // 2-3. The NVIDIA legs, maintainer-directed 2026-10-04: "remove v4 as they
-      // gone; use ds v4.1 or glm 5.3 flash or glm 5.3 from nim nvidia". GLM
-      // before the DS leg so a failover lands on the same family and voice.
-      //
-      // PROVENANCE, stated plainly because it is weaker than this file's usual
-      // bar: none of the three ids below was probed in this session (the key read
-      // was denied), so they rest on the maintainer's word rather than on a
-      // measured TTFB. That is why the chain is three legs and not one: 404 is in
-      // FAILOVER_STATUSES, so an id that turns out wrong costs a hop instead of
-      // the whole turn. Swap this paragraph for numbers the moment a probe runs.
+      // 4. The NVIDIA legs, maintainer-directed 2026-10-04. PROVENANCE IS WEAKER
+      // THAN EVERYTHING ABOVE and says so: neither id was probed (the key read
+      // was denied that session), so they rest on the maintainer's word. They sit
+      // at the END rather than the middle because the legs before them are
+      // measured — an unverified id should not be the one a healthy request
+      // lands on. 404 is in FAILOVER_STATUSES, so a wrong id costs a hop instead
+      // of the turn, which is the whole reason an unprobed leg is acceptable
+      // here at all.
       { provider: "nvidia", modelId: "z-ai/glm-5.3-flash" },
       {
         provider: "nvidia",
@@ -997,6 +1038,46 @@ export const MODELS: ModelSpec[] = [
     emoji: "🐋",
     kind: "Chat",
     featured: true,
+  },
+  // ---- Groq Cloud, added 2026-10-07 -----------------------------------------
+  //
+  // Every id below was probed live with a real completion before being named
+  // (scripts/probe-groq-generate.mjs, scripts/probe-groq-followup.mjs). The two
+  // gpt-oss entries are here because the probe is what proved they are fine: at
+  // max_tokens:16 both returned 200 with EMPTY content, which reads exactly like
+  // a broken model — the budget had been spent on `reasoning` tokens before any
+  // answer was emitted. At 512 they answer in under 800ms and expose a separate
+  // `reasoning` field, so ai.ts's existing reasoning parser handles them with no
+  // new code.
+  {
+    id: "gpt-oss-120b",
+    label: "GPT-OSS 120B",
+    shortLabel: "GPT-OSS",
+    description: "Open-weight 120B with visible reasoning. 763ms.",
+    routes: [{ provider: "groq", modelId: "openai/gpt-oss-120b" }],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "🌀",
+    kind: "Chat",
+    featured: true,
+  },
+  {
+    id: "gpt-oss-20b",
+    label: "GPT-OSS 20B",
+    shortLabel: "GPT-OSS 20B",
+    description: "Small, quick, same reasoning shape. 445ms.",
+    routes: [{ provider: "groq", modelId: "openai/gpt-oss-20b" }],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "💨",
+    kind: "Chat",
+    featured: false,
   },
 ];
 // No legacy alias map any more (removed in 3.12 at the maintainer's direction).

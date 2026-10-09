@@ -50,6 +50,25 @@ const PROVIDER_ENDPOINTS = {
     byokHeader: "x-tokenrouter-api-key",
     supportsTools: true,
   },
+  // Groq Cloud (OpenAI-compatible). Added 2026-10-07.
+  //
+  // THE KEY POOL IS THE POINT. Groq's free tier rate-limits per key, and this
+  // account has four of them, so `GROQ_API_KEYS` is a comma-separated list and
+  // `resolveKey` hands back the whole pool. A 429 rotates to the next key and
+  // retries the SAME provider before the chain moves on: the limit is a property
+  // of the key, not of the provider, and failing over to another provider throws
+  // away a working model to solve an accounting problem.
+  //
+  // `GROQ_API_KEY` stays as a single-key fallback so an existing deployment that
+  // set one name keeps working. No VITE_ variant: these are server-side secrets
+  // and a VITE_ prefix would inline them into the browser bundle.
+  groq: {
+    url: "https://api.groq.com/openai/v1/chat/completions",
+    envKeys: ["GROQ_API_KEYS", "GROQ_API_KEY"],
+    byokHeader: "x-groq-api-key",
+    supportsTools: true,
+    keyPool: true,
+  },
   // The keyless final fallback, and — since api/pollinations.js was deleted — the
   // only way into Pollinations on this surface.
   //
@@ -190,25 +209,45 @@ function safeParse(s) {
 }
 
 /**
- * The key to use for a provider: the caller's own (BYOK) first, then ours.
- * Returns { key, byok }. A placeholder left in .env ("your-key-here") counts as
- * unconfigured — otherwise it reaches the provider and comes back 401, which
- * failover refuses to retry, so the whole chain dies on a typo.
+ * The key(s) to use for a provider: the caller's own (BYOK) first, then ours.
+ * Returns { key, keys, byok }. A placeholder left in .env ("your-key-here")
+ * counts as unconfigured — otherwise it reaches the provider and comes back 401,
+ * which failover refuses to retry, so the whole chain dies on a typo.
+ *
+ * `keys` is the rotation pool and is present only for a provider declared with
+ * `keyPool: true`; `key` is always the one to try first, so every caller that
+ * predates the pool keeps working unchanged. Splitting happens here rather than
+ * at each call site so the two can never disagree about what a pool is.
  */
-function resolveKey(req, cfg) {
-  if (cfg.keyless) return { key: null, byok: false };
+function splitPool(raw) {
+  return String(raw)
+    .split(",")
+    .map((k) => k.trim())
+    .filter((k) => k && !k.startsWith("your-"));
+}
+
+export function resolveKey(req, cfg) {
+  if (cfg.keyless) return { key: null, keys: [], byok: false };
 
   const userKey = cfg.byokHeader ? header(req, cfg.byokHeader) : undefined;
   if (userKey && !String(userKey).startsWith("your-")) {
-    return { key: userKey, byok: true };
+    // A caller's own key is a pool of exactly one: BYOK is a single credential,
+    // and silently rotating through OUR keys for someone who supplied their own
+    // would spend our quota on their behalf.
+    return { key: userKey, keys: [userKey], byok: true };
   }
 
-  const ourKey = cfg.envKeys.map((k) => process.env[k]).find(Boolean);
-  if (ourKey && !String(ourKey).startsWith("your-")) {
-    return { key: ourKey, byok: false };
-  }
+  const raw = cfg.envKeys.map((k) => process.env[k]).find(Boolean);
+  const keys = raw ? splitPool(raw) : [];
+  if (keys.length === 0) return { key: null, keys: [], byok: false };
 
-  return { key: null, byok: false };
+  // Rotate the starting position per request. Without this every request in
+  // flight hits the same key, so four keys under load behave exactly like one:
+  // the first 429 rotates the second request to key 2, but requests already out
+  // on key 1 stay there. Spreading the start is what makes the pool a pool.
+  const start = cfg.keyPool ? Math.floor(Math.random() * keys.length) : 0;
+  const rotated = cfg.keyPool ? [...keys.slice(start), ...keys.slice(0, start)] : keys;
+  return { key: rotated[0], keys: rotated, byok: false };
 }
 
 async function pipeStream(upstream, res, req) {
@@ -243,9 +282,15 @@ async function pipeStream(upstream, res, req) {
  * *to*, so the final route is allowed the entire remaining budget rather than
  * being cut off at FIRST_BYTE_TIMEOUT_MS to protect a route that does not exist.
  */
-export async function callProvider({ cfg, route, key, payload, deadline, isLastRoute }) {
+export async function callProvider({ cfg, route, key, pool, payload, deadline, isLastRoute }) {
   let lastStatus = 0;
   let lastDetail = "";
+
+  // The rotation pool. `keys` is empty for a provider that is not pooled, and
+  // `keys[0]` is the key the caller resolved, so the loop's behaviour is
+  // unchanged for every provider that existed before Groq.
+  const keys = Array.isArray(pool) && pool.length > 0 ? pool : [key];
+  let keyIndex = 0;
 
   for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
     const remaining = deadline - Date.now();
@@ -253,6 +298,7 @@ export async function callProvider({ cfg, route, key, payload, deadline, isLastR
       return { status: 504, detail: `chain deadline of ${CHAIN_DEADLINE_MS}ms exhausted` };
     }
     const attemptMs = isLastRoute ? remaining : Math.min(FIRST_BYTE_TIMEOUT_MS, remaining);
+    const activeKey = keys[Math.min(keyIndex, keys.length - 1)];
 
     let upstream = null;
     let timedOut = false;
@@ -268,7 +314,7 @@ export async function callProvider({ cfg, route, key, payload, deadline, isLastR
         headers: {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
-          ...(cfg.keyless ? {} : { Authorization: `Bearer ${key}` }),
+          ...(cfg.keyless ? {} : { Authorization: `Bearer ${activeKey}` }),
         },
         body: JSON.stringify({ ...payload, model: route.modelId }),
         signal: controller.signal,
@@ -312,6 +358,25 @@ export async function callProvider({ cfg, route, key, payload, deadline, isLastR
       // in RETRY_STATUSES either — three 404s inside six seconds were observed, so
       // knocking again on the same route is measured waste — but it does fail over.
       if (!RETRY_STATUSES.has(upstream.status)) break;
+
+      // 429 WITH A POOL: rotate the key, do not back off and do not fail over.
+      //
+      // The rate limit belongs to the credential, not to the provider or the
+      // model, so the right response is the next key on the same request. Backing
+      // off would spend the chain budget waiting on a limit that another key does
+      // not share, and failing over would answer the user's question on a
+      // different model to solve an accounting problem. The backoff is skipped on
+      // this path for the same reason — there is nothing to wait for.
+      if (upstream.status === 429 && keyIndex < keys.length - 1) {
+        keyIndex += 1;
+        console.warn(
+          `[llm] ${route.provider}/${route.modelId} → 429 on key ${keyIndex}/${keys.length}; rotating to the next key`,
+        );
+        // `attempt` is not advanced past this point by the loop's own increment,
+        // so a pool with N keys gets N tries before the backoff schedule begins.
+        attempt -= 1;
+        continue;
+      }
     }
 
     if (attempt < BACKOFF_MS.length) {
@@ -523,7 +588,7 @@ export default async function handler(req, res) {
       continue;
     }
 
-    const { key } = resolveKey(req, cfg);
+    const { key, keys } = resolveKey(req, cfg);
     if (!cfg.keyless && !key) {
       attempts.push({ provider: route.provider, status: 0, detail: "no key configured" });
       continue;
@@ -542,6 +607,7 @@ export default async function handler(req, res) {
       cfg,
       route,
       key,
+      pool: keys,
       payload: routePayload,
       deadline,
       isLastRoute: !usableRouteAfter(i),

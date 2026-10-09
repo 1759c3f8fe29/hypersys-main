@@ -97,5 +97,9 @@ export function readingPrefsStyle(prefs: ReadingPrefs): Record<string, string> {
     "--flyer-font-scale": String(prefs.fontScale),
     "--flyer-content-width": `${prefs.width}px`,
     "--flyer-row-gap": prefs.density === "compact" ? "0.25rem" : "0.75rem",
+    // The vertical padding of a message row. Compact trims the air between
+    // replies, which is the difference between seeing five messages and seeing
+    // eight on a laptop — the reason to offer it at all.
+    "--flyer-row-pad": prefs.density === "compact" ? "0.25rem" : "0.75rem",
   };
 }

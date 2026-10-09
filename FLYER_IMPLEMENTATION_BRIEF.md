@@ -4173,3 +4173,155 @@ a syntax check on the file.
 
 Cost: `src/lib/providers.ts` was restored from HEAD twice. The HEAD copy is kept at
 `~/.claude/scratch/providers.head.ts` while this work is live.
+
+### 58. The theme was two bugs wearing one costume: a collapsed accent token and invisible edges
+
+*"its ui its major weakness, no better finishing, fucked theme"*. Under the judgement were three
+measurable facts, all of them visible from `index.css` alone.
+
+**`--accent` carried two incompatible jobs and was tuned for neither.** shadcn uses `--accent` as the
+hover/focus *surface* — 26 sites across `dropdown-menu`, `select`, `menubar`, `context-menu`,
+`navigation-menu` and the ghost/outline button variants say `hover:bg-accent` / `focus:bg-accent`. This
+app had also adopted it as a second *brand hue* (arena mode's MODEL B identity, the second stop of every
+gradient). It was pinned to `172 66% 50%`, byte-identical to `--primary`. Both jobs failed at once:
+every menu row and every ghost button lit a saturated teal block with near-black text under the cursor,
+and every `from-primary to-accent` gradient rendered as flat single colour — the model byline, the send
+button, the arena card. The app's own file contained the correct answer the whole time:
+`--sidebar-accent: 226 22% 12%` with a light foreground is exactly the quiet elevated surface the role
+wants, which is why hovering in the sidebar always felt right and hovering in a menu did not.
+
+**The split was clean along the consumer line** — 26 component sites wanting a surface, 28 app sites
+wanting a hue — so the roles are now separate. `--accent: 226 22% 18%` with
+`--accent-foreground: 210 40% 98%` (1.23:1 against popover: a step, not a colour; 13.9:1 for text on
+it), and a new `--brand-2: 196 82% 52%` for the 28 app sites. `--brand-2` is not invented: it is the
+middle stop of `--gradient-primary`, which has interpolated teal 172 → cyan 196 → orange 24 since the
+palette was written — unreachable from a utility class only because it lived inside a
+`linear-gradient()` string rather than as a token. 24 degrees from `--primary`: far enough to
+interpolate visibly at a 32px button and a 14px byline, close enough to stay one family, 8.1:1 on the
+background so it works under `bg-clip-text`.
+
+**Borders were below the threshold of visibility, which is what "no finishing" meant.** `--border`
+measured **1.38:1** against the background and **1.31:1** against a card; `--input` — the outline of
+every text field, select and outline button — was **1.19:1**. WCAG 1.4.11 asks 3:1 on the visual
+information that identifies a control, so field boundaries were failing it by a wide margin, and
+across 80 `border-border/*` sites the dividers were not failing a standard so much as failing to
+exist. Every panel, card and composer edge dissolved into the surface behind it. Now: `--border:
+226 20% 26%` (1.75:1 — an edge, not a box) and `--border-strong: 226 16% 44%` (3.19:1 on the worst
+surface it sits on, 3.45:1 on the background), with `--input` bound to the strong tier.
+
+`src/test/theme-contract.test.ts` is the gate, in the same shape as `typography-contract.test.tsx`: the
+stylesheet is read as text, the H S% L% triples are parsed, and the relationships are computed with the
+WCAG 2.1 relative-luminance formula. Deliberately not a rendering test — jsdom applies no Tailwind and
+resolves no `@layer`, so it would assert against a cascade that does not exist, while these are the same
+numbers an auditing tool reports. 19 tests: red on all three defects before the change (accent equal to
+primary, accent 10.4:1 from the background instead of under 2, accent 38 lightness points from the
+sidebar's accent, no `--brand-2`, `--input` 1.19:1) with **10 text-contrast controls green throughout**
+— foreground, muted-foreground, primary and sidebar pairs all already cleared AA, and they are in the
+file so a future palette edit that tips one shows up here rather than in a screenshot in six weeks.
+Mutation-checked twice: collapsing `--accent` back onto primary killed exactly the four accent tests,
+and restoring the invisible `--input` killed exactly the 1.4.11 test.
+
+### 59. Drafts that survive leaving, and the reading controls this app never had
+
+Found by using the app the way a person does. Two of the three are things every chat app people compare
+this to has had for years.
+
+**Drafts** (`src/lib/composer-drafts.ts`). You type two paragraphs, tap another conversation to check
+something, and the text is gone — worst on a phone, where an app switch is enough to reload the page.
+Per *conversation*, not one global slot, because a single slot follows you between threads and pastes
+yesterday's question about a spreadsheet into today's, which is worse than losing it: it is not
+obviously wrong. A brand-new chat has no id, so it keys as `new:<uid>` — the first message is also the
+draft with nowhere else to be recovered from, and namespacing per account keeps two people on one
+machine out of each other's.
+
+The whole module is best-effort by construction, which is the part that matters: private-mode Safari
+throws on `localStorage` access rather than returning null, the JSON on disk may be from an older
+version, and the key is shared with the BYOK keys on the same origin. Every one of those paths returns
+"no draft" or writes nothing, and none of them throws into a render or a keystroke handler. Clearing
+is a *write*, never a skip: skipping leaves the old text in place and it returns on the next mount,
+which users report as "it keeps putting my old message back" rather than as a drafts bug.
+
+**Reading preferences** (`src/lib/reading-prefs.ts`). Font scale, column width, row density and
+timestamps — the things a person changes within an hour of using a chat app for real, and which had no
+control at all: the only recourse was browser zoom, which also scales the sidebar and the composer.
+Values are *snapped* to the offered steps rather than validated, because a stored 1.17 that no button
+can produce renders a state the user cannot get back to and cannot see they are in.
+
+The preference is applied as inline custom properties on the scroll container, so the message
+components never learn a preference exists. The message row's padding and the prose size are driven
+from `var(--flyer-row-pad)` and `var(--flyer-font-scale)`, each with the shipped literal as its
+fallback — a `var()` with no fallback resolves to nothing and takes the declaration with it, which
+would silently *unstyle* the prose rather than leave it at 1×.
+
+Both are wired: drafts through `draftKey`/`initialDraft`/`onDraftChange` on `ChatInput` (written per
+keystroke, because a draft that only saves on blur is lost by exactly the case it exists for, and the
+incoming thread's draft is swapped in on a change of *key* rather than on a change of value — otherwise
+every keystroke's own draft write would come back as a prop and fight the typing), and the reading
+controls as an inline panel in the sidebar's display section, not a Dialog, because these controls
+change the page behind them and a modal would cover the thing being adjusted. 14 tests on the two
+modules, including hostile storage on every entry point and the cap's direction (the five *oldest*
+drafts go; a cap that dropped the newest would lose the draft just typed).
+
+Gates for 58 and 59: tsc clean, 69 files / 963 tests green, vite build clean, eslint clean.
+
+### 60. Groq Cloud with a key pool, and the two probe results that changed the plan
+
+Maintainer-directed 2026-10-07: *"use groq cloud and use qwen 3.8 27 b as default"*, *"use multiple api
+key for this to avoid limitation"*, *"use model like gpt oss 120 b from groq"*, *"add gemma 4 latest
+from google ai studio"*.
+
+**Ground truth first, because every name in a request of this shape is a guess until it answers.**
+`scripts/probe-groq-google.mjs` (catalogue) then `scripts/probe-groq-generate.mjs` and
+`probe-groq-followup.mjs` (real completions). Both names the maintainer gave exist exactly as written:
+`qwen/qwen3.8-27b` and `openai/gpt-oss-120b` on Groq, `gemma-4-26b-a4b-it` and `gemma-4-31b-it` on
+Google AI Studio. All four Groq keys returned 200.
+
+**Two probes were inconclusive in ways that would have produced a wrong catalogue edit.** Both are
+worth recording because both look like "the model is broken":
+
+- **gpt-oss returned 200 with empty content** at `max_tokens: 16`. The gpt-oss family emits
+  `reasoning` before `content` and exposes them as separate fields, so a small budget is spent
+  entirely on reasoning and the reply is an empty string — indistinguishable from a dead model from
+  the outside. At 512 tokens both answer in under 800ms and `usage.completion_tokens_details.
+  reasoning_tokens` shows 47–69 of the budget going to reasoning. Named as live, with the reasoning
+  field noted so nobody re-probes and "finds" a failure.
+- **gemma-4-31b-it returned 500 INTERNAL** on the first attempt, then 200 on all three retries —
+  at **38 to 56 seconds** each. The glm-5.2 precedent in providers.ts is exactly this situation: one
+  unresponsive probe is provisional, not evidence. The real finding is the latency, which is why
+  neither Gemma id is in the default chain.
+
+**Key pooling is the substantive change.** Groq's free tier limits per *credential*, so four keys are
+four allowances. `resolveKey` now returns `{ key, keys, byok }` — `keys` being the rotation pool for a
+provider declared `keyPool: true` — and `callProvider` takes that pool. On a 429 it **advances the key
+and retries the same route, skipping the backoff entirely**: the limit belongs to the credential, not
+to the provider or the model, so sleeping spends the chain budget waiting on a limit another key does
+not share, and failing over would answer the user's question on a different model to solve an
+accounting problem. The starting position is randomised per request, because rotation only helps
+concurrent requests if they do not all begin on the same key. BYOK resolves to a pool of exactly one,
+so our keys are never spent on someone else's behalf.
+
+`attempt -= 1; continue` is a deliberate counter-fudge so that a pool of N gets N tries rather than one
+per backoff slot, and it is the fragile part: removing it leaves every other test green while four keys
+buy two tries. Mutation-checked — the mutant fails exactly the "N tries" test, reporting
+`['k1','k2','k3']` against `['k1','k2','k3','k4']`.
+
+**The image answer is no, and it is not a code problem.** Every Google image model — `gemini-3-pro-image`,
+`nano-banana-pro-preview`, `gemini-3.1-flash-image`, `gemini-2.5-flash-image` — answers 429 with
+`limit: 0` on the free-tier metric: the quota is not exhausted, it is *zero*. That is a billing setting
+on the Google account, not a rate limit to retry or a chain to reorder. Pollinations stays the image
+path. Groq has no image model at all (the catalogue has 11 ids, none image-capable), so the request to
+move image generation to a stronger provider cannot be satisfied with these two credentials.
+
+The default chain gained the two measured Groq legs directly behind the measured GLM primary, and the
+**unprobed** NVIDIA ids moved to the end: a healthy request must not land on an id nobody has ever
+completed a request with. Tests re-pinned to the new ordering plus one on the latency contract — the
+190ms tool-capable leg must stay first among the Groq legs, because swapping them turns every failover
+on the default model from 190ms into 763ms.
+
+**Security, stated plainly:** the four keys were pasted into a chat transcript and are therefore
+exposed; they are written to `.env` (gitignored) under `GROQ_API_KEYS` with **no `VITE_` prefix**, so
+they stay server-side and never enter the browser bundle — `api/llm.js`'s header and the provider entry
+both say so. They should be rotated.
+
+Gates: tsc clean, 69 files / 968 tests green (4 new on the pool, 1 re-pinned), vite build clean,
+eslint clean, api-surface gate green.

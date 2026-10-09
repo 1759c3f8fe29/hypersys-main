@@ -195,6 +195,14 @@ const DEV_PROVIDER_ENDPOINTS: Record<string, { url: string; envKeys: string[]; b
   // was only reachable in dev because the healthy first leg never ran.
   tokenrouter: { url: "https://api.tokenrouter.com/v1/chat/completions", envKeys: ["TOKENROUTER_API_KEY", "VITE_TOKENROUTER_API_KEY"], byokHeader: "x-tokenrouter-api-key" },
   pollinations: { url: "https://text.pollinations.ai/openai", envKeys: [], keyless: true },
+  // Groq Cloud. Kept in step with PROVIDER_ENDPOINTS in api/llm.js, which is the
+  // standing rule for this file (see the tokenrouter note above for what drift
+  // costs). Added 2026-10-07 with a KEY POOL rather than a single key: Groq's
+  // free tier rate-limits per key, so `GROQ_API_KEYS` holds a comma-separated
+  // list and the router rotates to the next one on a 429 instead of failing the
+  // chain. Server-side only — the keys must never carry a VITE_ prefix, because
+  // those get inlined into the browser bundle.
+  groq: { url: "https://api.groq.com/openai/v1/chat/completions", envKeys: ["GROQ_API_KEYS", "GROQ_API_KEY"], byokHeader: "x-groq-api-key" },
 };
 
 // Mirrors FAILOVER_STATUSES in api/_failover.js, which added 404 (NVIDIA serves

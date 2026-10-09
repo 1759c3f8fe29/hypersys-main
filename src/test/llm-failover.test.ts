@@ -512,3 +512,104 @@ describe("dev/prod failover drift", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Key pooling (Groq, added 2026-10-07)
+// ---------------------------------------------------------------------------
+//
+// Groq's free tier rate-limits per CREDENTIAL, not per account or per provider,
+// so an account with four keys has four independent allowances. Without rotation
+// the pool is decoration: the first 429 makes the route back off and the chain
+// eventually fails over to a different model — spending the user's answer to
+// solve an accounting problem.
+//
+// What these tests pin is the *shape* of the response to a 429, which is the
+// part that has no other safeguard: rotate the key, do not sleep, do not fail
+// over. And they pin it against the neighbouring behaviour that must NOT change —
+// a non-pooled provider still backs off on a 429, because for a single key there
+// is genuinely nothing else to try.
+//
+// Regression risk being covered: `attempt -= 1; continue` in the rotation branch
+// is a deliberate counter-fudge, and if it were removed the pool would use one
+// key per backoff slot instead of one per key — four keys would buy two tries,
+// silently, with every existing test still green.
+
+describe("a 429 rotates the key before anything else", () => {
+  /** A fetch that 429s on the first N keys and succeeds afterwards. */
+  function rotatingFetch(limitedKeys: string[]) {
+    const seen: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: { headers: Record<string, string> }) => {
+      const bearer = init.headers.Authorization.replace("Bearer ", "");
+      seen.push(bearer);
+      if (limitedKeys.includes(bearer)) {
+        return {
+          ok: false,
+          status: 429,
+          body: null,
+          text: async () => JSON.stringify({ error: { message: "Rate limit reached" } }),
+        };
+      }
+      const { response } = streamingResponse();
+      return response;
+    });
+    return { fetchMock, seen };
+  }
+
+  it("uses the next key on the same request, without sleeping", async () => {
+    const { fetchMock, seen } = rotatingFetch(["k1"]);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = callProvider(args({ key: "k1", pool: ["k1", "k2", "k3"] }));
+    // No timer advance at all: the rotation must not consume a backoff slot.
+    const result = await promise;
+
+    expect(result.upstream).toBeTruthy();
+    expect(seen).toEqual(["k1", "k2"]);
+  });
+
+  it("gives a pool of N exactly N tries, not one per backoff slot", async () => {
+    // All four rate-limited: the pool is exhausted, so it may then fall through
+    // to the backoff schedule. What must not happen is stopping after BACKOFF_MS
+    // tries when there are still unused keys.
+    const keys = ["k1", "k2", "k3", "k4"];
+    const { fetchMock, seen } = rotatingFetch(keys);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = callProvider(args({ key: "k1", pool: keys }));
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result.upstream).toBeUndefined();
+    // Every distinct key was tried before the schedule repeated one.
+    expect([...new Set(seen)]).toEqual(keys);
+  });
+
+  it("does not rotate away from a caller's own key", async () => {
+    // BYOK is one credential. Rotating through OUR pool for someone who supplied
+    // their own key would spend our quota answering their request, and it would
+    // do it invisibly — their key was accepted, the reply just came from ours.
+    const { fetchMock, seen } = rotatingFetch(["own-key"]);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = callProvider(args({ key: "own-key", pool: ["own-key"] }));
+    await vi.runAllTimersAsync();
+    await promise;
+
+    expect([...new Set(seen)]).toEqual(["own-key"]);
+  });
+
+  it("still backs off on a 429 for a single-key provider", async () => {
+    // The control, and the behaviour the pool must not have disturbed: with one
+    // key there is nothing to rotate to, so waiting is the only honest move.
+    const { fetchMock, seen } = rotatingFetch(["only"]);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = callProvider(args({ key: "only", pool: ["only"] }));
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // More attempts than keys, because the backoff schedule ran.
+    expect(seen.length).toBeGreaterThan(1);
+    expect([...new Set(seen)]).toEqual(["only"]);
+  });
+});

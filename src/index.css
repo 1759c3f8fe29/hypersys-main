@@ -105,7 +105,7 @@
      * Measured: 1.23:1 against --popover and 1.33:1 against --background (a step,
      * not a colour), with --accent-foreground at 13.9:1 on top of it.
      * src/test/theme-contract.test.ts holds both bounds. */
-    --accent: 172 66% 50%;
+    --accent: 226 22% 18%;
     --accent-foreground: 210 40% 98%;
 
     /* The second brand hue, for gradients and for arena mode's MODEL B identity.

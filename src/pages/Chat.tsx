@@ -2545,6 +2545,8 @@ export default function Chat() {
           selectedModel={selectedModel}
           onSelectModel={handleSelectModel}
           onMemoriesChanged={reloadMemories}
+          readingPrefs={readingPrefs}
+          onReadingPrefsChange={applyReadingPrefs}
           onInstructionsChanged={reloadInstructions}
         />
       )}
@@ -2769,7 +2771,7 @@ export default function Chat() {
                       {/* Each row owns its own vertical rhythm instead of the old
                           gap-y on a flex parent: Virtuoso lays items flush, so the
                           spacing must live inside each rendered row. */}
-                      <div className="pt-3 sm:pt-4 first:pt-0 last:pb-0">
+                      <div className="first:pt-0 last:pb-0 py-[var(--flyer-row-pad,0.75rem)]">
                         <ChatMessage
                           role={msg.role}
                           content={msg.content}

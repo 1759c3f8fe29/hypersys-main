@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, Sparkles, Bot, ChevronDown, ChevronUp, Search, History, Settings, Brain, Pencil, Copy, AlertTriangle, RotateCw, X, Pin, Download, FileDown } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, Sparkles, Bot, ChevronDown, ChevronUp, Search, History, Settings, Brain, Pencil, Copy, AlertTriangle, RotateCw, X, Pin, Download, FileDown, Type } from 'lucide-react';
 import { matchesConversation, countBodyHits, type SearchableMessage } from '@/lib/conversation-search';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
@@ -19,6 +19,7 @@ import { toast } from 'sonner';
 import { copyText } from '@/lib/clipboard';
 
 import { SELECTABLE_MODELS, type ModelSpec } from '@/lib/providers';
+import { DENSITIES, FONT_SCALES, WIDTHS, steppedScale, type ReadingPrefs } from '@/lib/reading-prefs';
 import { LOGO_URL } from '@/lib/assets';
 import MemoriesPanel from './MemoriesPanel';
 
@@ -116,6 +117,14 @@ interface ChatSidebarProps {
   // without waiting for a reload. Optional because the panel still owns its
   // own reads; without these the only consequence is a one-turn-stale snapshot.
   onMemoriesChanged?: () => void;
+  /**
+   * How the conversation is displayed. The values live in Chat.tsx (they apply to
+   * the scroll surface, which it owns) but the control belongs here, next to the
+   * other display settings — a reading preference is not a per-conversation
+   * decision and does not belong in the composer.
+   */
+  readingPrefs?: ReadingPrefs;
+  onReadingPrefsChange?: (prefs: ReadingPrefs) => void;
   onInstructionsChanged?: () => void;
 }
 
@@ -178,7 +187,7 @@ export default function ChatSidebar({
   onTogglePinConversation, onExportConversation,
   fetchConversationBodies,
   selectedModel, onSelectModel,
-  onMemoriesChanged, onInstructionsChanged,
+  onMemoriesChanged, onInstructionsChanged, readingPrefs, onReadingPrefsChange,
 }: ChatSidebarProps) {
   const { user, signOut } = useAuth();
   const [showAllModels, setShowAllModels] = useState(false);
@@ -340,6 +349,7 @@ export default function ChatSidebar({
 
   // Settings State for API Keys (NVIDIA + Mistral only)
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [displayOpen, setDisplayOpen] = useState(false);
   // Memories + custom instructions panel (Part F.2/F.3). Self-contained — owns
   // its Firestore reads via useAuth — so no extra prop drilling here.
   const [memoriesOpen, setMemoriesOpen] = useState(false);
@@ -1033,10 +1043,113 @@ export default function ChatSidebar({
               <button onClick={() => setSettingsOpen(true)} className="p-2 rounded-lg hover:bg-sidebar-accent text-sidebar-foreground/60 hover:text-sidebar-foreground transition-all duration-200" title="API Settings">
                 <Settings className="w-4 h-4 hover:rotate-45 transition-transform" />
               </button>
+              <button
+                onClick={() => setDisplayOpen((v) => !v)}
+                aria-expanded={displayOpen}
+                aria-label="Display settings"
+                className={`p-2 rounded-lg transition-all duration-200 ${displayOpen ? 'bg-sidebar-accent text-sidebar-foreground' : 'hover:bg-sidebar-accent text-sidebar-foreground/60 hover:text-sidebar-foreground'}`}
+                title="Display settings"
+              >
+                <Type className="w-4 h-4" />
+              </button>
               <button onClick={() => signOut()} className="p-2 rounded-lg hover:bg-destructive/20 text-sidebar-foreground/60 hover:text-destructive transition-colors" title="Sign out">
                 <LogOut className="w-4 h-4" />
               </button>
             </div>
+
+            {/* Display settings.
+                Inline rather than a Dialog: these controls change the page behind
+                them, and the point is to see the effect while choosing. A modal
+                would cover the exact thing being adjusted. */}
+            <AnimatePresence>
+              {displayOpen && readingPrefs && onReadingPrefsChange && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.18, ease: 'easeOut' }}
+                  className="overflow-hidden border-t border-sidebar-border"
+                >
+                  <div className="px-3 py-3 space-y-3">
+                    {/* Text size: four fixed steps rather than a slider, so the
+                        control can always return to the state it is showing. */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] uppercase tracking-wider text-sidebar-foreground/45 w-14 shrink-0">Text</span>
+                      <button
+                        onClick={() => onReadingPrefsChange({ ...readingPrefs, fontScale: steppedScale(readingPrefs.fontScale, -1) })}
+                        disabled={readingPrefs.fontScale === FONT_SCALES[0]}
+                        aria-label="Smaller text"
+                        className="w-6 h-6 rounded-md bg-sidebar-accent hover:bg-sidebar-accent/70 disabled:opacity-30 disabled:hover:bg-sidebar-accent text-sidebar-foreground text-xs font-bold transition-colors"
+                      >A</button>
+                      <div className="flex-1 flex items-center justify-center gap-1.5">
+                        {FONT_SCALES.map((scale) => (
+                          <button
+                            key={scale}
+                            onClick={() => onReadingPrefsChange({ ...readingPrefs, fontScale: scale })}
+                            aria-label={`Text size ${Math.round(scale * 100)}%`}
+                            aria-pressed={readingPrefs.fontScale === scale}
+                            className={`h-1.5 rounded-full transition-all ${readingPrefs.fontScale === scale ? 'w-5 bg-primary' : 'w-1.5 bg-sidebar-foreground/25 hover:bg-sidebar-foreground/45'}`}
+                          />
+                        ))}
+                      </div>
+                      <button
+                        onClick={() => onReadingPrefsChange({ ...readingPrefs, fontScale: steppedScale(readingPrefs.fontScale, 1) })}
+                        disabled={readingPrefs.fontScale === FONT_SCALES[FONT_SCALES.length - 1]}
+                        aria-label="Larger text"
+                        className="w-6 h-6 rounded-md bg-sidebar-accent hover:bg-sidebar-accent/70 disabled:opacity-30 disabled:hover:bg-sidebar-accent text-sidebar-foreground text-base font-bold transition-colors leading-none"
+                      >A</button>
+                    </div>
+
+                    {/* Column width. Named by what it does to the reading line,
+                        not by a pixel count — nobody picks 960px on purpose. */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] uppercase tracking-wider text-sidebar-foreground/45 w-14 shrink-0">Width</span>
+                      <div className="flex-1 grid grid-cols-3 gap-1">
+                        {WIDTHS.map((w, i) => (
+                          <button
+                            key={w}
+                            onClick={() => onReadingPrefsChange({ ...readingPrefs, width: w })}
+                            aria-pressed={readingPrefs.width === w}
+                            className={`py-1 rounded-md text-[11px] font-medium transition-colors ${readingPrefs.width === w ? 'bg-primary/20 text-primary border border-primary/40' : 'bg-sidebar-accent/60 text-sidebar-foreground/55 hover:text-sidebar-foreground border border-transparent'}`}
+                          >
+                            {['Narrow', 'Default', 'Wide'][i]}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Density: the same content with less air, for a small
+                        screen or a long debugging thread. */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] uppercase tracking-wider text-sidebar-foreground/45 w-14 shrink-0">Rows</span>
+                      <div className="flex-1 grid grid-cols-2 gap-1">
+                        {DENSITIES.map((d) => (
+                          <button
+                            key={d}
+                            onClick={() => onReadingPrefsChange({ ...readingPrefs, density: d })}
+                            aria-pressed={readingPrefs.density === d}
+                            className={`py-1 rounded-md text-[11px] font-medium capitalize transition-colors ${readingPrefs.density === d ? 'bg-primary/20 text-primary border border-primary/40' : 'bg-sidebar-accent/60 text-sidebar-foreground/55 hover:text-sidebar-foreground border border-transparent'}`}
+                          >
+                            {d}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => onReadingPrefsChange({ ...readingPrefs, timestamps: !readingPrefs.timestamps })}
+                      aria-pressed={readingPrefs.timestamps}
+                      className="w-full flex items-center justify-between px-2 py-1.5 rounded-md bg-sidebar-accent/60 hover:bg-sidebar-accent transition-colors"
+                    >
+                      <span className="text-[11px] font-medium text-sidebar-foreground/70">Show timestamps</span>
+                      <span className={`w-7 h-4 rounded-full transition-colors relative ${readingPrefs.timestamps ? 'bg-primary' : 'bg-sidebar-foreground/25'}`}>
+                        <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${readingPrefs.timestamps ? 'left-3.5' : 'left-0.5'}`} />
+                      </span>
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         </div>
       </motion.aside>

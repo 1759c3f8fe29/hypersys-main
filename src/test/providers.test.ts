@@ -116,14 +116,39 @@ describe("model catalogue", () => {
   // test defends is unchanged and is why it is written out rather than derived:
   // the primary must be the measured 2.9s leg, and the slow NIM leg must be
   // LAST, because only the final position gets the isLastRoute relaxation.
-  it("keeps the default model's chain: GLM primary, NIM legs behind it", () => {
+  it("keeps the default model's chain: the default's own model first, unprobed legs last", () => {
+    // RE-PINNED 2026-10-07 twice: for the Groq pool, then for the default moving
+    // onto Qwen 3.8 27B ("make the default model qwen 3.8 27 b from groq").
+    // The invariant the test defends is unchanged, and it is why the list is
+    // written out rather than derived: the primary is the model the DEFAULT runs
+    // on — 190ms with a tools payload, the fastest measured leg in the file —
+    // and the unprobed NVIDIA ids sit at the END, so a healthy request never
+    // lands on an id nobody has completed with.
+    //
+    // Also pinned here: Qwen is not a second picker entry. Two entries leading
+    // with one upstream id is the alias bug the primaries-unique guard catches,
+    // and the right fix is that the default owns the leg on its own.
     const spec = getModel(DEFAULT_MODEL_ID)!;
     expect(spec.routes.map((r) => r.modelId)).toEqual([
+      "qwen/qwen3.8-27b",
+      "openai/gpt-oss-120b",
       "z-ai/glm-5.3-free",
       "z-ai/glm-5.3-flash",
       "deepseek-ai/deepseek-v4.1-flash",
     ]);
-    expect(spec.routes.map((r) => r.provider)).toEqual(["tokenrouter", "nvidia", "nvidia"]);
+    expect(spec.routes.map((r) => r.provider)).toEqual([
+      "groq", "groq", "tokenrouter", "nvidia", "nvidia",
+    ]);
+  });
+
+  it("sends a cheap, tool-capable leg first on the pooled provider", () => {
+    // Ordering inside the chain is a latency contract, not a preference. If a
+    // future edit swaps the Groq legs, the 190ms tool round-trip becomes a
+    // 763ms one on the default model's every failover.
+    const spec = getModel(DEFAULT_MODEL_ID)!;
+    const groqLegs = spec.routes.filter((r) => r.provider === "groq");
+    expect(groqLegs.length).toBeGreaterThan(0);
+    expect(groqLegs[0].modelId).toBe("qwen/qwen3.8-27b");
   });
 
   it("does not route the default model through a retired V4 leg", () => {

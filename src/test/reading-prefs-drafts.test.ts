@@ -152,5 +152,9 @@ describe("reading preferences", () => {
     expect(style["--flyer-content-width"]).toBe(`${WIDTHS[2]}px`);
     expect(style["--flyer-row-gap"]).toBe("0.25rem");
     expect(readingPrefsStyle(DEFAULT_READING_PREFS)["--flyer-row-gap"]).toBe("0.75rem");
+    // The row padding travels with the density, so a message row can be driven
+    // straight from the custom property rather than mirroring the mapping.
+    expect(style["--flyer-row-pad"]).toBe("0.25rem");
+    expect(readingPrefsStyle(DEFAULT_READING_PREFS)["--flyer-row-pad"]).toBe("0.75rem");
   });
 });
