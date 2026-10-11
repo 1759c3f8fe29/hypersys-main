@@ -10,7 +10,7 @@
 
 import { applyGuard } from "./_guard.js";
 import { applyMeter } from "./_meter.js";
-import { runSearch } from "./_search-providers.js";
+import { runImageSearch, runSearch } from "./_search-providers.js";
 
 export default async function handler(req, res) {
   if (applyGuard(req, res)) return;
@@ -21,6 +21,11 @@ export default async function handler(req, res) {
 
   const body = typeof req.body === "string" ? safeParse(req.body) : req.body || {};
   const { query, num } = body;
+  // `mode: "images"` routes to the image tier; anything else is a web search. Unknown
+  // values fall back to "web" rather than erroring, so a typo degrades instead of
+  // 400ing. The two tiers answer with different shapes (`results` vs `images`), which
+  // is why the cache check below branches too.
+  const mode = body.mode === "images" ? "images" : "web";
   if (!query || typeof query !== "string") {
     res.status(400).json({ error: "`query` string is required" });
     return;
@@ -33,11 +38,18 @@ export default async function handler(req, res) {
   // Meter AFTER validation so 405/400s never burn quota.
   if (await applyMeter(req, res)) return;
 
-  const payload = await runSearch(query, num, process.env, (msg) => console.warn(msg));
+  const payload =
+    mode === "images"
+      ? await runImageSearch(query, num, process.env, (msg) => console.warn(msg))
+      : await runSearch(query, num, process.env, (msg) => console.warn(msg));
 
   // Cache only a real answer. Caching a failure would pin a transient rate limit in
   // front of every user of that query for five minutes.
-  if (payload.results.length || payload.answerBox?.answer) {
+  const answered =
+    mode === "images"
+      ? Array.isArray(payload.images) && payload.images.length > 0
+      : payload.results.length || payload.answerBox?.answer;
+  if (answered) {
     res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
   }
   res.status(200).json(payload);

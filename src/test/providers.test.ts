@@ -57,8 +57,21 @@ describe("model catalogue", () => {
   // walk of the catalogue because the seeded control proves the matcher trips
   // on the original shape of the bug.
   it("never points two models at the same upstream model id as primary", () => {
+    // OVER SELECTABLE_MODELS, NOT MODELS — a narrowing made 2026-10-09, and it is
+    // a sharpening of the rule rather than a loosening of it.
+    //
+    // The rule is "the picker must not offer two names for one set of weights".
+    // A hidden entry is not in the picker: it exists only so that `getModel`
+    // still resolves an id that older replies carry, which is what keeps their
+    // byline readable. It cannot create the confusion this guards against,
+    // because nobody can select it.
+    //
+    // Asserting over MODELS conflated the two and forced a choice between
+    // deleting a retired entry (losing every byline written against it) and
+    // leaving a real alias in the picker. `SELECTABLE_MODELS` is the picker's own
+    // source, so this now asks the question the rule is actually about.
     const owner = new Map<string, string>();
-    for (const model of MODELS) {
+    for (const model of SELECTABLE_MODELS) {
       const route = model.routes[0];
       const key = `${route.provider}:${route.modelId}`;
       const existing = owner.get(key);
@@ -73,8 +86,8 @@ describe("model catalogue", () => {
     // control below passes on its own) — found by mutation-check on
     // 2026-09-06, where `for (const model of [])` survived 15/15. A passing
     // run has all primaries distinct, so owner holds one claim per model.
-    expect(owner.size, "the guard must walk every model in the catalogue").toBe(
-      MODELS.length,
+    expect(owner.size, "the guard must walk every model in the picker").toBe(
+      SELECTABLE_MODELS.length,
     );
     // CONTROL: this matcher has teeth. A catalogue seeded with the original
     // shape of the bug — two weights-named entries sharing one primary — must
@@ -110,45 +123,78 @@ describe("model catalogue", () => {
   // cap, and its 144s cold start needs it).
   //
   // RE-PINNED 2026-10-04, maintainer-directed: "remove v4 as they gone use ds
-  // v4.1 or glm 5.3 flash or glm 5.3 from nim nvidia". The old last leg
+  // v4.1 or Flyer or glm 5.3 from nim nvidia". The old last leg
   // (deepseek-ai/deepseek-v4-flash-0731) is now hidden as dead, and the NVIDIA
   // half of the chain is rebuilt from the three ids named. The invariant the
   // test defends is unchanged and is why it is written out rather than derived:
   // the primary must be the measured 2.9s leg, and the slow NIM leg must be
   // LAST, because only the final position gets the isLastRoute relaxation.
-  it("keeps the default model's chain: the default's own model first, unprobed legs last", () => {
-    // RE-PINNED 2026-10-07 twice: for the Groq pool, then for the default moving
-    // onto Qwen 3.8 27B ("make the default model qwen 3.8 27 b from groq").
-    // The invariant the test defends is unchanged, and it is why the list is
-    // written out rather than derived: the primary is the model the DEFAULT runs
-    // on — 190ms with a tools payload, the fastest measured leg in the file —
-    // and the unprobed NVIDIA ids sit at the END, so a healthy request never
-    // lands on an id nobody has completed with.
+  //
+  // RE-PINNED 2026-10-09, maintainer-directed: "make glm 5.3 as default model
+  // and make qwen 3.8 27 as second fall back" (confirmed: full GLM 5.3 on
+  // NVIDIA, z-ai/glm-5.3, not the free-tier endpoint). The chain did not change
+  // shape — the ORDER did: GLM 5.3 leads, Qwen 3.8 27B is the second leg, and
+  // everything else keeps its position behind them. The standalone "GLM 5.3"
+  // picker entry was deleted in the same edit: two entries leading with one
+  // upstream id is the alias bug the primaries-unique guard catches, and the
+  // default owns the leg on its own.
+  //
+  // The invariant the test defends is unchanged, and it is why the list is
+  // written out rather than derived: leg 0 is the model the DEFAULT runs on,
+  // the measured-fast Groq leg sits SECOND so a healthy primary downgrades to
+  // a *faster* insurance leg, and the unprobed NVIDIA ids sit at the END, so a
+  // healthy request never lands on an id nobody has completed with. The slow
+  // leg stays LAST: only the final position gets the isLastRoute relaxation
+  // past the 22s first-byte cap.
+  it("keeps the default model's chain in measured order", () => {
+    // PINNED FROM MEASUREMENT (scripts/probe-default-candidates.mjs, 2026-10-09,
+    // streamed TTFB with a real tools payload, three runs each):
     //
-    // Also pinned here: Qwen is not a second picker entry. Two entries leading
-    // with one upstream id is the alias bug the primaries-unique guard catches,
-    // and the right fix is that the default owns the leg on its own.
+    //   qwen/qwen3.8-27b           217  219  229 ms
+    //   z-ai/glm-5.3-flash         815  550  626 ms
+    //   z-ai/glm-5.3            49021 21338 21361 ms   (1.3-1.7s warm)
+    //   deepseek-ai/…-v4.1-flash 87914 53903 91202 ms
+    //
+    // Written out rather than derived, because the ORDER is the invariant and a
+    // derived assertion would re-derive whatever order the file happens to have.
+    // What it defends: the first leg must be one that is never the problem. The
+    // previous order led with z-ai/glm-5.3, whose best cold TTFB (21.3s) sits
+    // under the server's 22s non-final cap by 700ms — so the default model was
+    // one jitter away from being aborted on every cold start.
     const spec = getModel(DEFAULT_MODEL_ID)!;
     expect(spec.routes.map((r) => r.modelId)).toEqual([
+      "z-ai/glm-5.3-flash",
       "qwen/qwen3.8-27b",
       "openai/gpt-oss-120b",
-      "z-ai/glm-5.3-free",
-      "z-ai/glm-5.3-flash",
+      "z-ai/glm-5.3",
       "deepseek-ai/deepseek-v4.1-flash",
-    ]);
-    expect(spec.routes.map((r) => r.provider)).toEqual([
-      "groq", "groq", "tokenrouter", "nvidia", "nvidia",
     ]);
   });
 
-  it("sends a cheap, tool-capable leg first on the pooled provider", () => {
-    // Ordering inside the chain is a latency contract, not a preference. If a
-    // future edit swaps the Groq legs, the 190ms tool round-trip becomes a
-    // 763ms one on the default model's every failover.
+  it("never puts a route slower than the first-byte cap anywhere but last", () => {
+    // The structural rule behind the order above, and the one that matters most.
+    // A non-final route is held to FIRST_BYTE_TIMEOUT_MS (22s) server-side; only
+    // the last position gets the isLastRoute relaxation. deepseek-v4.1-flash
+    // measured 54-91s, so in any other position it would be aborted before it
+    // ever answered — present in the chain, and unable to contribute.
     const spec = getModel(DEFAULT_MODEL_ID)!;
-    const groqLegs = spec.routes.filter((r) => r.provider === "groq");
-    expect(groqLegs.length).toBeGreaterThan(0);
-    expect(groqLegs[0].modelId).toBe("qwen/qwen3.8-27b");
+    const SLOWER_THAN_THE_CAP = ["deepseek-ai/deepseek-v4.1-flash"];
+    for (const slow of SLOWER_THAN_THE_CAP) {
+      const at = spec.routes.findIndex((r) => r.modelId === slow);
+      if (at === -1) continue;
+      expect(at, `${slow} is slower than the non-final cap and must be last`).toBe(
+        spec.routes.length - 1,
+      );
+    }
+  });
+
+  it("leads with a leg that accepts tools", () => {
+    // The default model carries the agent loop. A first leg that rejects a tools
+    // payload makes every tool-using turn start by failing over, which is the
+    // reason deepseek-v4-flash-0731 could never lead this chain.
+    const spec = getModel(DEFAULT_MODEL_ID)!;
+    expect(spec.supportsTools).toBe(true);
+    expect(spec.routes[0].modelId).toBe("z-ai/glm-5.3-flash");
   });
 
   it("does not route the default model through a retired V4 leg", () => {
@@ -186,9 +232,11 @@ describe("model catalogue", () => {
   // exactly-one-route guard misread the direction and is gone; this replaces
   // it: primaries stay unique, and the chains this catalogue deliberately
   // carries (Flyer default, Flyer Vision, hidden Flyer Mini) keep working.
-  it("gives every model a primary no other entry claims as its own primary", () => {
+  it("gives every selectable model a primary no other selectable entry claims", () => {
+    // Same narrowing and same reasoning as the test above: the uniqueness rule is
+    // a property of the picker, and a hidden entry is not in it.
     const owner = new Map<string, string>();
-    for (const model of MODELS) {
+    for (const model of SELECTABLE_MODELS) {
       const key = `${model.routes[0].provider}:${model.routes[0].modelId}`;
       const existing = owner.get(key);
       expect(
@@ -197,7 +245,7 @@ describe("model catalogue", () => {
       ).toBe(model.id);
       owner.set(key, model.id);
     }
-    expect(owner.size).toBe(MODELS.length);
+    expect(owner.size).toBe(SELECTABLE_MODELS.length);
   });
 
   it("gives every model the presentation fields the picker needs", () => {

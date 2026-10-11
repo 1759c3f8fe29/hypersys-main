@@ -21,88 +21,18 @@ import { applyGuard } from "./_guard.js";
 import { applyMeter } from "./_meter.js";
 import { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES, GONE_STATUSES } from "./_failover.js";
 import { sanitiseMessages } from "./_messages.js";
+import { PROVIDER_ENDPOINTS, routePayloadFor } from "./_providers.js";
 
 // Keep in step with PROVIDERS in src/lib/providers.ts. Server-side only, so no
 // VITE_-prefixed key is read here by preference — those get inlined into the
 // browser bundle and are only tolerated as a legacy fallback.
-const PROVIDER_ENDPOINTS = {
-  nvidia: {
-    url: "https://integrate.api.nvidia.com/v1/chat/completions",
-    envKeys: ["NVIDIA_API_KEY", "VITE_NVIDIA_API_KEY"],
-    byokHeader: "x-nvidia-api-key",
-    supportsTools: true,
-  },
-  mistral: {
-    url: "https://api.mistral.ai/v1/chat/completions",
-    envKeys: ["MISTRAL_API_KEY", "VITE_MISTRAL_API_KEY"],
-    byokHeader: "x-mistral-api-key",
-    supportsTools: true,
-  },
-  // TokenRouter: an OpenAI-compatible aggregate of hosted open models. Probed
-  // live on 2026-09-07 — the /v1/chat/completions surface streams glm-5.3-free
-  // in ~2.9s and accepts a tools payload (2.2s with tools), which is what
-  // qualifies it to carry the default model. An Anthropic /v1/messages surface
-  // also exists (1.3s in the same probe); we use the OpenAI one so the single
-  // request-shape and SSE parser in this file cover it with no translation.
-  tokenrouter: {
-    url: "https://api.tokenrouter.com/v1/chat/completions",
-    envKeys: ["TOKENROUTER_API_KEY", "VITE_TOKENROUTER_API_KEY"],
-    byokHeader: "x-tokenrouter-api-key",
-    supportsTools: true,
-  },
-  // Groq Cloud (OpenAI-compatible). Added 2026-10-07.
-  //
-  // THE KEY POOL IS THE POINT. Groq's free tier rate-limits per key, and this
-  // account has four of them, so `GROQ_API_KEYS` is a comma-separated list and
-  // `resolveKey` hands back the whole pool. A 429 rotates to the next key and
-  // retries the SAME provider before the chain moves on: the limit is a property
-  // of the key, not of the provider, and failing over to another provider throws
-  // away a working model to solve an accounting problem.
-  //
-  // `GROQ_API_KEY` stays as a single-key fallback so an existing deployment that
-  // set one name keeps working. No VITE_ variant: these are server-side secrets
-  // and a VITE_ prefix would inline them into the browser bundle.
-  groq: {
-    url: "https://api.groq.com/openai/v1/chat/completions",
-    envKeys: ["GROQ_API_KEYS", "GROQ_API_KEY"],
-    byokHeader: "x-groq-api-key",
-    supportsTools: true,
-    keyPool: true,
-  },
-  // The keyless final fallback, and — since api/pollinations.js was deleted — the
-  // only way into Pollinations on this surface.
-  //
-  // That file was a second, standalone POST /api/pollinations handler. It had
-  // ZERO callers (the client's only api paths are /api/llm, /api/nvidia,
-  // /api/mistral, /api/ocr and /api/search, none of them built dynamically), and
-  // it was the one endpoint here that did not import _meter.js — which is the
-  // sole route to _auth.js's verifyRequest. Its own header claimed it "stays
-  // behind applyGuard's Origin allowlist", but _guard.js documents the opposite
-  // for exactly the caller that matters: a request with no Origin header is
-  // "deliberately let through for _auth.js to attribute and meter". So a bare
-  // curl reached the upstream fetch with nothing in between — an open,
-  // unauthenticated, unmetered streaming LLM relay on the deployed origin.
-  //
-  // Worth recording WHY, because it was not an oversight: the handler wanted to
-  // be authenticated but not charged against the daily allowance (correct — the
-  // safety net must not be taken away at the moment it is needed, and Pollinations
-  // costs us nothing). applyMeter cannot express that; it verifies AND consumes,
-  // and its only bypass is opts.byokHeaders. Faced with an API that offered
-  // "authenticated and metered" or nothing, the file took nothing — and lost
-  // authentication as collateral damage. If a keyless route ever does need its own
-  // handler, add an explicit skip-quota option to applyMeter rather than dropping
-  // the module: the two properties are separable and the API should say so.
-  //
-  // Nothing was lost by deleting it. This route serves `flyer-free` through the
-  // guarded, metered chain below, and verify-models now probes it live (it
-  // answered in 5300ms), so the fallback is exercised rather than assumed.
-  pollinations: {
-    url: "https://text.pollinations.ai/openai",
-    envKeys: [],
-    keyless: true,
-    supportsTools: false,
-  },
-};
+// The provider table and the tools gate now live in api/_providers.js, imported
+// above. They used to be declared here and again as DEV_PROVIDER_ENDPOINTS in
+// vite.config.ts, and this file's header promised the two would change together.
+// Twice they did not: tokenrouter was added here and not there (2026-09-08), and
+// the dev copy never carried `supportsTools` while `proxyLlm` never read `tools`
+// off the body at all — so the agent loop was silently dead in `npm run dev`.
+// One table cannot drift from itself.
 
 // The three failure-classification sets now live in ./_failover.js — one
 // definition, imported by this file AND by src/lib/providers.ts, which used to
@@ -597,11 +527,10 @@ export default async function handler(req, res) {
     // Only forward tools to a provider whose OpenAI-compatible surface accepts
     // them. Pollinations does not, and sending tools there returns a 400 that
     // would burn the last fallback in the chain.
-    const routePayload = { ...payload };
-    if (Array.isArray(tools) && tools.length > 0 && cfg.supportsTools) {
-      routePayload.tools = tools;
-      if (tool_choice) routePayload.tool_choice = tool_choice;
-    }
+    //
+    // Shared with the dev proxy rather than written inline, because an inline
+    // copy of this rule is what left `npm run dev` forwarding no tools at all.
+    const routePayload = routePayloadFor(cfg, payload, tools, tool_choice);
 
     const result = await callProvider({
       cfg,

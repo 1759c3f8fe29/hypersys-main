@@ -206,6 +206,114 @@ export async function searchSerpApi(query, num, key) {
   }
 }
 
+// ── Image search (SerpApi google_images; needs a key) ──────────────────────
+
+/**
+ * Allow only http(s) URLs through. Every field that becomes an `src` or `href` in
+ * the gallery passes this first.
+ *
+ * The rows come from a third-party index, i.e. from content the app did not write,
+ * so a `javascript:` thumbnail is a string that would execute if it reached an
+ * `<img src>` or an anchor `href` unchecked. `data:` is refused for the same reason
+ * plus payload smuggling. The refusal is a drop, not a rewrite: a row whose image is
+ * not a real http(s) URL is not shown at all.
+ */
+export function safeHttpUrl(u) {
+  const s = String(u ?? "").trim();
+  return /^https?:\/\//i.test(s) ? s : "";
+}
+
+const clampImages = (num) => Math.min(Math.max(Number(num) || 12, 1), 20);
+
+/**
+ * Normalise one `images_results` row, keeping the provider's own URLs.
+ *
+ * `imageUrl` (the full `original`) and `thumbnailUrl` are deliberately distinct: the
+ * grid loads the thumbnail, which is small and the cheapest thing to serve, and the
+ * lightbox opens the original. Neither is constructed or guessed — a row with no
+ * provider image is dropped, never backfilled with a placeholder, because a
+ * substituted image is a fabricated result (spec §5.3, Test H).
+ */
+function imageRow(r) {
+  return {
+    title: r.title || "",
+    imageUrl: safeHttpUrl(r.original),
+    thumbnailUrl: safeHttpUrl(r.thumbnail),
+    pageUrl: safeHttpUrl(r.link),
+    source: r.source || null,
+    width: r.original_width || r.thumbnail_width || null,
+    height: r.original_height || r.thumbnail_height || null,
+  };
+}
+
+/**
+ * Drop images with no real thumbnail (unrenderable in a grid) and images repeating
+ * one already kept. Deduplication is by image identity — the full URL when present,
+ * otherwise the thumbnail — because a search legitimately returns the same picture
+ * from several pages and a gallery showing it five times looks broken.
+ */
+export function condenseImages(rows, limit = 12) {
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    if (!r || !r.thumbnailUrl) continue;
+    const key = r.imageUrl || r.thumbnailUrl;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * @returns {{ok: true, payload: object} | {ok: false, reason: string}}
+ * Never throws, same contract as searchSerpApi: the route degrades, it does not 500.
+ */
+export async function searchSerpApiImages(query, num, key) {
+  try {
+    const params = new URLSearchParams({
+      engine: "google_images",
+      q: query,
+      num: String(clampImages(num)),
+      api_key: key,
+    });
+    const res = await fetchWithTimeout(`https://serpapi.com/search.json?${params}`);
+    if (!res.ok) return { ok: false, reason: `serpapi_images_http_${res.status}` };
+    const data = await res.json();
+    if (data.error) return { ok: false, reason: "serpapi_images_error" };
+
+    const images = condenseImages((data.images_results || []).map(imageRow));
+    // A 200 carrying no usable image is a failure to find, not an empty gallery that
+    // renders as a blank panel.
+    if (!images.length) return { ok: false, reason: "serpapi_images_zero_results" };
+    return { ok: true, payload: { query, images } };
+  } catch {
+    return { ok: false, reason: "serpapi_images_fetch_failed" };
+  }
+}
+
+/**
+ * The image-search chain. One tier, honestly.
+ *
+ * Unlike text search there is no keyless fallback: Wikipedia and Stack Exchange are
+ * text indexes and DuckDuckGo lite is scraped HTML with no image rows, so inventing a
+ * "degraded" image tier would mean inventing images. With no key the correct answer is
+ * a named configuration error the UI turns into a capability message — never an empty
+ * success and never a generated picture standing in for a found one.
+ */
+export async function runImageSearch(query, num, env, log = () => {}) {
+  const key = serpApiKey(env);
+  if (!key) {
+    log("[images] SERPAPI_API_KEY is not configured — image search has no keyless fallback.");
+    return { query, images: [], error: "image_search_requires_serpapi_key" };
+  }
+  const serp = await searchSerpApiImages(query, num, key);
+  if (serp.ok) return serp.payload;
+  log(`[images] SerpApi image search unavailable (${serp.reason}).`);
+  return { query, images: [], error: serp.reason };
+}
+
 // ── DuckDuckGo lite (opportunistic; no key) ────────────────────────────────
 
 /**

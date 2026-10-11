@@ -60,6 +60,16 @@ export const PROVIDERS = [
     chatUrl: "https://api.mistral.ai/v1/chat/completions",
     envKeys: ["MISTRAL_API_KEY", "VITE_MISTRAL_API_KEY"],
   },
+  // Added 2026-10-07 alongside the Groq catalogue entries, retro-fitted here
+  // 2026-10-09: without it, every Groq leg printed "provider unavailable" and
+  // counted as unchecked — invisible coverage for the legs the default model's
+  // chain leans on hardest (qwen3.8-27b is its second route).
+  {
+    id: "groq",
+    listUrl: "https://api.groq.com/openai/v1/models",
+    chatUrl: "https://api.groq.com/openai/v1/chat/completions",
+    envKeys: ["GROQ_API_KEYS", "GROQ_API_KEY"],
+  },
   // Pollinations is keyless and has no OpenAI-style /models list endpoint, so it
   // cannot be catalogue-checked here. It IS answer-checked — see
   // KEYLESS_PROVIDERS below.
@@ -85,7 +95,15 @@ export const KEYLESS_PROVIDERS = {
 };
 
 export function keyFor(provider) {
-  const raw = provider.envKeys.map((k) => env[k]).find(Boolean);
+  // GROQ_API_KEYS is a comma-separated POOL (the dev router rotates to the next
+  // key on a 429 rather than failing the chain — see DEV_PROVIDER_ENDPOINTS in
+  // vite.config.ts). A probe needs exactly one key, so take the head of the
+  // list; single-key values are unaffected by the split.
+  const raw = provider.envKeys
+    .map((k) => env[k])
+    .find(Boolean)
+    ?.split(",")[0]
+    .trim();
   if (!raw || raw.startsWith("your-")) return null;
   return raw;
 }
@@ -125,7 +143,17 @@ function parseCatalogue() {
   // Each catalogue entry opens at two-space indent and closes at two-space
   // indent. Nested objects (route entries) are indented deeper, so the lazy
   // block can't stop on them.
-  const blockRe = /\n  \{\n\s*id:\s*"([^"]+)",([\s\S]*?)\n  \},/g;
+  //
+  // FIXED 2026-10-09: the opening pattern used to be `\n  {\n\s*id:` — which
+  // silently skipped ANY entry whose `id` is preceded by comment lines, and the
+  // worst victim was the DEFAULT entry (GLM 5.3 carries a long comment
+  // block before its id). Every run since those comments were added had been
+  // verifying the catalogue minus the default's chain, then reporting the
+  // default's own legs (z-ai/glm-5.3 among them) under "strong models NVIDIA
+  // serves that we do NOT ship" — a false negative on the single entry whose
+  // health matters most. The opening now tolerates comment lines between `{`
+  // and `id:`.
+  const blockRe = /\n  \{\n(?:[ \t]*\/\/[^\n]*\n)*\s*id:\s*"([^"]+)",([\s\S]*?)\n  \},/g;
   const routeRe = /\{\s*provider:\s*"(\w+)",\s*modelId:\s*"([^"]+)"\s*\}/g;
 
   for (let b = blockRe.exec(modelsSrc); b; b = blockRe.exec(modelsSrc)) {

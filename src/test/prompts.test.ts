@@ -265,8 +265,8 @@ describe('the response spec fights verbosity', () => {
   // default, but it is now qualified in the same sentence rather than three
   // paragraphs away, because the unqualified version is what produced the essays.
   it('keeps prose as the default without letting it mean long', () => {
-    expect(instant).toContain('Prose by default, but SHORT prose');
-    expect(instant).toMatch(/a one-line answer beats both a list and a paragraph/);
+    expect(instant).toContain('Prose for explanation, but SHORT prose');
+    expect(instant).toMatch(/a list of four short items is a short reply/i);
     // Dropped deliberately: "Do not use incomplete sentences or abbreviations that
     // make writing dense and cramped" read as an instruction to pad.
     expect(instant).not.toContain('dense and cramped');
@@ -322,7 +322,11 @@ describe('the response spec fights verbosity', () => {
     expect(thinking).toContain('"under 120 words" default does NOT apply');
     expect(thinking).toContain('stop at the last useful sentence');
     expect(thinking).toContain('ban on a closing summary');
-    expect(thinking).toContain('headings only in long, multi-section answers');
+    // The heading ban is gone from the shared spec (headings are now encouraged
+    // even on brief answers), so there is nothing left to retract about them.
+    // What this asserts instead is the reverse: the structure rules reach the
+    // thinking prompt like every other rule in the shared spec.
+    expect(thinking).toContain('whenever the answer has genuinely distinct sections');
     // The retraction must not become a licence to pad, which is the failure mode
     // that made the instant prompt boring in the first place.
     expect(thinking).toContain('raises is the ceiling, not the standard');
@@ -334,6 +338,57 @@ describe('the response spec fights verbosity', () => {
   it('leaves the short default in force on ordinary turns', () => {
     expect(instant).not.toContain('does NOT apply');
     expect(instant).not.toContain('DEEPTHINK MODE');
+  });
+});
+
+// The report this block answers is the mirror of the one above: the earlier
+// anti-verbosity pass had banned so much structure that answers came back as
+// flat paragraphs. These assertions pin the structure back on, and pin that the
+// length ceiling stayed on with it, because the failure mode of "add headings
+// and emoji" is a padded answer and the failure mode of "be short" is a wall of
+// plain prose. Both halves have to hold at once, which is the tension this
+// section lives inside.
+describe('the spec asks for structure, and still for brevity', () => {
+  const instant = buildFlyerSystemPrompt(base);
+  const thinking = buildFlyerThinkingPrompt(base);
+  const vision = buildVisionSystemPrompt(base);
+
+  it('asks for headings when the answer has sections', () => {
+    expect(instant).toMatch(/headings \(## and ###\) whenever the answer has genuinely distinct sections/i);
+    // The one case that must stay flat, or a greeting grows a table of contents.
+    expect(instant).toMatch(/skip them on a one-line answer/i);
+  });
+
+  it('asks for lists by shape, numbered for sequences', () => {
+    expect(instant).toMatch(/numbered lists \(1\. 2\. 3\.\) for anything sequential/i);
+    expect(instant).toContain('Use bullets (-) for unordered sets');
+    expect(instant).toMatch(/\*\*bold\*\* for the key term/);
+  });
+
+  it('allows emoji, sparingly, and no longer bans them', () => {
+    expect(instant).toContain('Use an emoji where it earns its place');
+    expect(instant).toMatch(/one per line at most/i);
+    // The old absolute. It is the rule that produced "no emoji at all", and it
+    // must not survive beside the new one.
+    expect(instant).not.toContain('Do NOT use emoji unless the user does first');
+  });
+
+  it('keeps the length ceiling under the structure rules', () => {
+    // CONTROL: structure is not an invitation to pad. If a later edit relaxes the
+    // ceiling while adding structure, this is the assertion that notices.
+    expect(instant).toContain('under 120 words');
+    expect(instant).toContain('Length is not effort');
+  });
+
+  it('reaches every prompt, not just the instant one', () => {
+    // Item 3 of the report: a formatting instruction that lands on one of three
+    // surfaces is the same bug as a tool documented on two of three. The three
+    // builders share `responseSpecBlock`, so this is what pins that they still do.
+    for (const p of [thinking, vision]) {
+      expect(p).toMatch(/headings \(## and ###\) whenever the answer has genuinely distinct sections/i);
+      expect(p).toContain('Use bullets (-) for unordered sets');
+      expect(p).toContain('Use an emoji where it earns its place');
+    }
   });
 });
 

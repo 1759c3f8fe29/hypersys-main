@@ -26,7 +26,7 @@
 // import ships three sets of integers to the browser and nothing else.
 import { FAILOVER_STATUSES } from "../../api/_failover.js";
 
-export type ProviderId = "nvidia" | "mistral" | "pollinations" | "tokenrouter" | "groq";
+export type ProviderId = "nvidia" | "mistral" | "pollinations" | "groq";
 
 export interface ProviderMeta {
   id: ProviderId;
@@ -75,16 +75,13 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
     supportsVision: true,
     freeTier: "Free experimentation tier on La Plateforme.",
   },
-  tokenrouter: {
-    id: "tokenrouter",
-    label: "TokenRouter",
-    baseUrl: "https://api.tokenrouter.com/v1/chat/completions",
-    envKey: "TOKENROUTER_API_KEY",
-    byokHeader: "x-tokenrouter-api-key",
-    supportsTools: true,
-    supportsVision: false,
-    freeTier: "Hosted open models (glm-5.3-free). Both OpenAI and Anthropic surfaces.",
-  },
+  // REMOVED 2026-10-11, maintainer-directed ("completely remove alias,
+  // glm-5.3-free, tokenrouter"). TokenRouter carried exactly one leg — the
+  // default's old first hop, id `glm-5.3-free` — and both were retired in the
+  // same act: the id was a lie (it said "free" and routed to a paid NVIDIA
+  // model), and the provider existed only to serve it. Nothing else in the
+  // catalogue named this provider, so the provider table loses a row rather
+  // than a fallback.
   pollinations: {
     id: "pollinations",
     label: "Pollinations",
@@ -121,7 +118,6 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
 export const PROVIDER_ORDER: ProviderId[] = [
   "nvidia",
   "mistral",
-  "tokenrouter",
   "pollinations",
 ];
 
@@ -166,12 +162,14 @@ export interface ModelSpec {
    * this catalogue refuses, and a dead route fails visibly so the user picks
    * another named model themselves.
    *
-   * DOCUMENTED EXCEPTION (same-day correction — "keep glm, flash or other best
-   * model"): the default service entry ("Flyer"), the vision capability entry
-   * ("Flyer Vision") and the internal utility entry ("Flyer Mini") may carry
-   * fallback legs. These are service/capability names, not weights, and the
-   * exception exists so the default keeps answering when a provider is down.
-   * The array shape remains because api/llm.js walks routes generically.
+   * EXCEPTION: the DEFAULT entry may carry fallback legs. It leads with the
+   * weights its id now names, and every leg behind it is insurance for the turn
+   * that would otherwise fail outright. It is the only entry with more than one
+   * route. The former service-name carve-out ("Flyer", "Flyer Vision", "Flyer
+   * Mini") was retired 2026-10-11 with the alias ids: a capability name is still
+   * a name, and a name that does not match its weights is the lie this rule
+   * exists to prevent. The array shape remains because api/llm.js walks routes
+   * generically.
    */
   routes: ModelRoute[];
   /** Total context window in tokens. Used by the token budgeter. */
@@ -216,19 +214,21 @@ export interface ModelSpec {
 //
 // Every NVIDIA and Mistral id below was confirmed present in the live provider
 // catalogue by `npm run verify:models`. Each model has a single source — NVIDIA,
-// Mistral, TokenRouter, or Pollinations — never duplicated across providers, so
-// the backend that answers always matches the model the user picked. Since
-// 2026-09-13 every entry is also single-ROUTE: no entry carries a fallback leg
-// of different weights under its name, whether the name is a set of weights
-// ("DeepSeek V4 Flash") or a service/capability name ("Flyer", "Flyer Vision") —
-// the maintainer overruled the old exceptions ("use real model not alias").
+// Mistral, Groq or Pollinations — never duplicated across providers, so the
+// backend that answers always matches the model the user picked. Since
+// 2026-09-13 every named-weight entry is also single-ROUTE: it does not carry a
+// fallback leg of different weights under its name. The one entry with a chain
+// is the default, whose id names its first leg and whose later legs are
+// insurance (see the ModelSpec.routes rule above). No service/capability names
+// remain — "Flyer" became "Flyer" on 2026-10-11.
 //
 // Re-run `npm run verify:models` after changing anything here. Provider
 // catalogues churn, and an unverified id fails at request time.
 export const MODELS: ModelSpec[] = [
   // --- Chat / reasoning ----------------------------------------------------
-  // The former default (3.12 → 2026-09-07; the default is now glm-5.3-free,
-  // above). DeepSeek V4 Flash 0731 — the model "Flyer" originally named.
+  // The former default (3.12 → 2026-09-07; the default is now glm-5.3-flash,
+  // above). DeepSeek V4 Flash 0731 — the model the retired "Flyer" alias
+  // originally named.
   // TTFB, measured 2026-09-07 after the quote-strip bug fix unblocked
   // probing: 144s streamed bare (status 200, first byte at 144s). With a
   // tools payload it never produced a first byte inside 300s on five
@@ -247,8 +247,8 @@ export const MODELS: ModelSpec[] = [
   // shaped the old chains still matter as measurements of the individual
   // models (they are recorded on each model's own entry); they no longer
   // justify any chain shape.
-  // The default, since 2026-09-07. GLM 5.3 (free tier) via TokenRouter — the
-  // model a new conversation starts on, promoted on the user's explicit
+  // HISTORY (superseded 2026-10-09). From 2026-09-07 the default was GLM 5.3
+  // (free tier) via TokenRouter — promoted on the user's explicit
   // direction after the Flash TTFB measurements came in: Flash answers bare
   // (200 at 144s streamed TTFB) but wedges with a tools payload (five probes,
   // five >300s aborts — one with the exact production five-tool shapes), so it
@@ -261,7 +261,10 @@ export const MODELS: ModelSpec[] = [
   // thinking tier renders its reasoning live. isReasoning: true reflects that
   // observed behaviour, not a vendor spec sheet.
   //
-  // FALLBACK CHAIN — RESTORED 2026-09-13 on the maintainer's explicit
+  // FALLBACK CHAIN — HISTORY. The two-leg chain restored 2026-09-13 was
+  // superseded by the 2026-10-09 re-measurement (five legs, below); this note is
+  // kept for the evidence it records, not because the shape still exists.
+  // RESTORED 2026-09-13 on the maintainer's explicit
   // direction. An earlier pass today read "use real model not alias" as an
   // order to delete this chain and went single-route; the maintainer has now
   // corrected that reading: the complaint was about mislabeled *entries*, not
@@ -293,54 +296,88 @@ export const MODELS: ModelSpec[] = [
     // breaks the invariant the next comment states — stored selections key on
     // this id — and because the leg it left behind is the one documented three
     // lines down as usable in LAST position only.
-    id: "glm-5.3-free",
-    // The picker name is "Flyer" (user-directed, 2026-09-07). The id stays
-    // glm-5.3-free (the stable key for stored selections), so nothing breaks
-    // for users who already have it selected.
+    id: "glm-5.3-flash",
+    // RENAMED 2026-10-11, maintainer-directed ("completely remove alias,
+    // glm-5.3-free, tokenrouter"). The id used to be `glm-5.3-free`, which was a
+    // lie on two counts: it named a "free" tier that had carried no leg since
+    // 2026-10-09, and it was the last service-name alias in the picker. It now
+    // names the weights leg 0 actually runs, which is the rule the rest of this
+    // file already follows.
     //
-    // THE DEFAULT IS NOW QWEN 3.8 27B (maintainer-directed 2026-10-07: "make the
-    // default model qwen 3.8 27 b from groq"). That is a change of ROUTE, not of
-    // id, and the difference matters: `id` is the key every stored selection and
-    // every persisted message byline is written against, while the first route is
-    // what a new conversation actually runs on. Renaming the id would strand
-    // every existing selection *and* — as the re-converged edit recorded below
-    // already demonstrated — leave `getModel(DEFAULT_MODEL_ID)` undefined, which
-    // is the app with no default at all.
+    // The blast radius, recorded rather than discovered later: `id` is the key
+    // every stored selection and every persisted message byline is written
+    // against, so a conversation whose modelId is `glm-5.3-free` no longer
+    // resolves — its byline falls back to a generic label and reopening it
+    // selects the default, exactly as the deleted `glm-5.3` entry behaves. What
+    // the user *gets* does not change: the default answers on z-ai/glm-5.3-flash
+    // either way. The hidden `glm-5.3-flash` entry that used to sit below is
+    // deleted in the same edit (a second entry for one id is the duplicate the
+    // id-uniqueness guard catches), and because the label and shortLabel here
+    // match the ones it carried, every byline already reading "Flyer"
+    // still reads the same.
+    //
+    // The picker name was "Flyer" (user-directed, 2026-09-07) and is now the
+    // model's own name for the same reason: "completely remove alias" retires
+    // the service-name carve-out, not just this one id.
+    //
+    // THE DEFAULT RUNS ON GLM 5.3 (maintainer-directed 2026-10-09: "make glm 5.3
+    // as default model and make qwen 3.8 27 as second fall back", confirmed:
+    // full GLM 5.3 on NVIDIA, not the free-tier endpoint). That was a change of
+    // ROUTE order, not of id; `id` is the key every stored selection and every
+    // persisted message byline is written against, while the first route is what
+    // a new conversation actually runs on. Renaming the id strands every
+    // existing selection *and* — as the re-converged edit recorded below already
+    // demonstrated — leaves `getModel(DEFAULT_MODEL_ID)` undefined, which is the
+    // app with no default at all, so both moved together in this edit.
+    // (History of the same block: it led with Qwen 3.8 27B from 2026-10-07, with
+    // z-ai/glm-5.3-free before that, and with GLM 5.3 on NVIDIA since 2026-10-09.)
     label: "Flyer",
-    shortLabel: "Flyer",
-    description: "The default model. Qwen 3.8 27B on Groq, with fallback.",
+    shortLabel: "GLM Flash",
+    description: "The default model. Flyer, with fast fallback.",
     routes: [
-      // 1. Qwen 3.8 27B — the best-measured leg in this file: 486ms bare and
-      // 190ms with a five-tool payload, across four pooled keys
-      // (scripts/probe-groq-generate.mjs, 2026-10-07). Going first is what makes
-      // it the default; the pool means the free tier's per-credential limit
-      // costs a rotation rather than a route.
-      { provider: "groq", modelId: "qwen/qwen3.8-27b" },
-      // 2. openai/gpt-oss-120b on the same pool, 763ms. A DIFFERENT FAMILY from
-      // the leg above on purpose: a chain of near-identical models fails together
-      // when one family has a bad afternoon, and this is the position that
-      // answers when the first one is down.
-      { provider: "groq", modelId: "openai/gpt-oss-120b" },
-      // 3. GLM 5.3 free, 2.9s bare / 2.2s with tools (measured 2026-09-07). The
-      // default until today, kept as the third leg rather than dropped: it is a
-      // different provider entirely, which is what a chain is for.
-      { provider: "tokenrouter", modelId: "z-ai/glm-5.3-free" },
-      // 4. The NVIDIA legs, maintainer-directed 2026-10-04. PROVENANCE IS WEAKER
-      // THAN EVERYTHING ABOVE and says so: neither id was probed (the key read
-      // was denied that session), so they rest on the maintainer's word. They sit
-      // at the END rather than the middle because the legs before them are
-      // measured — an unverified id should not be the one a healthy request
-      // lands on. 404 is in FAILOVER_STATUSES, so a wrong id costs a hop instead
-      // of the turn, which is the whole reason an unprobed leg is acceptable
-      // here at all.
+      // RE-ORDERED 2026-10-09 FROM MEASUREMENT, not from preference.
+      // `scripts/probe-default-candidates.mjs`, streamed TTFB with a real tools
+      // payload, three runs each, all four candidates alive:
+      //
+      //   qwen/qwen3.8-27b           217ms   219ms   229ms
+      //   z-ai/glm-5.3-flash         815ms   550ms   626ms
+      //   z-ai/glm-5.3            49021ms 21338ms 21361ms   (1.3-1.7s once warm)
+      //   deepseek-ai/…-v4.1-flash 87914ms 53903ms 91202ms
+      //
+      // That retired the previous order, which led with `z-ai/glm-5.3`. Its best
+      // cold TTFB is 21.3s and the server's non-final first-byte cap is 22s
+      // (FIRST_BYTE_TIMEOUT_MS), so the default model was one jitter away from
+      // being aborted on every cold start — and the abort looks to the user like
+      // the app hanging, not like a failover.
+      //
+      // 1. Flyer — maintainer-directed as the default (2026-10-09) and
+      // the measurement agrees: 550ms, 3/3, accepts tools. Qwen is measurably
+      // faster still (217ms); the default is the maintainer's call, and the
+      // faster model sits directly behind it so failover costs nothing.
       { provider: "nvidia", modelId: "z-ai/glm-5.3-flash" },
+      // 2. Qwen 3.8 27B — the fastest leg in the file, on a different provider
+      // with a four-key pool, so a Groq rate limit costs a key rotation rather
+      // than the route.
+      { provider: "groq", modelId: "qwen/qwen3.8-27b" },
+      // 3. gpt-oss-120b, same pool, 763ms. A DIFFERENT FAMILY on purpose: a
+      // chain of near-identical models fails together when one family has a bad
+      // afternoon.
+      { provider: "groq", modelId: "openai/gpt-oss-120b" },
+      // 4. GLM 5.3 full. Demoted from first to fourth by the numbers above. It is
+      // genuinely quick warm (1.3-1.7s measured immediately after the cold runs)
+      // and genuinely unusable cold, and a first leg has to be the one that is
+      // never the problem. Mid-chain it is capped at the 22s non-final cap, which
+      // its cold case will sometimes miss — acceptable here, because missing it
+      // means failing over rather than failing.
+      { provider: "nvidia", modelId: "z-ai/glm-5.3" },
       {
         provider: "nvidia",
         modelId: "deepseek-ai/deepseek-v4.1-flash",
-        // LAST leg only: this position's server-side isLastRoute relaxation is
-        // what lets it spend the whole chain budget. The allowance is carried
-        // over from the leg it replaces, where 144s was measured — a ceiling,
-        // not a promise, so it costs nothing if this model is quicker.
+        // LAST, and it can only ever be last: 54-91s measured TTFB is far past
+        // the 22s cap every non-final position is held to, so anywhere else in
+        // this chain it would be aborted before it ever answered. Only the final
+        // position gets the server's isLastRoute relaxation and the whole
+        // remaining budget.
         firstByteAllowanceMs: 90_000,
       },
     ],
@@ -365,11 +402,11 @@ export const MODELS: ModelSpec[] = [
     // ITS OWN LEGS DELETED 2026-09-13 ("use real model not alias" — the
     // Lightning and gpt-oss legs answered under the Flash name on failover),
     // then the situation changed twice: flash stayed selectable under its own
-    // name, and it was restored as the LAST leg of the Flyer chain above.
+    // name, and it was restored as the LAST leg of the default chain above.
     // The two roles are the same weights wearing two honest hats: here it
     // answers under its own name (and needs the 90s allowance to make it
     // through its own 144s cold start), and there it is insurance under a
-    // service name — the exception the maintainer has always granted the
+    // weights-named entry — the exception the maintainer has always granted the
     // default model.
     // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
     // generation. The entry stays in MODELS so every reply already carrying this id keeps
@@ -978,44 +1015,32 @@ export const MODELS: ModelSpec[] = [
   // The current generation, maintainer-named 2026-10-04. Single route each, and
   // that is the rule rather than an oversight: an entry that answers under its own
   // name must not fail over to different weights, or the byline on the reply is a
-  // lie. The documented exception is the "Flyer" default above, which is a service
-  // name and says so. The cost is that an id that turns out wrong fails the turn
+  // lie. There is no longer any exception to it: the "Flyer" service name was
+  // retired 2026-10-11 and its entry now carries the model's own id (see the top
+  // of the catalogue). The cost is that an id that turns out wrong fails the turn
   // outright instead of degrading, which is the trade this file has always made
   // for honest naming.
   //
-  // Not probed here either (same denied key read). If one answers 404/410, the
-  // glm-5.2 precedent applies: set `hidden`, record the status and the date, and
-  // leave the entry in MODELS so existing replies keep their byline.
-  {
-    id: "glm-5.3-flash",
-    label: "GLM 5.3 Flash",
-    shortLabel: "GLM Flash",
-    description: "Fast GLM 5.3 reasoning on NVIDIA NIM.",
-    routes: [{ provider: "nvidia", modelId: "z-ai/glm-5.3-flash" }],
-    contextWindow: 128_000,
-    maxOutputTokens: 8192,
-    supportsVision: false,
-    supportsTools: true,
-    isReasoning: true,
-    emoji: "⚡",
-    kind: "Chat",
-    featured: true,
-  },
-  {
-    id: "glm-5.3",
-    label: "GLM 5.3",
-    shortLabel: "GLM 5.3",
-    description: "Full GLM 5.3 reasoning on NVIDIA NIM.",
-    routes: [{ provider: "nvidia", modelId: "z-ai/glm-5.3" }],
-    contextWindow: 128_000,
-    maxOutputTokens: 8192,
-    supportsVision: false,
-    supportsTools: true,
-    isReasoning: true,
-    emoji: "🧠",
-    kind: "Chat",
-    featured: true,
-  },
+  // ENTRY DELETED 2026-10-11, maintainer-directed ("completely remove alias,
+  // glm-5.3-free, tokenrouter"). It sat here: id "glm-5.3-flash", single route
+  // nvidia:z-ai/glm-5.3-flash, hidden since 2026-10-09. The default entry took
+  // this id when its alias one was retired, so keeping this block would have been
+  // two entries for one id — the duplicate the id-uniqueness guard catches. It was
+  // hidden only to keep old "Flyer" bylines resolvable, and that still
+  // holds: the default entry now carries this exact id, label and shortLabel, so
+  // every byline written against it reads unchanged.
+  // ENTRY DELETED 2026-10-09 (it used to sit here: id "glm-5.3", label
+  // "GLM 5.3", single route nvidia:z-ai/glm-5.3). The default model now runs
+  // those weights as its first leg — maintainer-directed, "make glm 5.3 as
+  // default model" — and two entries leading with one upstream id is the alias
+  // bug the primaries-unique guard catches. Hidden is NOT a way out: that guard
+  // walks all of MODELS, hidden included, so the only honest resolutions were
+  // delete the entry or let the picker sell the same weights twice. Deleted,
+  // with the blast radius recorded: `getModel("glm-5.3")` now returns
+  // undefined, so an old reply's byline falls back to a generic label and
+  // reopening such a conversation selects the default — which answers on the
+  // very same z-ai/glm-5.3 weights, so nothing a user actually gets changes.
+  // The entry had existed five days (added 2026-10-04).
   {
     id: "deepseek-v4.1-flash",
     label: "DeepSeek V4.1 Flash",
@@ -1138,10 +1163,14 @@ export function supportsTools(id: string): boolean {
 export const UTILITY_MODEL_ID = "fast-small";
 
 // The model a new conversation starts on. Must be a live id in MODELS.
-// glm-5.3-free since 2026-09-07 (user-directed; see its catalogue entry). The
-// previous default, deepseek-v4-flash-0731, remains selectable and is the
-// last leg of this model's chain.
-export const DEFAULT_MODEL_ID = "glm-5.3-free";
+// RENAMED 2026-10-11 to `glm-5.3-flash`, maintainer-directed ("completely remove
+// alias, glm-5.3-free, tokenrouter"). It had been `glm-5.3-free` since
+// 2026-09-07 — the last alias id in the catalogue. The id and DEFAULT_MODEL_ID
+// move together on purpose: renaming one without the other once left
+// `getModel(DEFAULT_MODEL_ID)` undefined, i.e. no default at all, which is the
+// app the user's "[llm] all providers failed" logs came from. The id names the
+// weights leg 0 runs (z-ai/glm-5.3-flash on NVIDIA).
+export const DEFAULT_MODEL_ID = "glm-5.3-flash";
 
 /**
  * Walked in order by the image executor when a generation fails.

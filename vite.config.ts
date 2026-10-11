@@ -8,11 +8,17 @@ import { existsSync, statSync } from "fs";
 // is safe because vite.config.ts runs at build time, never in the client. Never
 // import it from anything under src/.
 // @ts-expect-error - plain JS module shared with the serverless route, no .d.ts
-import { runSearch } from "./api/_search-providers.js";
+import { runImageSearch, runSearch } from "./api/_search-providers.js";
 // Same rule: api/llm.js imports this too, and dev and prod must sanitise
 // identically — the 400-code-3240 poison story is in the module's own header.
 // @ts-expect-error - plain JS module shared with the serverless route, no .d.ts
 import { sanitiseMessages } from "./api/_messages.js";
+// Shared with api/llm.js so the two surfaces cannot disagree about which
+// providers exist or what may be sent to them. Dependency-free by contract.
+// @ts-expect-error - plain JS module shared with the serverless routes, no .d.ts
+import { PROVIDER_ENDPOINTS, routePayloadFor } from "./api/_providers.js";
+// @ts-expect-error - plain JS module shared with the serverless routes, no .d.ts
+import { FAILOVER_STATUSES } from "./api/_failover.js";
 
 // Env available to the /api proxy handlers. Vite does NOT load .env into
 // process.env, so we populate this from loadEnv() at config time. Falls back
@@ -124,7 +130,7 @@ function localApiProxy(): Plugin {
           res.setHeader("Vary", "Origin");
         }
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key, X-TokenRouter-Api-Key");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key");
         res.setHeader("Access-Control-Max-Age", "3600");
 
         if (req.method === "OPTIONS") {
@@ -184,34 +190,18 @@ function localApiProxy(): Plugin {
 // Provider endpoints for the dev router — mirrors api/llm.js. Dev deliberately
 // skips the auth/quota checks the production router enforces: local dev has a
 // single trusted user and adding token verification would just add friction.
-const DEV_PROVIDER_ENDPOINTS: Record<string, { url: string; envKeys: string[]; byokHeader?: string; keyless?: boolean }> = {
-  nvidia: { url: "https://integrate.api.nvidia.com/v1/chat/completions", envKeys: ["NVIDIA_API_KEY", "VITE_NVIDIA_API_KEY"], byokHeader: "x-nvidia-api-key" },
-  mistral: { url: "https://api.mistral.ai/v1/chat/completions", envKeys: ["MISTRAL_API_KEY", "VITE_MISTRAL_API_KEY"], byokHeader: "x-mistral-api-key" },
-  // Kept in step with PROVIDER_ENDPOINTS in api/llm.js, whose header says dev and
-  // prod must change together. It drifted once: tokenrouter was added there on
-  // 2026-09-08 and not here, so every dev request for the default model walked
-  // its first leg into "unknown provider" (status 0) and paid a wasted hop
-  // before the nemo fallback — and the router's 400-on-poisoned-history bug
-  // was only reachable in dev because the healthy first leg never ran.
-  tokenrouter: { url: "https://api.tokenrouter.com/v1/chat/completions", envKeys: ["TOKENROUTER_API_KEY", "VITE_TOKENROUTER_API_KEY"], byokHeader: "x-tokenrouter-api-key" },
-  pollinations: { url: "https://text.pollinations.ai/openai", envKeys: [], keyless: true },
-  // Groq Cloud. Kept in step with PROVIDER_ENDPOINTS in api/llm.js, which is the
-  // standing rule for this file (see the tokenrouter note above for what drift
-  // costs). Added 2026-10-07 with a KEY POOL rather than a single key: Groq's
-  // free tier rate-limits per key, so `GROQ_API_KEYS` holds a comma-separated
-  // list and the router rotates to the next one on a 429 instead of failing the
-  // chain. Server-side only — the keys must never carry a VITE_ prefix, because
-  // those get inlined into the browser bundle.
-  groq: { url: "https://api.groq.com/openai/v1/chat/completions", envKeys: ["GROQ_API_KEYS", "GROQ_API_KEY"], byokHeader: "x-groq-api-key" },
-};
+// The provider table is api/_providers.js, imported above, and is NOT re-declared
+// here. It used to be, as DEV_PROVIDER_ENDPOINTS, and api/llm.js's header
+// promised the two copies would change together. Twice they did not: tokenrouter
+// was added to prod and not here (2026-09-08), and this copy never carried
+// `supportsTools` while `proxyLlm` never read `tools` off the body — so every
+// tool was silently dead in `npm run dev`. One table cannot drift from itself.
 
-// Mirrors FAILOVER_STATUSES in api/_failover.js, which added 404 (NVIDIA serves
-// it for transient unavailability — nemotron-3-super-120b-a12b 404'd three times
-// running, then answered three times running) and 410 (EOL, fails over because
-// another provider may still host the same weights). When this set lacked them,
-// a 404/410ing dev route stopped the chain instead of walking to the backup —
-// the opposite of what prod did with the same request.
-const DEV_FAILOVER_STATUSES = new Set([404, 408, 409, 410, 425, 429, 500, 502, 503, 504, 529]);
+// FAILOVER_STATUSES is imported from api/_failover.js rather than restated here.
+// It used to be a hand-copied `DEV_FAILOVER_STATUSES`, and the copy drifted: it
+// lacked 404 and 410 while production failed over on both, so a dev route that
+// 404'd stopped the chain where prod walked to the backup. Same class as the
+// provider table above, same fix — the set has one home.
 
 /**
  * The slice of Node's ServerResponse these dev proxies actually touch.
@@ -281,6 +271,22 @@ interface ChatRequestBody {
   temperature?: number;
   top_p?: number;
   max_tokens?: number;
+  /**
+   * Tool schemas the client advertised for this turn.
+   *
+   * These were absent from this type, and `proxyLlm` correspondingly never
+   * destructured them — so `npm run dev` forwarded no tools to any provider.
+   * The model got none, never emitted a tool call, and answered from its own
+   * knowledge, which means every tool (search, file creation, code, OCR) was
+   * silently dead in local development while working in production. Nothing
+   * errored: a reply with no tool call looks exactly like a reply.
+   *
+   * Typed as `unknown[]` on purpose. This proxy does not inspect a schema, it
+   * relays one, and `api/_providers.js`'s `routePayloadFor` is the only thing
+   * that decides whether it may go to a given provider.
+   */
+  tools?: unknown[];
+  tool_choice?: unknown;
 }
 
 // The slice of a SerpApi search response this proxy reads.
@@ -329,7 +335,8 @@ async function proxyLlm(
   res: DevRes,
   body: Record<string, unknown>,
 ) {
-  const { messages, routes, temperature, top_p, max_tokens } = body as ChatRequestBody;
+  const { messages, routes, temperature, top_p, max_tokens, tools, tool_choice } =
+    body as ChatRequestBody;
   if (!Array.isArray(messages) || messages.length === 0) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "`messages` array is required" }));
@@ -352,7 +359,7 @@ async function proxyLlm(
   const attempts: Array<{ provider: string; status: number; detail?: string }> = [];
 
   for (const route of routes) {
-    const cfg = DEV_PROVIDER_ENDPOINTS[route.provider];
+    const cfg = PROVIDER_ENDPOINTS[route.provider];
     if (!cfg) {
       attempts.push({ provider: route.provider, status: 0, detail: "unknown provider" });
       continue;
@@ -361,7 +368,7 @@ async function proxyLlm(
     const key = cfg.keyless
       ? null
       : (cfg.byokHeader ? h(req.headers, cfg.byokHeader) : undefined) ||
-        cfg.envKeys.map((k) => env(k)).find(Boolean);
+        cfg.envKeys.map((k: string) => env(k)).find(Boolean);
 
     if (!cfg.keyless && (!key || String(key).startsWith("your-"))) {
       attempts.push({ provider: route.provider, status: 0, detail: "no key configured" });
@@ -377,14 +384,26 @@ async function proxyLlm(
           Accept: "text/event-stream",
           ...(cfg.keyless ? {} : { Authorization: `Bearer ${key}` }),
         },
-        body: JSON.stringify({
-          model: route.modelId,
-          messages: cleanMessages,
-          stream: true,
-          temperature: temperature ?? 0.7,
-          top_p: top_p ?? 0.95,
-          max_tokens: Math.min(Number(max_tokens) || 4096, 8192),
-        }),
+        body: JSON.stringify(
+          // Through the shared gate, exactly as api/llm.js does. Building this
+          // payload inline is what left dev forwarding no tools at all: the
+          // object literal here simply never mentioned them, so there was no
+          // error to notice — only an absence. `routePayloadFor` attaches them
+          // when, and only when, the provider accepts them.
+          routePayloadFor(
+            cfg,
+            {
+              model: route.modelId,
+              messages: cleanMessages,
+              stream: true,
+              temperature: temperature ?? 0.7,
+              top_p: top_p ?? 0.95,
+              max_tokens: Math.min(Number(max_tokens) || 4096, 8192),
+            },
+            tools,
+            tool_choice,
+          ),
+        ),
       });
     } catch (err) {
       attempts.push({ provider: route.provider, status: 502, detail: String(err) });
@@ -400,7 +419,7 @@ async function proxyLlm(
 
     const detail = await upstream.text().catch(() => "");
     attempts.push({ provider: route.provider, status: upstream.status, detail: detail.slice(0, 300) });
-    if (!DEV_FAILOVER_STATUSES.has(upstream.status)) break;
+    if (!FAILOVER_STATUSES.has(upstream.status)) break;
     console.warn(`[llm] ${route.provider}/${route.modelId} → ${upstream.status}, trying next`);
   }
 
@@ -589,20 +608,23 @@ async function proxySearch(
   // env() rather than process.env: the dev server loads .env through Vite's loader,
   // which applies the mode-specific files (.env.development, .env.local) that
   // process.env alone does not see.
-  const payload = await runSearch(
-    query,
-    Number(body.num) || 6,
-    {
-      SERPAPI_API_KEY: env("SERPAPI_API_KEY"),
-      VITE_SERP_API_KEY: env("VITE_SERP_API_KEY"),
-      VITE_SERPAPI_API_KEY: env("VITE_SERPAPI_API_KEY"),
-    },
-    // Annotated because it has to be: tsconfig.node.json is `strict`, and
-    // `runSearch` arrives from an untyped `.js` module as `any`, so the callback
-    // parameter gets no contextual type and trips TS7006. `string` is what the
-    // JSDoc on runSearch promises — one line per failed provider tier.
-    (msg: string) => console.warn(msg),
-  );
+  const searchEnv = {
+    SERPAPI_API_KEY: env("SERPAPI_API_KEY"),
+    VITE_SERP_API_KEY: env("VITE_SERP_API_KEY"),
+    VITE_SERPAPI_API_KEY: env("VITE_SERPAPI_API_KEY"),
+  };
+  // Annotated because it has to be: tsconfig.node.json is `strict`, and the `.js`
+  // providers arrive as `any`, so the callback parameter gets no contextual type and
+  // trips TS7006. `string` is what the JSDoc promises — one line per failed tier.
+  const log = (msg: string) => console.warn(msg);
+
+  // Same `mode` contract as api/search.js: "images" hits the image tier, everything
+  // else is a web search. Kept next to runSearch's call so the two routes stay in
+  // step — the drift this file's header warns about is exactly this kind of branch.
+  const payload =
+    body.mode === "images"
+      ? await runImageSearch(query, Number(body.num) || 12, searchEnv, log)
+      : await runSearch(query, Number(body.num) || 6, searchEnv, log);
 
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify(payload));

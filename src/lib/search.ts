@@ -30,6 +30,117 @@ export interface SearchResponse {
 
 const SEARCH_PROXY_PATH = "/api/search";
 
+// ── image search ────────────────────────────────────────────────────────────
+
+/**
+ * One retrieved image, as the UI needs it.
+ *
+ * Both `imageUrl` and `thumbnailUrl` are provider-returned and kept distinct: the
+ * grid loads the thumbnail and the lightbox opens the original. `pageUrl` is the
+ * page the image was found on, for attribution and the "open source" link.
+ */
+export interface ImageResult {
+  title: string;
+  imageUrl: string;
+  thumbnailUrl: string;
+  pageUrl: string;
+  source?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+export interface ImageSearchResponse {
+  query: string;
+  images: ImageResult[];
+  error?: string;
+}
+
+/**
+ * Keep only rows whose every URL is http(s) and that carry a real thumbnail.
+ *
+ * The server already drops unsafe rows (`safeHttpUrl` in _search-providers.js), so
+ * this is the second lock on the same door — and deliberately so, because the
+ * consequence differs: the server drop protects the payload, this one protects the
+ * DOM. A `javascript:` thumbnail that reached `<img src>` or an anchor `href` would
+ * execute, and the response crosses a network boundary the client did not author.
+ * The client does not trust the proxy's filtering to still be there.
+ */
+export function sanitizeImages(raw: unknown): ImageResult[] {
+  if (!Array.isArray(raw)) return [];
+  const ok = (u: unknown) => {
+    const s = String(u ?? "").trim();
+    return /^https?:\/\//i.test(s) ? s : "";
+  };
+  const out: ImageResult[] = [];
+  for (const r of raw as Array<Record<string, unknown>>) {
+    const thumbnailUrl = ok(r?.thumbnailUrl);
+    if (!thumbnailUrl) continue;
+    out.push({
+      title: String(r?.title ?? ""),
+      imageUrl: ok(r?.imageUrl) || thumbnailUrl,
+      thumbnailUrl,
+      pageUrl: ok(r?.pageUrl),
+      source: (r?.source as string) ?? null,
+      width: (r?.width as number) ?? null,
+      height: (r?.height as number) ?? null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Retrieve real images from the web for a query.
+ *
+ * Distinct from `webSearch` on purpose: different endpoint mode, different response
+ * shape, and a result the model does not get to see or paraphrase — the images go
+ * straight to the gallery. Returns null on a transport failure and a response with
+ * `error` set (and no images) when the provider is unavailable, so the caller can
+ * tell "search broke" from "found nothing" exactly as `webSearch` does.
+ */
+export async function imageSearch(query: string, signal?: AbortSignal): Promise<ImageSearchResponse | null> {
+  try {
+    const { response: res, errText } = await fetchAsUser(apiPath(SEARCH_PROXY_PATH), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, num: 12, mode: "images" }),
+      signal,
+    });
+    if (!res.ok) {
+      console.error("Image search proxy error:", res.status, errText);
+      return null;
+    }
+    const data = (await res.json()) as { query?: string; images?: unknown; error?: string };
+    return {
+      query: data.query ?? query,
+      images: sanitizeImages(data.images),
+      error: data.error,
+    };
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw err;
+    console.error("Image search failed:", err);
+    return null;
+  }
+}
+
+/**
+ * Format a small textual summary of retrieved images for the model.
+ *
+ * The model cannot see the images (they are rendered, not sent as data), so this is
+ * what keeps it from claiming it never found pictures and from inventing their
+ * contents. It gets titles and source pages only — never pixel data.
+ */
+export function buildImageContext(search: ImageSearchResponse | null): string | null {
+  if (!search || !search.images.length) return null;
+  const lines = search.images
+    .slice(0, 12)
+    .map((img, i) => `[${i + 1}] ${img.title || "image"}${img.source ? ` — ${img.source}` : ""}`);
+  return [
+    `${search.images.length} image(s) were retrieved and are displayed to the user in a gallery:`,
+    ...lines,
+    "Describe them only from these titles and sources; never invent visual detail you were not given.",
+  ].join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // What used to be here
 // ---------------------------------------------------------------------------

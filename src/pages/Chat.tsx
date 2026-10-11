@@ -44,7 +44,7 @@ import { UNAVAILABLE_REASONS } from '@/lib/shortcuts';
 import { conversationDocumentTitle } from '@/hooks/useDocumentTitle';
 import { ShortcutsDialog } from '@/components/chat/ShortcutsDialog';
 import { Button } from '@/components/ui/button';
-import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource, MessageTaskList } from '@/components/chat/types';
+import type { ChatAttachment, MessageCodeRun, MessageFile, MessageImage, MessageSource, MessageTaskList } from '@/components/chat/types';
 import { Menu, ArrowDown, Sparkles, AlertTriangle, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -69,6 +69,11 @@ interface Message {
   modelName?: string;
   // Web pages this reply was grounded on, shown as source chips.
   sources?: MessageSource[];
+  // Real pictures the search_images tool retrieved this turn, shown as a gallery.
+  // Unlike `files` (blob URLs) these are remote http(s) URLs, so they survive a
+  // reload and are persisted with the message — which is what lets a later turn
+  // say "the third image" and still resolve it (spec §8 continuity).
+  imageResults?: MessageImage[];
   // Related questions surfaced by web search, shown as clickable follow-up
   // chips. The data already comes back from the search provider; this just
   // carries it to the message so it can be rendered.
@@ -935,7 +940,7 @@ export default function Chat() {
     // is optional and skipped by the paths that have no reasoning (the user
     // turn, the image turn), and the call sites above would otherwise become
     // long runs of `undefined, undefined, 0`.
-    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean }
+    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; imageResults?: MessageImage[] }
   ) => {
     if (!user) return false;
     try {
@@ -1623,7 +1628,7 @@ export default function Chat() {
           // The thinking block, streamed live. Two sources feed it and they are
           // kept in one field deliberately: a reasoning model on a tool path can
           // emit `reasoning_content` for its call and inline <thinking> tags for
-          // its answer (measured: glm-5.3-free, 2026-09-12), and a block that
+          // its answer (measured: GLM 5.3, 2026-09-12), and a block that
           // rendered whichever arrived last would flicker between the two. The
           // channel deltas come straight through here; the inline tags are
           // fished out of fullContent by extractReasoning above, which already
@@ -1855,6 +1860,9 @@ export default function Chat() {
         const agentCodeRuns = agentArtifacts.codeRuns || [];
         // Staged plan (batch #9): one checklist per message, newest call wins.
         const agentTaskList = agentArtifacts.taskList;
+        // Real retrieved pictures (search_images). A turn can carry several, so
+        // unlike agentImageUrl (a single *generated* image) this is the whole list.
+        const agentImageResults = agentArtifacts.imageResults || [];
 
         if (cleaned) {
           const finalText = usedVisionFallback
@@ -1878,6 +1886,7 @@ export default function Chat() {
                 files: agentFiles.length ? agentFiles : m.files,
                 codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns,
                 taskList: agentTaskList ?? m.taskList,
+                imageResults: agentImageResults.length ? agentImageResults : m.imageResults,
                 sources: mergedSources.length ? mergedSources : undefined,
                 followUps: mergedFollowUps.length ? mergedFollowUps : undefined,
                 arenaResponses: activeArenaMode && m.arenaResponses
@@ -1906,22 +1915,22 @@ export default function Chat() {
             // the explicit Image-model path has always done, and it renders the
             // same: ChatMessage hoists the markdown image out of the prose with
             // stripMarkdownImages, so this adds nothing visible to the reply.
-            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined });
+            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined });
             maybeExtractMemories(finalText);
           }
-        } else if (agentImageUrl || agentFiles.length) {
+        } else if (agentImageUrl || agentFiles.length || agentImageResults.length) {
           // Tools delivered something the user can see even though the model
           // wrote no prose after them. Showing the artifact beats replacing it
           // with "formatting hiccup".
-          const madeText = agentImageUrl ? 'Here you go.' : `Created ${agentFiles.map((f) => f.filename).join(', ')}.`;
+          const madeText = agentImageUrl ? 'Here you go.' : agentImageResults.length ? `Here are ${agentImageResults.length} image${agentImageResults.length === 1 ? '' : 's'}.` : `Created ${agentFiles.map((f) => f.filename).join(', ')}.`;
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantMessage.id
-              ? { ...m, content: madeText, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns, taskList: agentTaskList ?? m.taskList }
+              ? { ...m, content: madeText, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns, taskList: agentTaskList ?? m.taskList, imageResults: agentImageResults.length ? agentImageResults : m.imageResults }
               : m)),
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
           if (convId && isAuthenticated) {
-            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined });
+            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined });
             maybeExtractMemories(madeText);
           }
         } else {
@@ -2791,6 +2800,7 @@ export default function Chat() {
                           files={msg.files}
                           codeRuns={msg.codeRuns}
                           taskList={msg.taskList}
+                          imageResults={msg.imageResults}
                           onFollowUp={(q) => handleSendMessage(q)}
                           onRegenerate={handleRegenerate}
                           canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}

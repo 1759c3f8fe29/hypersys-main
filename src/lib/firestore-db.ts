@@ -16,6 +16,7 @@ import {
   type FieldValue
 } from 'firebase/firestore';
 import { db } from './firebase';
+import { sanitizeImages } from './search';
 import type { ChatAttachment } from '@/components/chat/types';
 
 // ---------------------------------------------------------------------------
@@ -135,6 +136,20 @@ export interface FirestoreMessage {
    * UI state the model cannot see, and only TaskListBlock holds them.
    */
   taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> } | null;
+  /**
+   * Real pictures the `search_images` tool retrieved, persisted so a reload keeps
+   * the gallery (spec §5/§8). Unlike attachments these are just remote http(s)
+   * URLs and a few short strings, so they cost almost nothing against the 1 MiB
+   * doc cap. Only provider-returned http(s) URLs are written — anything else was
+   * already dropped by the sanitizer at the executor boundary.
+   */
+  imageResults?: Array<{
+    title: string;
+    imageUrl: string;
+    thumbnailUrl: string;
+    pageUrl: string;
+    source?: string;
+  }> | null;
   /**
    * The user's feedback on this reply (ChatGPT-style thumbs up/down):
    * 'up' when rated good, 'down' when rated bad, absent when unrated or
@@ -264,6 +279,17 @@ export const firestoreDb = {
                   : [],
               }
             : undefined,
+          // Retrieved-image gallery (spec §5). Revalidated on read rather than
+          // trusted, because a document can be written by an older client or edited
+          // by hand, and the gallery puts these strings straight into <img src> and
+          // an <a href> — React 18 warns about a `javascript:` href but does not
+          // block it. `sanitizeImages` is the transport layer's own validator, so
+          // the row a reload renders is checked by exactly the code that checked the
+          // row when it first arrived; a second copy of that rule here would be a
+          // second thing to keep in step.
+          imageResults: Array.isArray(data.imageResults)
+            ? sanitizeImages(data.imageResults).slice(0, 20)
+            : undefined,
           // Feedback (ChatGPT-style thumbs up/down). One field, both directions:
           // 'up' | 'down' when the reply was rated, undefined when it was not
           // (or when the rating was cleared) — never null, so the UI's truthiness
@@ -327,7 +353,7 @@ export const firestoreDb = {
     // The thinking block's payload (see FirestoreMessage.reasoning), plus the
     // staged checklist (batch #9). An object so the reasoning-free call sites
     // stay as they were rather than growing two more undefineds each.
-    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> } }
+    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> }; imageResults?: FirestoreMessage['imageResults'] }
   ): Promise<string> {
     // Compute the sibling index: how many children this parent already has.
     // This is a read-then-write (not transactional), which is fine here —
@@ -394,6 +420,9 @@ export const firestoreDb = {
       // TaskListBlock). `done` writes as false always: the model cannot see
       // ticks, so a doc can never honestly carry a true.
       taskList: meta?.taskList ?? null,
+      // Retrieved-image gallery (spec §5). Null rather than omitted so a doc
+      // with no gallery has the same shape as one that never could have one.
+      imageResults: meta?.imageResults ?? null,
       createdAt: serverTimestamp()
     });
 

@@ -25,6 +25,7 @@
 // matters, and the status it gets back reminds it of the same.
 
 import { generateFile, isSupportedFormat, withExtension } from "@/lib/file-generator";
+import { verifyArtifact, verifyDetail, verifyReason } from "@/lib/artifact-verify";
 import type { AttachmentRef, ToolContext, ToolResult } from "./types";
 import { asString } from "./types";
 import type { ToolSchema } from "@/lib/ai";
@@ -155,6 +156,24 @@ export async function executeEditFile(
     return { ok: false, error: `edit_file: ${result.error}` };
   }
 
+  // Verified before delivery, for the same reason create_file verifies — and the
+  // stakes are a notch higher here. This is the revision path: the user already
+  // has a working file and is asking for a changed one, so handing back a broken
+  // version is not "no result", it reads as "the edit destroyed my document". The
+  // check runs before the object URL exists and before the artifact is
+  // registered, so a failed revision never appears in the download list beside
+  // the good original.
+  const verdict = await verifyArtifact(format, new Uint8Array(await result.blob.arrayBuffer()));
+  if (!verdict.ok) {
+    return {
+      ok: false,
+      error:
+        `edit_file: the revised ${format} was generated but could not be verified — ${verifyReason(verdict)}. ` +
+        `No download was offered and the original "${ref.name}" is untouched. ` +
+        `Re-check the content you passed and try again; do not tell the user the revision is ready.`,
+    };
+  }
+
   // Same object-URL story as create_file: these may be large, live only this
   // tab, and never enter Firestore. Revocation is the caller's job.
   const url = URL.createObjectURL(result.blob);
@@ -169,6 +188,7 @@ export async function executeEditFile(
     mimeType: result.mimeType,
     original: ref.name,
     bytes: result.size,
+    verified: verifyDetail(verdict),
     instructions,
     status:
       `A new ${result.filename} (built from "${ref.name}") is shown to the user. ` +

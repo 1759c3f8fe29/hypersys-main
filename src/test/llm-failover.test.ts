@@ -473,43 +473,44 @@ describe("classifyFailure", () => {
 // files' source and compares the literal status lists. Crude, and that is the
 // point: any edit to either side's list changes its source text, and the
 // assertion fails until both match.
-describe("dev/prod failover drift", () => {
+describe("dev/prod drift is now structural, not synchronised", () => {
   const read = (p: string) => readFileSync(join(__dirname, p), "utf8");
 
-  it("DEV_FAILOVER_STATUSES mirrors FAILOVER_STATUSES exactly", () => {
-    const dev = read("../../vite.config.ts").match(/DEV_FAILOVER_STATUSES = new Set\(\[([^\]]*)\]\)/);
-    const prod = read("../../api/_failover.js").match(/FAILOVER_STATUSES = new Set\(\[([^\]]*)\]\)/);
-    expect(dev, "DEV_FAILOVER_STATUSES not found in vite.config.ts").toBeTruthy();
-    expect(prod, "FAILOVER_STATUSES not found in api/_failover.js").toBeTruthy();
-    const normalise = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean).sort();
-    expect(normalise(dev![1])).toEqual(normalise(prod![1]));
+  // These two tests used to compare the literal text of two copies: prod's
+  // PROVIDER_ENDPOINTS against vite.config.ts's DEV_PROVIDER_ENDPOINTS, and
+  // FAILOVER_STATUSES against DEV_FAILOVER_STATUSES. They were written after the
+  // tokenrouter incident and they were the right call at the time.
+  //
+  // They are replaced rather than deleted, because the property they defended is
+  // now guaranteed by construction instead of by comparison: both copies are
+  // gone, and both surfaces import api/_providers.js and api/_failover.js. What
+  // is left to assert is that nobody reintroduces a copy — which is the only way
+  // the old drift can come back.
+  //
+  // Keeping the text-comparison tests would have been worse than removing them:
+  // they would read as green proof that dev and prod agree, while actually
+  // proving that two things that no longer exist still match.
+  it("the dev server declares no provider table of its own", () => {
+    // Matched on the DECLARATION, not on the name. Banning the bare identifier
+    // also bans explaining it, and the comment in vite.config.ts recording why
+    // the copy was removed is worth more than the extra character of strictness.
+    const dev = read("../../vite.config.ts");
+    expect(dev).not.toMatch(/DEV_PROVIDER_ENDPOINTS\s*[:=]/);
+    expect(dev).toMatch(/from "\.\/api\/_providers\.js"/);
   });
 
-  it("every provider in api/llm.js has an entry in the dev proxy", () => {
-    const prodSrc = read("../../api/llm.js");
-    const devSrc = read("../../vite.config.ts");
-    // The two maps are formatted differently (api/llm.js spreads each entry
-    // over lines; vite.config.ts puts one entry per line), so extract the keys
-    // between the map's opening and the first entry of each — or more simply,
-    // take the provider keys as the identifiers that carry a `url:` property
-    // somewhere in the following ~3 lines. Split on the map headers first.
-    const prodMap = prodSrc.slice(
-      prodSrc.indexOf("const PROVIDER_ENDPOINTS = {"),
-      prodSrc.indexOf("};", prodSrc.indexOf("const PROVIDER_ENDPOINTS = {")),
-    );
-    const devMap = devSrc.slice(
-      devSrc.indexOf("DEV_PROVIDER_ENDPOINTS"),
-      devSrc.indexOf("};", devSrc.indexOf("DEV_PROVIDER_ENDPOINTS")),
-    );
-    // api/llm.js: `nvidia: {` on its own line, url: on the next.
-    const prodKeys = [...prodMap.matchAll(/^\s{2}(\w+): \{$/gm)].map((m) => m[1]);
-    // vite.config.ts: `nvidia: { url: ...` inline.
-    const devKeys = [...devMap.matchAll(/^\s{2}(\w+): \{ url:/gm)].map((m) => m[1]);
-    expect(prodKeys.length, "provider map not found in api/llm.js").toBeGreaterThan(0);
-    expect(devKeys.length, "provider map not found in vite.config.ts").toBeGreaterThan(0);
-    for (const key of prodKeys) {
-      expect(devKeys, `vite.config.ts is missing provider "${key}"`).toContain(key);
-    }
+  it("the dev server declares no failover status set of its own", () => {
+    const dev = read("../../vite.config.ts");
+    expect(dev).not.toMatch(/DEV_FAILOVER_STATUSES\s*=/);
+    expect(dev).toMatch(/from "\.\/api\/_failover\.js"/);
+  });
+
+  it("api/llm.js declares no provider table of its own", () => {
+    // The other direction. A future edit that "inlines it back for clarity" puts
+    // the drift straight back, and this is the assertion that refuses it.
+    const prod = read("../../api/llm.js");
+    expect(prod).not.toMatch(/const PROVIDER_ENDPOINTS = \{/);
+    expect(prod).toMatch(/from "\.\/_providers\.js"/);
   });
 });
 

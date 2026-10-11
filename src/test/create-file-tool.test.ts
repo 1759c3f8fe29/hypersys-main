@@ -153,7 +153,7 @@ describe("what the model is told after a file is made", () => {
 });
 
 // The bare-arguments recovery path (see parseTextToolCalls in chat-format.ts)
-// salvaged a real emission: glm-5.3-free streamed "Creating a pptx on AI vs HI
+// salvaged a real emission: GLM 5.3 streamed "Creating a pptx on AI vs HI
 // now." plus a fenced {title, slides} and never named the tool. The salvaged
 // object is the CONTENT the model meant to write, not the arguments — this
 // suite pins the repair that turns it back into what the executor reads.

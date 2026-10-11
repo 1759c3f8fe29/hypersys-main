@@ -1,3 +1,5 @@
+import type { ImageResult } from '@/lib/search';
+
 export interface ChatAttachment {
   id: string;
   name: string;
@@ -13,6 +15,23 @@ export interface MessageSource {
   link: string;
   source?: string | null;
 }
+
+// A searched image shown in a gallery under an assistant reply.
+//
+// Distinct from a generated image (`imageUrl` on the message) on purpose: these are
+// REAL pictures retrieved from the web, each with its own source page for
+// attribution, and the app must never swap one for a generated picture. `imageUrl`
+// and `thumbnailUrl` are the provider's own URLs — the grid loads the thumbnail,
+// the lightbox opens the original.
+//
+// Unlike generated images (data URLs held in tab memory) these are remote http(s)
+// URLs, so they are safe to persist on the Firestore doc and re-render on reload.
+//
+// An alias rather than a second declaration: the transport layer already models this
+// row (`ImageResult`, src/lib/search.ts) and `sanitizeImages` is the one place that
+// validates it. Two copies of the shape would be two places to add a field and one
+// place to forget — the drift this file's neighbours have been bitten by before.
+export type MessageImage = ImageResult;
 
 // A file the create_file tool produced, offered as a download under the reply.
 // `url` is an object URL owned by the tab that made it: valid until reload,

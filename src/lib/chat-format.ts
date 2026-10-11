@@ -399,7 +399,7 @@ export function unwrapJsonEnvelope(text: string): string | null {
 /**
  * Tool calls a model wrote as prose instead of structured `tool_calls` deltas.
  *
- * Measured 2026-09-12 on glm-5.3-free via tokenrouter: non-streamed tool passes
+ * Measured 2026-09-12 on GLM 5.3 via TokenRouter (provider removed 2026-10-11): non-streamed tool passes
  * always return a structured `tool_calls` array, but a streamed pass — the shape
  * the app uses — intermittently emits the call as literal text with
  * `finish_reason: "stop"`, e.g. a fenced `{"name": "web_search", "arguments":
@@ -497,7 +497,7 @@ export function parseTextToolCalls(
   // Bare-arguments form — the emission this function existed without knowing
   // about: a JSON object with no tool name anywhere in the text, preceded by a
   // one-line narration announcing the action. Observed 2026-09-13 on
-  // glm-5.3-free: "Creating a pptx on AI vs HI now." followed by a fenced
+  // GLM 5.3: "Creating a pptx on AI vs HI now." followed by a fenced
   // {title, slides:[…]} — the arguments to create_file, minus the filename and
   // format the schema requires, minus the name itself. The name matchers above
   // cannot see it, and neither can a whole-response-only gate: the narration is

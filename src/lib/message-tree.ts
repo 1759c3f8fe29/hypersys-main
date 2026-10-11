@@ -140,6 +140,9 @@ export function toTreeMessages(
     // Staged checklist (batch #9): carried through so the rendered forest
     // keeps the model's plan after a reload. Untouched — no field repair here.
     taskList: m.taskList,
+    // Retrieved-image gallery (spec §5): carried through so a reloaded
+    // conversation still shows the pictures a search_images turn found.
+    imageResults: m.imageResults,
   }));
 }
 

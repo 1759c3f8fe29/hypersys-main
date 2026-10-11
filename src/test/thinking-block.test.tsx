@@ -2,7 +2,7 @@
 //
 // The user's ask (2026-09-13) was "add capabilities of chatgpt"; the concrete
 // defect behind it was measured: reasoning models (kimi, nemotron, minimax,
-// glm-5.3-free) spend tens of seconds in `reasoning_content`, and the app
+// GLM 5.3) spend tens of seconds in `reasoning_content`, and the app
 // showed nothing — a stalled-looking empty bubble — then deleted the thinking
 // wholesale. The block is the fix, and its behaviors are the product here, so
 // they are asserted against the rendered DOM rather than left as comments:

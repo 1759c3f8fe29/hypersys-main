@@ -11,6 +11,7 @@
 // bookkeeping live here, every renderer lives in the generator.
 
 import { generateFile, isSupportedFormat, SUPPORTED_FORMATS } from "@/lib/file-generator";
+import { verifyArtifact, verifyDetail, verifyReason } from "@/lib/artifact-verify";
 import type { ToolContext, ToolResult } from "./types";
 import { asString } from "./types";
 import type { ToolSchema } from "@/lib/ai";
@@ -85,7 +86,7 @@ function resolveFormat(format: string, filename: string): string {
  * prose JSON — an answer containing a {"query": …} example — does not have
  * those keys and never reaches this far anyway (see parseTextToolCalls).
  *
- * The observation this exists for (2026-09-13, glm-5.3-free) even misspelled
+ * The observation this exists for (2026-09-13, GLM 5.3) even misspelled
  * the slide bullets as `bullet_points`, so the executor tolerates that
  * spelling too; see normalizeRecoveredDocumentArgs below.
  */
@@ -187,6 +188,35 @@ export async function executeCreateFile(
     return { ok: false, error: `create_file: ${result.error}` };
   }
 
+  // VERIFY BEFORE DELIVERING, and in this order for a reason.
+  //
+  // `generateFile` returning a blob is not evidence that the blob is a document.
+  // A zero-row xlsx, a pptx whose presentation part never got written, a pdf
+  // truncated at the header — all of those come back `ok: true` with a plausible
+  // byte count, and this function used to hand them straight to the model, which
+  // then told the user their file was ready and showed a link to something that
+  // will not open. The same bug is already recorded on the image path, where a
+  // 404 error page got saved under a `.png` name because `fetch` resolves for a
+  // 404 and `.blob()` on an error page succeeds.
+  //
+  // The check runs BEFORE `createObjectURL` and before the artifact is
+  // registered, so a file that fails never acquires a download URL and never
+  // appears in the user's download list. Verifying after registration would
+  // leave a refused file visible and downloadable, which is the same lie with an
+  // extra step.
+  const verdict = await verifyArtifact(format, new Uint8Array(await result.blob.arrayBuffer()));
+  if (!verdict.ok) {
+    return {
+      ok: false,
+      // Phrased for the model, which has to decide what to do next: the content
+      // it supplied is the thing it can change.
+      error:
+        `create_file: the ${format} was generated but could not be verified — ${verifyReason(verdict)}. ` +
+        `No download was offered. Check the content you passed for this format and try again; ` +
+        `do not tell the user the file is ready.`,
+    };
+  }
+
   // An object URL, not a data URL: these files can be megabytes, and the URL
   // lives only as long as the tab. Revoking is the caller's business once the
   // download link is gone (brief trap 6).
@@ -200,7 +230,12 @@ export async function executeCreateFile(
     ok: true,
     filename: result.filename,
     bytes: result.size,
+    // What was actually checked, in the words of the check. The model is told
+    // this so it can be specific without overclaiming: "verified: 2 sheet(s)"
+    // is true, "I opened and reviewed your spreadsheet" is not.
+    verified: verifyDetail(verdict),
     status:
-      "The file was created and a download link is already shown to the user. Say briefly what you made; do not paste the content back.",
+      "The file was created, its structure was verified, and a download link is already shown to the user. " +
+      "Say briefly what you made; do not paste the content back, and do not claim to have reviewed its contents.",
   };
 }

@@ -1,4 +1,4 @@
-// Text-form tool-call recovery: some providers — glm-5.3-free via tokenrouter,
+// Text-form tool-call recovery: some providers — GLM 5.3 via TokenRouter (provider removed 2026-10-11),
 // measured 2026-09-12 — intermittently stream a tool call as prose instead of
 // `tool_calls` deltas. The agent loop then treats the raw JSON as the final
 // answer and the search never runs. These tests pin the recovery's contract:

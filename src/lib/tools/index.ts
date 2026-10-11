@@ -17,6 +17,7 @@ import { EDIT_FILE_SCHEMA, executeEditFile } from "./edit-file";
 import { GENERATE_IMAGE_SCHEMA, executeGenerateImage } from "./generate-image";
 import { OCR_IMAGE_SCHEMA, executeOcrImage } from "./ocr-image";
 import { RUN_CODE_SCHEMA, executeRunCode } from "./run-code";
+import { SEARCH_IMAGES_SCHEMA, executeSearchImages } from "./search-images";
 import { TASK_LIST_TOOL } from "./task-list";
 import { WEB_SEARCH_SCHEMA, executeWebSearch } from "./web-search";
 import type { ToolSchema } from "@/lib/ai";
@@ -25,6 +26,7 @@ export type { AttachmentRef, ToolArtifacts, ToolContext, ToolDefinition, ToolRes
 
 const DEFINITIONS: ToolDefinition[] = [
   { name: "web_search", schema: WEB_SEARCH_SCHEMA, execute: executeWebSearch },
+  { name: "search_images", schema: SEARCH_IMAGES_SCHEMA, execute: executeSearchImages },
   { name: "generate_image", schema: GENERATE_IMAGE_SCHEMA, execute: executeGenerateImage },
   {
     name: "create_file",

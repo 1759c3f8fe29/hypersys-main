@@ -47,6 +47,13 @@ export interface ToolArtifacts {
   /** Files the user can download. */
   files?: Array<{ filename: string; url: string; mimeType: string }>;
   /**
+   * Real images retrieved from the web by `search_images`, rendered as an in-chat
+   * gallery. Kept separate from `images` (generated): a searched picture carries a
+   * source page and a provider URL, a generated one does not, and the two must never
+   * be conflated — a generated image is not a search result (spec §5.3).
+   */
+  imageResults?: import("@/components/chat/types").MessageImage[];
+  /**
    * One entry per `run_code` call (Part G).
    *
    * Execution is user-gated, so what the tool puts here is a STAGED script —

@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
 import { createPortal } from 'react-dom';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Maximize2, X, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown, ListChecks, Ellipsis } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Maximize2, X, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown, ListChecks, Ellipsis, ImageOff } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -24,7 +24,7 @@ import { openCodeArtifact, openFileArtifact, useHasArtifact } from '@/components
 import { LOGO_URL } from '@/lib/assets';
 import { formatElapsed } from '@/lib/duration';
 import { freshSeed, retryImageUrl } from '@/lib/image-url';
-import type { ChatAttachment, MessageCodeRun, MessageFile, MessageSource, MessageTaskList } from './types';
+import type { ChatAttachment, MessageCodeRun, MessageFile, MessageImage, MessageSource, MessageTaskList } from './types';
 import { RunButton, RunOutput } from './CodeRunner';
 import { isRunnableLanguage, useCodeRunner } from './use-code-runner';
 
@@ -43,6 +43,11 @@ interface ChatMessageProps {
   modelName?: string;
   statusText?: string;
   sources?: MessageSource[];
+  // Real images retrieved from the web by `search_images`, shown as a gallery.
+  // Distinct from `imageUrl` (a generated picture): these carry a source page and
+  // are never downloaded on the user's behalf, and a generated image must never
+  // stand in for one (spec §5).
+  imageResults?: MessageImage[];
   followUps?: string[];
   files?: MessageFile[];
   // Python the run_code tool staged this turn (Part G). Nothing has executed:
@@ -496,6 +501,203 @@ function GeneratedImage({ url, onDownload, downloaded }: {
               Close
             </button>
           </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+// Real images retrieved from the web by `search_images`.
+//
+// Deliberately NOT the GeneratedImage component, and the differences are the point:
+// a searched picture has a source page, no download rights the app can assume, and
+// dozens of siblings in a grid. So each tile is one of a responsive set, its primary
+// affordance is "open larger", and its attribution links to the page it was found on.
+//
+// Each tile owns its loading/failed state so one dead thumbnail cannot blank the
+// grid, and a failed tile becomes a titled link to its source page rather than a
+// broken-image icon — the spec's rule that a failed image must not leave the user
+// staring at nothing (spec §5.3).
+function ImageTile({
+  image,
+  onOpen,
+  registerRef,
+}: {
+  image: MessageImage;
+  onOpen: () => void;
+  registerRef: (el: HTMLButtonElement | null) => void;
+}) {
+  const [state, setState] = useState<'loading' | 'loaded' | 'failed'>('loading');
+  const label = image.title || image.source || 'image';
+  const host = image.pageUrl ? hostOf(image.pageUrl) : image.source || '';
+
+  if (state === 'failed') {
+    // A clickable fallback, not an empty box. The source link survives the picture.
+    return (
+      <a
+        href={image.pageUrl || '#'}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex flex-col items-center justify-center gap-1.5 h-32 rounded-xl border border-border/30 bg-background/40 p-2 text-center hover:border-primary/40 transition-colors"
+      >
+        <ImageOff className="w-5 h-5 text-muted-foreground" />
+        <span className="text-[11px] text-foreground/80 line-clamp-2">{label}</span>
+        <span className="text-[10px] text-primary inline-flex items-center gap-1">
+          View source <ExternalLink className="w-2.5 h-2.5" />
+        </span>
+      </a>
+    );
+  }
+
+  return (
+    <figure className="relative group/tile rounded-xl overflow-hidden border border-border/30 bg-background/40">
+      <button
+        ref={registerRef}
+        type="button"
+        onClick={onOpen}
+        aria-label={`View ${label} larger`}
+        className="block w-full cursor-zoom-in"
+      >
+        {state === 'loading' && (
+          <span className="absolute inset-0 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 text-primary animate-spin" />
+          </span>
+        )}
+        <img
+          src={image.thumbnailUrl}
+          alt={image.title || 'Search result image'}
+          // Lazy: a gallery can be a dozen remote images, and none below the fold
+          // should cost a request until it is scrolled to.
+          loading="lazy"
+          className={`w-full h-32 object-cover transition-opacity duration-300 ${state === 'loaded' ? 'opacity-100' : 'opacity-0'}`}
+          onLoad={() => setState('loaded')}
+          onError={() => setState('failed')}
+        />
+      </button>
+      {host && (
+        <figcaption className="absolute inset-x-0 bottom-0 px-2 py-1 text-[10px] text-white/90 bg-gradient-to-t from-black/70 to-transparent truncate">
+          <a href={image.pageUrl || '#'} target="_blank" rel="noopener noreferrer" className="hover:underline">
+            {host}
+          </a>
+        </figcaption>
+      )}
+    </figure>
+  );
+}
+
+function SearchedImageGallery({ images }: { images: MessageImage[] }) {
+  const [openIndex, setOpenIndex] = useState<number | null>(null);
+  const tileRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  // Focus + Escape + arrow navigation, the same contract as the generated-image
+  // lightbox: opening moves focus to the close control (or a keyboard user keeps
+  // tabbing through the conversation behind the overlay), closing restores it to the
+  // tile that opened it, and body scroll is locked so a phone drag does not scroll
+  // the chat underneath.
+  useEffect(() => {
+    if (openIndex === null) return;
+    closeRef.current?.focus();
+    const step = (delta: number) =>
+      setOpenIndex((i) => (i === null ? i : (i + delta + images.length) % images.length));
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenIndex(null);
+      else if (e.key === 'ArrowRight') step(1);
+      else if (e.key === 'ArrowLeft') step(-1);
+    };
+    document.addEventListener('keydown', onKey);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [openIndex, images.length]);
+
+  if (!images.length) return null;
+
+  const close = () => {
+    const i = openIndex;
+    setOpenIndex(null);
+    if (i !== null) tileRefs.current[i]?.focus();
+  };
+  const current = openIndex === null ? null : images[openIndex];
+
+  return (
+    <div className="mb-4" data-testid="image-gallery">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {images.map((img, i) => (
+          <ImageTile
+            key={`${img.imageUrl}-${i}`}
+            image={img}
+            onOpen={() => setOpenIndex(i)}
+            registerRef={(el) => { tileRefs.current[i] = el; }}
+          />
+        ))}
+      </div>
+
+      {current && createPortal(
+        <div
+          className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-black/90 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Image result, full size"
+          data-testid="image-gallery-lightbox"
+          onClick={(e) => { if (e.target === e.currentTarget) close(); }}
+        >
+          <img
+            src={current.imageUrl}
+            alt={current.title ? `${current.title}, full size` : 'Search result image, full size'}
+            className="max-w-[96vw] max-h-[78vh] w-auto h-auto object-contain rounded-lg shadow-2xl"
+            // A full-size source that 404s falls back to the thumbnail we know loaded.
+            onError={(e) => { const el = e.currentTarget; if (el.src !== current.thumbnailUrl) el.src = current.thumbnailUrl; }}
+          />
+          <div className="mt-3 flex items-center gap-2 max-w-[90vw]">
+            {images.length > 1 && (
+              <button
+                type="button"
+                aria-label="Previous image"
+                onClick={() => setOpenIndex((i) => (i === null ? i : (i - 1 + images.length) % images.length))}
+                className="flex items-center justify-center w-9 h-9 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/20 text-white transition-all"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+            )}
+            <div className="min-w-0 text-center">
+              <p className="text-sm text-white/90 truncate">{current.title || 'Image result'}</p>
+              {current.pageUrl && (
+                <a
+                  href={current.pageUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-white/70 hover:text-white inline-flex items-center gap-1"
+                >
+                  {current.source || hostOf(current.pageUrl)} <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </div>
+            {images.length > 1 && (
+              <button
+                type="button"
+                aria-label="Next image"
+                onClick={() => setOpenIndex((i) => (i === null ? i : (i + 1) % images.length))}
+                className="flex items-center justify-center w-9 h-9 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/20 text-white transition-all"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+          <button
+            ref={closeRef}
+            type="button"
+            onClick={close}
+            aria-label="Close image view"
+            className="mt-3 flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/20 text-sm font-medium text-white transition-all"
+          >
+            <X className="w-4 h-4" />
+            Close
+          </button>
         </div>,
         document.body,
       )}
@@ -1023,7 +1225,7 @@ export function buildMarkdownComponents(): Components {
  };
 }
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, followUps, files, codeRuns, taskList, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, imageResults, followUps, files, codeRuns, taskList, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedUser, setCopiedUser] = useState(false);
@@ -1127,7 +1329,8 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
       files?.length ||
       codeRuns?.length ||
       taskList?.tasks.length ||
-      sources?.length,
+      sources?.length ||
+      imageResults?.length,
   );
 
   const handleCopyAll = async () => {
@@ -1420,6 +1623,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             {!isUser && codeRuns && codeRuns.length > 0 && <CodeRunBlocks runs={codeRuns} />}
             {!isUser && taskList && taskList.tasks.length > 0 && <TaskListBlock list={taskList} />}
             {!isUser && sources && sources.length > 0 && <SourceChips sources={sources} />}
+            {!isUser && imageResults && imageResults.length > 0 && <SearchedImageGallery images={imageResults} />}
 
             {/* Post-response actions (#7): Retry, Copy, rate, read aloud, and
                 Continue when the reply was cut off. Under the content, where the
