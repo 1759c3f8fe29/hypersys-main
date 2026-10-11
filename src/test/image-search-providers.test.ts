@@ -161,30 +161,41 @@ describe("SerpApi image search", () => {
 });
 
 describe("runImageSearch", () => {
-  it("returns a configuration error and calls nothing when there is no key", async () => {
-    const calls = stubFetch([[/serpapi\.com/, () => json(IMAGES_OK)]]);
-    const logs: string[] = [];
-    const out = await runImageSearch("cats", 12, {}, (m) => logs.push(m));
-    // Not a fake success: no images, and an error the UI can render as a capability
-    // message (spec Test H). And crucially no request was made.
-    expect(out.images).toEqual([]);
-    expect(out.error).toBe("image_search_requires_serpapi_key");
-    expect(calls).toEqual([]);
-    expect(logs.join(" ")).toMatch(/SERPAPI_API_KEY/);
-  });
-
-  it("returns the provider's images on success", async () => {
-    stubFetch([[/serpapi\.com/, () => json(IMAGES_OK)]]);
-    const out = await runImageSearch("Lenovo G500", 12, { SERPAPI_API_KEY: "k" });
-    expect((out.images as unknown[]).length).toBe(2);
-    expect(out.error).toBeUndefined();
-  });
-
-  it("surfaces the provider reason when the key is present but the call fails", async () => {
-    stubFetch([[/serpapi\.com/, () => json({ error: "quota" })]]);
+  // The two tests that used to live here asserted that a keyless install returns
+  // `image_search_requires_serpapi_key` and contacts nothing. Both were true before
+  // 2026-10-11 and both are now the opposite of the required behaviour: Tavily's keyless
+  // tier answers with no credential, so "no key" stopped meaning "no images". The chain
+  // — merge order, the `degraded`/`error` split, the keyless leg — is asserted in
+  // src/test/search-providers.test.ts, next to the text chain it shares a function with.
+  // What stays here is the per-provider half: what SerpApi's leg reports about itself.
+  it("surfaces a reason when nothing usable comes back", async () => {
+    // Both legs are stubbed, so neither can win by throwing: this asserts the reason of
+    // the leg that ran first (keyless Tavily, since no Tavily key is configured).
+    stubFetch([
+      [/tavily\.com/, () => json({ images: [] })],
+      [/serpapi\.com/, () => json({ error: "quota" })],
+    ]);
     const out = await runImageSearch("cats", 12, { SERPAPI_API_KEY: "k" });
     expect(out.images).toEqual([]);
-    expect(out.error).toBe("serpapi_images_error");
+    expect(out.error).toBe("tavily_images_zero_results");
+  });
+
+  // SerpApi's rows are the rich half of the tier — thumbnail, dimensions and source page
+  // — and this is what proves a SerpApi-only install still gets them via the merge.
+  it("keeps SerpApi's thumbnails and source pages when Tavily answers nothing", async () => {
+    stubFetch([
+      [/tavily\.com/, () => json({ images: [] })],
+      [/serpapi\.com/, () => json(IMAGES_OK)],
+    ]);
+    const out = await runImageSearch("Lenovo G500", 12, { SERPAPI_API_KEY: "k" });
+    const images = out.images as Array<Record<string, unknown>>;
+    expect(images).toHaveLength(2);
+    expect(images[0].thumbnailUrl).not.toBe(images[0].imageUrl);
+    expect(images[0].pageUrl).toBeTruthy();
+    // A leg that was configured and failed is a real loss, so the response says so —
+    // and names it per-provider, rather than reporting the gallery as a failure.
+    expect(out.degraded).toBe(true);
+    expect(out.error).toBe("tavily:tavily_images_zero_results");
   });
 });
 

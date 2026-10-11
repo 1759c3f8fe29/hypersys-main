@@ -56,12 +56,18 @@ describe("executeSearchImages — refusal never becomes generation", () => {
     expect((out as unknown as { error: string }).error).toMatch(/do NOT generate/i);
   });
 
-  it("with no provider configured, reports it and refuses substitution", async () => {
+  it("with no provider reachable, reports it and refuses substitution", async () => {
+    // The reason string is the pre-Tavily one, kept as the input because a deployed
+    // proxy at an older revision still sends it and the decode table has to answer it.
+    // What it decodes to changed on 2026-10-11: it used to name SERPAPI_API_KEY as the
+    // missing thing, and Tavily's keyless tier has made SerpApi optional for images, so
+    // telling a user to configure it would be telling them to fix something that is not
+    // broken. The refusal is what this test is for, and it is unchanged.
     imageSearchStub.mockResolvedValue({ query: "cats", images: [], error: "image_search_requires_serpapi_key" });
     const ctx = ctxWith();
     const out = await executeSearchImages({ query: "cats" }, ctx);
     expect(out.ok).toBe(false);
-    expect((out as unknown as { error: string }).error).toMatch(/not configured/i);
+    expect((out as unknown as { error: string }).error).toMatch(/no image-search provider could be reached/i);
     expect((out as unknown as { error: string }).error).toMatch(/do NOT substitute a generated image/i);
     // Nothing was pushed to the gallery, so the UI cannot show a fake tile.
     expect(ctx.artifacts.imageResults).toBeUndefined();
@@ -105,8 +111,18 @@ describe("executeSearchImages — success", () => {
 
 describe("explainImageSearchError", () => {
   it("decodes known reasons and passes unknown ones through for HTTP codes", () => {
-    expect(explainImageSearchError("image_search_requires_serpapi_key")).toMatch(/not configured/);
-    expect(explainImageSearchError("serpapi_images_http_429")).toMatch(/429/);
+    expect(explainImageSearchError("image_search_requires_serpapi_key")).toMatch(/no image-search provider/i);
+    // 429 is decoded to a rate limit rather than interpolated as a number: an HTTP
+    // status is only worth relaying when it says something the user can act on.
+    expect(explainImageSearchError("serpapi_images_http_429")).toMatch(/rate-limiting/i);
+    expect(explainImageSearchError("serpapi_images_http_401")).toMatch(/401/);
+    expect(explainImageSearchError("tavily_images_http_429")).toMatch(/rate-limiting/i);
     expect(explainImageSearchError("weird_new_reason")).toBe("weird_new_reason");
+  });
+
+  it("names both providers' key-missing reasons as a deployment fact", () => {
+    for (const reason of ["tavily_key_missing", "serpapi_key_missing"]) {
+      expect(explainImageSearchError(reason)).toMatch(/no image-search API key is configured/i);
+    }
   });
 });

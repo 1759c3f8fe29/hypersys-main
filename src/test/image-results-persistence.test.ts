@@ -26,7 +26,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const { getDocs, addDoc } = vi.hoisted(() => ({
   getDocs: vi.fn(),
-  addDoc: vi.fn(async () => ({ id: "doc-1" })),
+  // Declared as variadic so `mock.calls[0][1]` is the document the route wrote rather
+  // than a tuple TS believes is empty — the assertion below reads that argument.
+  addDoc: vi.fn(async (..._args: unknown[]) => ({ id: "doc-1" })),
 }));
 
 vi.mock("@/lib/firebase", () => ({ db: {} }));
@@ -67,7 +69,7 @@ const STORED = [
   },
 ];
 
-function doc(id: string, data: Record<string, unknown>) {
+function doc(id: string, data: Record<string, unknown>): { id: string; data: () => Record<string, unknown> } {
   return { id, data: () => ({ role: "assistant", content: "hi", ...data }) };
 }
 
@@ -79,7 +81,7 @@ beforeEach(() => {
 });
 afterEach(() => errorSpy.mockRestore());
 
-async function read(rows: Array<{ id: string; data: Record<string, unknown> }>) {
+async function read(rows: Array<{ id: string; data: () => Record<string, unknown> }>) {
   getDocs.mockResolvedValueOnce({ docs: rows });
   return firestoreDb.getMessages("c1");
 }

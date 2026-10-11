@@ -48,23 +48,43 @@ export const SEARCH_IMAGES_SCHEMA: ToolSchema = {
 
 /**
  * Decode the image-search proxy's machine reasons into words the model can relay.
- * Same shape as `explainSearchError`; kept local because the reason vocabulary is
- * specific to the image tier (there is no keyless image fallback to blame).
+ * Same shape as `explainSearchError`, and now the same two providers: Tavily (keyed or
+ * keyless) and SerpApi. The reasons are per-provider because the failure is per-provider
+ * — "Tavily's five images came back but SerpApi's twelve did not" is a real state, and
+ * the response reports it as a degraded tier rather than as a failure.
  */
 export function explainImageSearchError(reason: string): string {
   switch (reason) {
+    // The terminal state: no provider answered. Kept under its old name because a
+    // deployment that has never set an image-search key still reaches it, and the
+    // wording now names both keys rather than the one that used to be the only path.
     case "image_search_requires_serpapi_key":
-      return "image search is not configured on this deployment (no image-search provider key), so no images could be retrieved";
+    case "image_search_unavailable":
+      return "no image-search provider could be reached for that query, so no images could be retrieved";
+    case "tavily_images_zero_results":
     case "serpapi_images_zero_results":
       return "the image provider returned no usable images for that query";
+    case "tavily_images_error":
     case "serpapi_images_error":
       return "the image provider rejected the request (quota or key)";
+    case "tavily_images_fetch_failed":
     case "serpapi_images_fetch_failed":
       return "the image provider could not be reached";
+    case "tavily_key_missing":
+    case "serpapi_key_missing":
+      return "no image-search API key is configured on this deployment";
     default:
-      return reason.startsWith("serpapi_images_http_")
-        ? `the image service answered with an error (${reason.split("_").pop()})`
-        : reason;
+      // Same `*_http_` family as the text side, decoded the same way and for the same
+      // reason: the status is only worth naming when it carries a meaning ("429" is a
+      // rate limit the user can act on by waiting; "403" is not), and Tavily's image
+      // tier spends the same quota as its text tier, so a 429 here is the likeliest
+      // failure and the one most worth naming.
+      if (/^(tavily|serpapi)_images_http_/.test(reason)) {
+        return reason.endsWith("_429")
+          ? "the image service is rate-limiting us"
+          : `the image service answered with an error (${reason.split("_").pop()})`;
+      }
+      return reason;
   }
 }
 
@@ -115,6 +135,9 @@ export async function executeSearchImages(
     ok: true,
     count: images.length,
     images: listed,
-    note: `${images.length} image(s) are now shown to the user in a gallery. Refer to them by title/source; do not describe visual detail you were not given and do not claim you generated them.`,
+    note:
+      `${images.length} image(s) are now shown to the user in a gallery. ` +
+      `${search.degraded ? "One image provider was unavailable, so this set is smaller than a full search would return. " : ""}` +
+      `Refer to them by title/source; do not describe visual detail you were not given and do not claim you generated them.`,
   };
 }

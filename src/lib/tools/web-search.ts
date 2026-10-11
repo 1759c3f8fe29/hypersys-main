@@ -64,6 +64,14 @@ function recencyWords(days: number): string {
  */
 export function explainSearchError(reason: string): string {
   switch (reason) {
+    case "tavily_key_missing":
+      return "the search API key is not configured";
+    case "tavily_error":
+      return "the search API rejected the request (quota or key)";
+    case "tavily_zero_results":
+      return "the search engine returned nothing for the query";
+    case "tavily_fetch_failed":
+      return "the search API could not be reached";
     case "serpapi_key_missing":
       return "the search API key is not configured";
     case "serpapi_error":
@@ -79,9 +87,18 @@ export function explainSearchError(reason: string): string {
     case "ddg_fetch_failed":
       return "the fallback search engine could not be reached";
     default:
-      return reason.startsWith("serpapi_http_") || reason.startsWith("ddg_http_")
-        ? `the search service answered with an error (${reason.split("_").pop()})`
-        : reason;
+      // The `*_http_` family is one shape from three providers, so the prefix list is
+      // what has to grow when a provider is added — a missing prefix here would relay
+      // "tavily_http_429" to the user verbatim. The status is decoded rather than
+      // interpolated: "the search service answered with an error (429)" is barely more
+      // useful than the raw code, while 429 is the one status with a plain-English
+      // meaning the user can act on, and it is the likeliest of them for any provider.
+      if (/^(tavily|serpapi|ddg)_http_/.test(reason)) {
+        return reason.endsWith("_429")
+          ? "the search service is rate-limiting us"
+          : `the search service answered with an error (${reason.split("_").pop()})`;
+      }
+      return reason;
   }
 }
 
@@ -108,8 +125,7 @@ export async function executeWebSearch(
 
   // Results are counted BEFORE the error check, not after. The provider chain
   // returns rows AND an error together when the primary engine died but a
-  // keyless fallback answered (api/_search-providers.js sets `degraded: true`
-  // on that tier). The old `if (search.error) return {ok:false}` ran first and
+  // fallback answered. The old `if (search.error) return {ok:false}` ran first and
   // threw those rows away, so the model was told "serpapi_error" on a turn
   // that actually had results — and, having nothing else to answer with,
   // produced a reply that was nothing but the failure notice (measured
@@ -118,11 +134,14 @@ export async function executeWebSearch(
   // treats the pair as legal; this is the agent path joining it.
   const results: SearchResult[] = (search.results || []).slice(0, 8);
 
-  if (search.error && results.length) {
-    // Degraded, not failed. Keep the rows, but label them: this tier is
-    // encyclopedic/programming indexes, not the live web, and the model must
-    // not present them as fresh Google results — the same honesty rule as the
-    // note buildSearchContext appends for the non-agent path.
+  if (results.length && (search.degraded || search.error)) {
+    // Not a failure, but not a clean primary answer either, and there are two
+    // different things to say about it. `degraded` is about the rows: Wikipedia and
+    // Stack Exchange are narrow indexes, so a row from them must not be presented as
+    // fresh Google output. `error` alone is about the route: the backup engine
+    // answered after the primary refused. Saying "narrower fallback indexes" for a
+    // Tavily→SerpApi failover would be false — SerpApi's rows are a full web index,
+    // and the model would hedge about good results.
     ctx.artifacts.sources = [...(ctx.artifacts.sources || []), ...results.filter((r) => r.link)];
     const rows = results.map((r, i) => ({
       index: i + 1,
@@ -131,12 +150,16 @@ export async function executeWebSearch(
       snippet: (r.snippet || "").slice(0, 500),
       date: r.date || null,
     }));
+    const provenance = search.degraded
+      ? "these rows are from narrower fallback indexes and may be incomplete or not fully current"
+      : "these rows come from the backup search engine rather than the primary one";
+    const why = search.error ? `The primary search engine failed (${explainSearchError(search.error)}); ` : "";
     return {
       ok: true,
       results: rows,
       answer: search.answerBox?.answer || null,
       total: rows.length,
-      note: `The primary search engine failed (${explainSearchError(search.error)}); these rows are from narrower fallback indexes and may be incomplete or not fully current. Tell the user this if you rely on them.`,
+      note: `${why}${provenance}. Tell the user this if you rely on them.`,
     };
   }
 

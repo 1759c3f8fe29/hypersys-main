@@ -114,8 +114,15 @@ describe("the diff tab exists at all", () => {
     openArtifact("file:report.csv");
     render(<ArtifactCanvas filesForTurn={files} />);
 
-    await waitFor(() => expect(screen.getByText("v2")).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Diff" })).toBeInTheDocument();
+    // Waits on the Diff button itself — the thing under test — rather than on the
+    // header's `v2` badge. The badge renders from props the moment the panel mounts,
+    // while the tab row renders once the body has resolved, so waiting on the badge
+    // returned while the body still said "Loading…" and the next `getByRole` then ran
+    // against a panel with no tabs yet. Measured 2026-10-11: green run alone (11s), red
+    // twice in a row inside a full-suite run on a loaded machine, at exactly this line.
+    // Every other test in this file already waits on the button; this one was the
+    // exception, and it was the only failure in the suite.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Diff" })).toBeInTheDocument());
   });
 
   it("is not offered when there is only one version", async () => {

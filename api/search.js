@@ -5,8 +5,10 @@
 // cannot drift (they had). What remains here is the route: auth, metering, method
 // and argument validation, caching, and the response.
 //
-// Set SERPAPI_API_KEY in the Vercel project env (see `vercel env add`). Without it
-// the route still answers, from the keyless providers, and says so in `error`.
+// Set TAVILY_API_KEY (primary) and/or SERPAPI_API_KEY (backup) in the Vercel project
+// env (see `vercel env add`). With neither, the route still answers: Tavily's keyless
+// mode covers web AND image search, and the text-only remainder of the tail covers the
+// rest — the payload says which one answered in `error`.
 
 import { applyGuard } from "./_guard.js";
 import { applyMeter } from "./_meter.js";

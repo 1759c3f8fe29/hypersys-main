@@ -25,7 +25,17 @@ export interface SearchResponse {
   related: string[];
   // Set by /api/search when every provider failed (missing key, quota, blocked
   // fallback). Lets the caller distinguish "search broke" from "web had nothing".
+  //
+  // Since Tavily became the primary engine this field can accompany usable rows, and
+  // it then means "why the primary was not the one that answered" — a different fact
+  // from `degraded` below, which is about the rows themselves. A caller that treats
+  // `error` alone as "the search failed" discards good results (the bug web_search's
+  // executor was fixed for on 2026-09-12); one that treats it as "the rows are weak"
+  // tells the user to hedge about results that are fine.
   error?: string;
+  // The rows came from a narrow index (Wikipedia, Stack Exchange) rather than a web
+  // index. Set only by the provider chain's last tier.
+  degraded?: boolean;
 }
 
 const SEARCH_PROXY_PATH = "/api/search";
@@ -53,6 +63,9 @@ export interface ImageSearchResponse {
   query: string;
   images: ImageResult[];
   error?: string;
+  // One of the two image providers was unavailable and the other answered. The rows
+  // are real and are shown; this only says the set is smaller than it could have been.
+  degraded?: boolean;
 }
 
 /**
@@ -109,11 +122,15 @@ export async function imageSearch(query: string, signal?: AbortSignal): Promise<
       console.error("Image search proxy error:", res.status, errText);
       return null;
     }
-    const data = (await res.json()) as { query?: string; images?: unknown; error?: string };
+    const data = (await res.json()) as { query?: string; images?: unknown; error?: string; degraded?: boolean };
     return {
       query: data.query ?? query,
       images: sanitizeImages(data.images),
       error: data.error,
+      // Carried, not dropped: a response saying "Tavily answered, SerpApi did not"
+      // is information the route took the trouble to send, and silently discarding it
+      // is how the tool ends up unable to tell a full gallery from a thin one.
+      degraded: data.degraded === true ? true : undefined,
     };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") throw err;

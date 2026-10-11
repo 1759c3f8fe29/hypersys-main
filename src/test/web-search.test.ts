@@ -135,6 +135,26 @@ describe("executeWebSearch — the three outcomes stay distinct", () => {
     expect(ctx.artifacts.sources?.map((s) => s.link)).toEqual(["https://a", "https://b"]);
   });
 
+  it("does not call a full-web fallback narrow, and does not call a broad one degraded", async () => {
+    // The two flags mean different things and the note has to say different things,
+    // because the model repeats the note to the user. `error` without `degraded` is the
+    // state the chain produces when the primary refused and a full-web backup answered
+    // (Tavily 429 → SerpApi's Google index, or Tavily 429 → keyless Tavily). Calling
+    // those rows "narrower fallback indexes … may be incomplete" would make the model
+    // hedge about results that are as good as the primary's would have been.
+    searchStub.mockResolvedValue({
+      error: "tavily_http_429",
+      results: [result("https://a")],
+    });
+    const out = await executeWebSearch({ query: "x" }, ctxWith());
+    const note = String(body(out).note);
+    expect(body(out).total).toBe(1);
+    expect(note).toMatch(/backup search engine/i);
+    expect(note).not.toMatch(/narrower|incomplete/i);
+    // The reason is still relayed, decoded — the user can act on "rate-limiting".
+    expect(note).toMatch(/rate-limiting/i);
+  });
+
   it("decodes the machine reason into words a user can act on", async () => {
     searchStub.mockResolvedValue({ error: "serpapi_key_missing" });
     const out = await executeWebSearch({ query: "x" }, ctxWith());

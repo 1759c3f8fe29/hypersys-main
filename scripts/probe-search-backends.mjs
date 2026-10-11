@@ -20,6 +20,8 @@
 //   2. is the shape stable (a JSON API beats a scraped layout, always)
 //   3. does it carry snippets, since a title and a URL alone cannot ground a claim
 
+import { readFileSync } from "node:fs";
+
 const query = process.argv.slice(2).join(" ") || "who won the 2026 super bowl";
 
 const UA =
@@ -42,6 +44,106 @@ async function get(url, init = {}) {
 }
 
 console.log(`query: ${JSON.stringify(query)}`);
+
+// ── 0. Tavily — the incumbent, keyed and keyless ──────────────────────────
+//
+// First, because it is the backend the chain now prefers, and because the question
+// this whole script asks changed answer on 2026-10-11: Tavily's documented keyless
+// mode (`X-Tavily-Access-Mode: keyless`) returns a full web result set with no
+// credential, which is the first keyless backend in this list that is a web index
+// rather than a scrape of one (DuckDuckGo) or an encyclopedia (Wikipedia).
+//
+// Also prints the one shape rule that decides whether a gallery renders at all:
+// `images` is an array of URL STRINGS by default and an array of objects only when
+// `include_image_descriptions` is set. The credential has nothing to do with it —
+// measured by running all four combinations — and the difference is invisible in a
+// count, which is exactly why the probe prints the element type.
+//
+// The key is reported as a boolean and never as a value, same rule as every probe
+// in this directory.
+
+function envFromDotEnv() {
+  let text = "";
+  try {
+    text = readFileSync(new URL("../.env", import.meta.url), "utf8");
+  } catch {
+    return {};
+  }
+  const out = {};
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
+    if (!m) continue;
+    let v = m[2].trim();
+    // Strip quotes. Reading .env by hand and leaving them on is a bug this repo has
+    // already paid for: a probe sent `"nvapi-..."` in a Bearer header and reported a
+    // live key as dead.
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    out[m[1]] = v;
+  }
+  return out;
+}
+
+const TAVILY_KEY = envFromDotEnv().TAVILY_API_KEY || "";
+console.log(`TAVILY_API_KEY: ${TAVILY_KEY ? `present (${TAVILY_KEY.length} chars)` : "absent"}`);
+
+async function tavily(body, key) {
+  const res = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(key ? { Authorization: `Bearer ${key}` } : { "X-Tavily-Access-Mode": "keyless" }),
+    },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, json: await res.json().catch(() => null) };
+}
+
+for (const [label, key] of [
+  ["keyed", TAVILY_KEY],
+  ["keyless", ""],
+]) {
+  if (label === "keyed" && !key) {
+    verdict("tavily keyed (text)", "skipped: no TAVILY_API_KEY in .env");
+    continue;
+  }
+  try {
+    const { status, json: j } = await tavily(
+      { query, search_depth: "basic", max_results: 8, include_answer: true, include_images: false },
+      key,
+    );
+    const hits = (j?.results || []).map(
+      (r) => `${r.title} — ${String(r.content || "").replace(/\s+/g, " ").slice(0, 60)}`,
+    );
+    verdict(
+      `tavily ${label} (text)`,
+      `HTTP ${status}, results=${hits.length}, ` +
+        `answer=${j?.answer ? `${j.answer.length}B` : "none"}, follow_ups=${(j?.follow_up_questions || []).length}`,
+      hits,
+    );
+  } catch (e) {
+    verdict(`tavily ${label} (text)`, `failed: ${e.message}`);
+  }
+}
+
+// The keyed leg only: keyless image search returns the same five rows, and the point
+// of printing two bodies is the shape switch, not the credential.
+for (const [label, body] of [
+  ["with descriptions", { query, search_depth: "basic", max_results: 12, include_images: true, include_image_descriptions: true }],
+  ["without descriptions", { query, search_depth: "basic", max_results: 12, include_images: true }],
+]) {
+  try {
+    const { status, json: j } = await tavily(body, TAVILY_KEY);
+    const imgs = j?.images || [];
+    const shape = imgs.length ? (typeof imgs[0] === "string" ? "strings" : "objects") : "empty";
+    verdict(
+      `tavily images (${label})`,
+      `HTTP ${status}, ${imgs.length} images, element type=${shape} — max_results does not move this count`,
+      imgs.map((i) => (typeof i === "string" ? i : i.url)),
+    );
+  } catch (e) {
+    verdict(`tavily images (${label})`, `failed: ${e.message}`);
+  }
+}
 
 // ── 1. DuckDuckGo html endpoint (the sibling of the dead lite one) ──────────
 try {

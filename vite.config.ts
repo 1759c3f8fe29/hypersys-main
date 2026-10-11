@@ -609,6 +609,7 @@ async function proxySearch(
   // which applies the mode-specific files (.env.development, .env.local) that
   // process.env alone does not see.
   const searchEnv = {
+    TAVILY_API_KEY: env("TAVILY_API_KEY"),
     SERPAPI_API_KEY: env("SERPAPI_API_KEY"),
     VITE_SERP_API_KEY: env("VITE_SERP_API_KEY"),
     VITE_SERPAPI_API_KEY: env("VITE_SERPAPI_API_KEY"),

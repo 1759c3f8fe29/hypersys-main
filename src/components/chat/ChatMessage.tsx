@@ -533,20 +533,36 @@ function ImageTile({
   const host = image.pageUrl ? hostOf(image.pageUrl) : image.source || '';
 
   if (state === 'failed') {
-    // A clickable fallback, not an empty box. The source link survives the picture.
-    return (
-      <a
-        href={image.pageUrl || '#'}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex flex-col items-center justify-center gap-1.5 h-32 rounded-xl border border-border/30 bg-background/40 p-2 text-center hover:border-primary/40 transition-colors"
-      >
+    // A titled fallback, not an empty box: the caption survives the picture.
+    //
+    // It is a link only when there is a source page to link to. Tavily's image tier
+    // returns rows with no `pageUrl` at all, and on a keyless install those rows are the
+    // whole gallery — so the old `href={image.pageUrl || '#'}` shipped a control labelled
+    // "View source" that navigated to the top of the current document. A link that
+    // promises a source page and goes nowhere is worse than no link.
+    const label_ = (
+      <>
         <ImageOff className="w-5 h-5 text-muted-foreground" />
         <span className="text-[11px] text-foreground/80 line-clamp-2">{label}</span>
-        <span className="text-[10px] text-primary inline-flex items-center gap-1">
-          View source <ExternalLink className="w-2.5 h-2.5" />
-        </span>
+        {image.pageUrl && (
+          <span className="text-[10px] text-primary inline-flex items-center gap-1">
+            View source <ExternalLink className="w-2.5 h-2.5" />
+          </span>
+        )}
+      </>
+    );
+    const box = 'flex flex-col items-center justify-center gap-1.5 h-32 rounded-xl border border-border/30 bg-background/40 p-2 text-center';
+    return image.pageUrl ? (
+      <a
+        href={image.pageUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={`${box} hover:border-primary/40 transition-colors`}
+      >
+        {label_}
       </a>
+    ) : (
+      <div className={box}>{label_}</div>
     );
   }
 
@@ -577,9 +593,16 @@ function ImageTile({
       </button>
       {host && (
         <figcaption className="absolute inset-x-0 bottom-0 px-2 py-1 text-[10px] text-white/90 bg-gradient-to-t from-black/70 to-transparent truncate">
-          <a href={image.pageUrl || '#'} target="_blank" rel="noopener noreferrer" className="hover:underline">
-            {host}
-          </a>
+          {/* A link only when there is somewhere to go — see the failed-tile fallback
+              above. The host itself is kept either way: it is the row's only attribution,
+              and Tavily's rows carry a host with no page. */}
+          {image.pageUrl ? (
+            <a href={image.pageUrl} target="_blank" rel="noopener noreferrer" className="hover:underline">
+              {host}
+            </a>
+          ) : (
+            <span>{host}</span>
+          )}
         </figcaption>
       )}
     </figure>

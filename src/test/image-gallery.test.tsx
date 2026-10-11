@@ -112,6 +112,66 @@ describe("opening a picture larger", () => {
   });
 });
 
+describe("the full-size image can fail on its own", () => {
+  // Measured, not hypothetical: a live probe (scripts/probe-image-search.mjs) of a
+  // real "Lenovo G500 laptop" search found one of the first three originals answering
+  // HTTP 403 text/html — a hotlink-protected host. The thumbnail from the provider's
+  // cache loaded fine every time. So the lightbox must open the original and, when
+  // that fails, show the picture the user already saw rather than a broken icon.
+  it("falls back to the thumbnail when the original is hotlink-blocked", () => {
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: /view lenovo g500 front larger/i }));
+    const shown = screen.getByAltText(/lenovo g500 front, full size/i) as HTMLImageElement;
+    expect(shown.src).toContain(IMAGES[0].imageUrl);
+
+    fireEvent.error(shown);
+    expect(shown.src).toBe(IMAGES[0].thumbnailUrl);
+
+    // And a second failure — the thumbnail itself being dead — must not bounce back
+    // to the original. Without that guard the two swap forever.
+    fireEvent.error(shown);
+    expect(shown.src).toBe(IMAGES[0].thumbnailUrl);
+  });
+});
+
+describe("a row with no source page gets no link to nowhere", () => {
+  // Tavily's image tier returns pictures with no `pageUrl`: it does not report which page
+  // each image was found on, and inventing one would put a real attribution on the wrong
+  // picture. On a keyless install those rows are the entire gallery, so this is not an
+  // edge case. Both places a source link is rendered used to fall back to `href="#"` —
+  // a control promising a source page that delivers the top of the current document.
+  //
+  // The host is still worth showing; it is the only attribution the row carries. It just
+  // is not a link.
+  const NO_PAGE: MessageImage[] = [
+    {
+      title: "Lenovo G500",
+      thumbnailUrl: "https://www.bhphotovideo.com/images/fb/g500.jpg",
+      imageUrl: "https://www.bhphotovideo.com/images/fb/g500.jpg",
+      pageUrl: "",
+      source: "bhphotovideo.com",
+    },
+  ];
+
+  it("shows the host as plain text in the caption rather than an anchor to '#'", () => {
+    const c = mount(NO_PAGE);
+    const caption = c.querySelector('[data-testid="image-gallery"] figcaption');
+    expect(caption?.textContent).toContain("bhphotovideo.com");
+    expect(caption?.querySelector("a")).toBeNull();
+  });
+
+  it("does not offer 'View source' on a failed tile with nowhere to go", () => {
+    const c = mount(NO_PAGE);
+    fireEvent.error(c.querySelector('[data-testid="image-gallery"] img') as Element);
+    const grid = c.querySelector('[data-testid="image-gallery"]') as HTMLElement;
+    // The title survives — a dead tile still has to say what it was.
+    expect(grid.textContent).toContain("Lenovo G500");
+    // But nothing in the grid claims to be a link, and nothing offers to view a source.
+    expect(grid.querySelector("a")).toBeNull();
+    expect(grid.textContent).not.toMatch(/view source/i);
+  });
+});
+
 describe("a failed thumbnail fails alone", () => {
   it("replaces the broken tile with a titled link to the source, keeping the rest", () => {
     const c = mount();
