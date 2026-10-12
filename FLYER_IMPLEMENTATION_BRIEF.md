@@ -4523,3 +4523,189 @@ tools block was the one section whose content was genuinely duplicated elsewhere
 
 Gates: tsc clean, 71 files / 998 tests green, vite build clean, eslint clean (one pre-existing
 react-refresh warning at `ChatMessage.tsx:917`).
+
+### 65. Tavily took the primary slot, and the swap found two defects that were already shipping
+
+Asked verbatim: *"Read and execute tavily.com/agent-setup/SKILL.md … tvly-dev-… and it is 100x better
+than serpapi"*.
+
+**Implemented as REST calls, not as the skill's CLI.** `api/_search-providers.js` is imported by
+`vite.config.ts` at build time and must stay dependency-free, and the agent-skill route wants a `tvly`
+binary installed plus a CLI login. Two `fetch` calls to `api.tavily.com/search` return the same data
+with no new dependency, no binary, and no credential outside `.env`, where the key lives server-side
+only as `TAVILY_API_KEY` (58 chars, no `VITE_` prefix, gitignored). The skill's CLI/agent-skill install
+was not performed; what that trades away is recorded in the report that closes this work.
+
+**The chain after the swap**, in the provider file's own header where the tier order lives:
+
+```
+text    Tavily (key) → SerpApi (key) → Tavily (keyless) → DuckDuckGo → Wikipedia+SE
+images  Tavily (key or keyless) ‖ SerpApi (key), merged
+```
+
+Tavily took the primary slot for what it returns, not by preference: a synthesised `answer`,
+`follow_up_questions` that drop onto the chips the UI already renders, real page excerpts in `content`
+rather than SERP meta-descriptions, and a documented keyless mode. That last one changes what a fresh
+clone gets. Before it, "no key" meant no web search: the chain fell straight through to Wikipedia and
+Stack Exchange and reported `degraded: true`.
+
+**Measured before wiring it in.** `scripts/probe-search-backends.mjs` gained a section 0 that reports
+credential presence and length (never the value), keyed against keyless text, and images with and
+without descriptions, printing the element type. Recorded 2026-10-11 for "Lenovo G500 laptop":
+
+- keyed and keyless text are **shape-identical**: 8 results, an 808-byte `answer`,
+  `follow_up_questions: null`, no `published_date` on any row. Keyless is a full web tier, so it must
+  not set `degraded` — the flag would tell the model to hedge about rows that are as good as the
+  primary's.
+- **keyless is not "no auth"**: without the `X-Tavily-Access-Mode: keyless` header the endpoint answers
+  401. The header is what accepts the request; there is no anonymous mode to fall back on.
+- `search_depth: basic` answered in **0.6-1.2s** against **5.99s** for `advanced` on the same query.
+- images come back as **exactly five rows and `max_results` does not move the count**, so the image tier
+  is a fixed five-row contribution and `condenseImages` is what decides the final grid.
+- 4 of the 5 image URLs served 206 image/jpeg; one answered 403 (a hotlink-protected host). That is why
+  the lightbox keeps its fallback-to-thumbnail path.
+
+**Defect 1, found by probing the flag instead of trusting the story: the comment was wrong about which
+input shapes the response.** The first version of `searchTavilyImages` documented its bare-string branch
+as a *keyless* fallback, and that story reads perfectly — keyless tiers usually return less. Measured
+across all four key × flag combinations: the element type tracks `include_image_descriptions` alone,
+everything else identical down to the same five URLs. The comment was rewritten to say what the branch
+actually tracks. Keeping both shapes is the point: dropping the flag is a one-word edit, and silently
+emptying the gallery is what it would cost.
+
+**Defect 2, caught by the test written to assert the keyless path reports nothing: a fresh clone was
+being told it had failed.** `runImageSearch` needs SerpApi *and* Tavily, and the first version
+synthesised `{ok: false, reason: "serpapi_key_missing"}` for a missing SerpApi key — so a keyless
+install got `degraded: true` and `error: "serpapi:serpapi_key_missing"` on a five-image gallery that was
+exactly as complete as that install could make it. One function up, `runSearch` had already been fixed
+for the same conflation and it survived here. An optional leg now yields `null` and is excluded from the
+loss list; only a leg that was *tried* can contribute a reason.
+
+**Defect 3, and the one a user would have seen: a link to nowhere on every row of a whole tier.**
+`ChatMessage.tsx` rendered each image's attribution as `href={image.pageUrl || "#"}`. Tavily's image
+tier returns no page URL at all — it does not report which page a picture was found on — so on a keyless
+install that fallback was the entire gallery: two places offering a "View source" link that jumps to the
+top of the current document. Both sites now branch, rendering an `<a>` only when there is a page and a
+`<div>`/`<span>` when there is not; the host stays as text because it is the only attribution the row
+carries. The tempting fix — substituting the first text result's URL — is a fabricated attribution on a
+real picture, and a test now forbids it.
+
+**A failing assertion that turned out to be right about the code.** `expect(error).toMatch(/quota or
+key/i)` failed, because `tavily_http_429` fell to the `*_http_` branch of `explainSearchError`. The
+decode was the thing that was wrong: 429 is a rate limit, and the user-facing sentence should say so.
+Both decoders now name it, and both the tool tests and the note test assert `/rate-limiting/i`.
+
+**The tests, all rewritten around per-request auth recording** — one URL is now two tiers (Tavily keyed
+and Tavily keyless), so a call-count assertion cannot tell them apart any more.
+`search-providers.test.ts` carries 10 chain tests and 7 image-tier tests; the new
+`tavily-provider.test.ts` carries 17 for the adapter (the exact body sent, including
+`include_images: false` on the text call because images are a second billed request; the four failure
+shapes; both image shapes; the http(s) allowlist; `hostOf`). Two blocks that pinned the pre-Tavily
+contract — `error: "serpapi_key_missing"` and `degraded: true` on a keyless install — were deleted with
+a comment saying why: that state no longer exists, and a test that kept them would assert the behaviour
+this change removed.
+
+**Eight mutants, four over the chain and four over the adapter, all killed:** the `degraded` flag on the
+narrow tier, the surviving first-provider reason, the keyless retry, the missing-key leg, the null
+`follow_up_questions` slice (kills 4 tests — the throw poisons every test sharing the fixture), the
+`include_images` cost guard, the keyless header, and `pageUrl: ""`. Two patterns had to be corrected
+before they applied; a `count=0` report means the mutant never applied, which is not a survivor, and one
+non-applying mutation left its pattern half-written — caught by re-reading the file rather than by a
+test.
+
+**One test defect, and only the full suite could see it.** `artifact-version-diff.test.tsx` waited on
+the header's `v2` badge before reaching for the `Diff` button. The badge renders from props as the panel
+mounts; the tab row only renders once the body has resolved (`ArtifactPanel` returns `Loading…` first).
+Green alone in 11s, red twice in a row inside a full-suite run on a loaded machine at exactly that line,
+and the only failure in either run. The wait is now on the Diff button itself, which is what every other
+test in that file already did.
+
+Gates: tsc clean (both project passes), 78 files / 1081 tests green, vite build clean, eslint clean
+(one pre-existing react-refresh warning at `ChatMessage.tsx:1142`).
+
+### 66. The default chain cut to the two legs the maintainer named, and the selection system retired with it
+
+Asked verbatim: *"add a task to speedup response by removing the system that check which model to use by
+testing, always use glm 5.3 flash with qwen fallback"*.
+
+**What the "system" was, located before anything was removed.** Three candidates existed and only one of
+them ran per request. The multi-leg route chain in `api/llm.js` walks a model's `routes` in order,
+calling each provider and waiting for a first byte until one answers: that is "checking which model to
+use" happening live, on the user's turn. `scripts/probe-default-candidates.mjs` was the probe that
+produced the 2026-10-09 order, a dev tool answering exactly the question the maintainer asked on
+2026-10-09 and reversed today. `scripts/verify-models.mjs` probes ids for existence, not for choice, and
+stays: a 410 on a catalogue id is drift detection and says nothing about which model should lead. The
+chain is what a turn pays for, so the chain is what changed; the candidate probe is deleted, because
+choosing the default by measurement is the practice being retired.
+
+**The cut.** The default now routes `z-ai/glm-5.3-flash` (NVIDIA) then `qwen/qwen3.8-27b` (Groq), and
+nothing else. Three legs were deleted, each with the reason it existed recorded in the entry rather than
+silently dropped: `openai/gpt-oss-120b` (763ms, same Groq pool) was insurance against one model
+*family* having a bad afternoon, a safeguard given up by choice; `z-ai/glm-5.3` (1.3-1.7s warm,
+49s/21.3s/21.3s cold) is aborted by the 22s non-final cap in its cold case, so mid-chain its whole
+contribution was a hop of added latency; `deepseek-ai/deepseek-v4.1-flash` (54-91s) was the reason the
+entry declared `firstByteAllowanceMs: 90_000`, and it is the one that can only ever sit last.
+
+**What a healthy turn pays now: the same as before, and saying so matters more than claiming a win.**
+The chain already led with flash, so a turn that works was already one request to NVIDIA. What the cut
+buys is in the paths that do not work: nothing behind the primary can burn a hop before the backup
+answers, and with no leg declaring an allowance the client's cold-start guard for this entry falls from
+220s to the flat 130s of `REQUEST_TIMEOUT_MS` (`requestBudgetMs` in Chat.tsx adds
+`max(firstByteAllowanceMs)` across the routes, and that maximum is now 0). A turn that hangs is
+therefore reported to the user 90s sooner instead of being waited out past the server's 190s chain
+deadline.
+
+**Red first, because the order test is the thing that was being changed.** The re-pinned assertion went
+in before the route edit: against the five-leg file it failed naming all three ids
+(`openai/gpt-oss-120b`, `z-ai/glm-5.3`, `deepseek-ai/deepseek-v4.1-flash`), and the new absence test
+failed on the deepseek id specifically. Then the routes changed and both went green.
+
+**A vacuous test replaced, found while rewriting its neighbour.** The old structural test searched the
+chain for the slow leg and `continue`d when it was absent — so after this cut it would have passed
+without checking anything at all, which reads as coverage and provides none. It now asserts the absence
+itself (`deepseek-v4.1-flash` and `z-ai/glm-5.3` must not appear in this chain), which cannot go
+vacuous the next time the tail is cut.
+
+**Three mutants, all killed.** qwen moved in front of flash: killed by the order test and by "leads with
+a leg that accepts tools". The deepseek leg re-added with its 90s allowance: killed by the order test
+and by the absence test, which is what proves that second test is load-bearing rather than decorative.
+
+Gates: tsc clean (both project passes), 78 files / 1081 tests green, vite build clean, eslint clean
+(one pre-existing react-refresh warning at `ChatMessage.tsx:1142`). Those four runs cover the working
+tree with this cut applied on top of entry 65's committed swap; the cut itself
+(`src/lib/providers.ts`, `src/test/providers.test.ts`, and the deleted probe) is uncommitted at the time
+of writing.
+
+### 67. The final report, written against the two specs themselves
+
+Both governing specs were recovered **verbatim** from this session's transcript rather than paraphrased
+from memory, because the report has to answer to their own structure and wording: the *MASTER
+TRANSFORMATION PROMPT* at `44e38bb9-…jsonl` line 1637 (2026-10-10T11:03Z, the 12 features, PART 7
+tests, PART 8 priorities, PART 9's report outline, closing "create tasks for implementation") and the
+*ADVANCED INTELLIGENCE UPGRADE* at line 3820 (2026-10-11T05:45Z, P1–P8, acceptance tests A–J, §13's ten
+required sections). "The tasks u made earlier" resolves to the seven-item list already living in this
+brief — item 1 (artifact verification) done, items 2–7 open — not to the three-item list the
+pre-compaction summary had recorded; both readings point at work that is still open, and §2 of the
+report carries that list with its current status.
+
+**Written to `HYPERSYS-FINAL-REPORT.md`** (repo root), following §13's ten sections, with a status word
+on every capability — implemented · tested / implemented · verified live / partial / unavailable — and
+an A–J acceptance table marking **Test A and B not met** (no calculator, no chart: `recharts` and
+`src/components/ui/chart.tsx` exist but nothing imports them), **Test E not met** (no mode selector,
+which the spec itself calls out as the thing that must not be a label-only control), and C, I, J
+partial. Every "unavailable" row carries its reason, and §9.3 records the one deliberate substitution:
+the Tavily **skill CLI was not installed**; the integration is direct REST because
+`api/_search-providers.js` is imported by `vite.config.ts` and must stay dependency-free — with the cost
+of that choice stated in the report rather than hidden.
+
+**The report's most load-bearing section is §9.5, what it does *not* claim.** The gates were run on the
+tree as it stands (§7: 78 files / 1081 tests, both typecheck passes, build, eslint), but the
+search/image work was verified by provider-level probes and the suite, **not** by driving the running
+browser UI end to end in this pass, and no manual click-through of A–J was performed after the last
+code change. A capability document that overstates is worse than none, so the section exists to keep
+§4 and §9 honest.
+
+**Gates:** unchanged and not re-run — this entry adds one markdown file at the repo root and touches no
+gated source; the four measurements quoted above are the last runs against the current tree.
+
+**Uncommitted at the time of writing:** entry 66's chain cut, this entry, and the report.

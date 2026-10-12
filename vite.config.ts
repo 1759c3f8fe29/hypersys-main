@@ -19,6 +19,13 @@ import { sanitiseMessages } from "./api/_messages.js";
 import { PROVIDER_ENDPOINTS, routePayloadFor } from "./api/_providers.js";
 // @ts-expect-error - plain JS module shared with the serverless routes, no .d.ts
 import { FAILOVER_STATUSES } from "./api/_failover.js";
+// The CORS header contract, same rule as the provider table: the proxy and the
+// production guard used to carry two hand-written lists, and the two of them
+// together managed to omit x-groq-api-key and every cross-origin response header.
+// @ts-expect-error - plain JS module shared with the serverless route, no .d.ts
+import { allowedRequestHeaders } from "./api/_guard.js";
+// @ts-expect-error - plain JS module shared with the serverless routes, no .d.ts
+import { setRouteHeaders, exposedResponseHeaders } from "./api/_headers.js";
 
 // Env available to the /api proxy handlers. Vite does NOT load .env into
 // process.env, so we populate this from loadEnv() at config time. Falls back
@@ -130,7 +137,10 @@ function localApiProxy(): Plugin {
           res.setHeader("Vary", "Origin");
         }
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key");
+        // Derived from the provider table and the shared wire module — see
+        // api/_guard.js for why a hand-written list was the wrong shape.
+        res.setHeader("Access-Control-Allow-Headers", allowedRequestHeaders());
+        res.setHeader("Access-Control-Expose-Headers", exposedResponseHeaders());
         res.setHeader("Access-Control-Max-Age", "3600");
 
         if (req.method === "OPTIONS") {
@@ -411,8 +421,9 @@ async function proxyLlm(
     }
 
     if (upstream.ok && upstream.body) {
-      res.setHeader("X-Served-By", route.provider);
-      res.setHeader("X-Served-Model", route.modelId);
+      // Identical to production's call site, through the same module: a dev run
+      // and a deployed run must attribute a reply the same way.
+      setRouteHeaders(res, route.provider, route.modelId);
       await streamResponse(upstream, res);
       return;
     }

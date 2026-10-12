@@ -143,6 +143,15 @@ export function toTreeMessages(
     // Retrieved-image gallery (spec §5): carried through so a reloaded
     // conversation still shows the pictures a search_images turn found.
     imageResults: m.imageResults,
+    // Attribution (src/lib/attribution.ts): a reply a backup route produced keeps
+    // saying so after a reload. Carried field by field rather than by spreading
+    // the row, like everything else here — a spread would quietly carry DB-only
+    // fields into the render tree, and this list is the one place that decides
+    // what a UI message may contain.
+    servedBy: m.servedBy,
+    servedName: m.servedName,
+    servedNote: m.servedNote,
+    toolsWithheld: m.toolsWithheld,
   }));
 }
 

@@ -15,11 +15,49 @@
 //
 // The behaviour below mirrors the dev proxy in vite.config.ts (L26-52) so a
 // request that works locally works in production. If you change one, change both.
+// The two header lists are no longer part of that burden: the response-header
+// contract comes from api/_headers.js and the request allow-list is derived from
+// api/_providers.js, and both surfaces call those.
+
+import { PROVIDER_ENDPOINTS } from "./_providers.js";
+import { exposedResponseHeaders } from "./_headers.js";
 
 const ALLOWED_METHODS = "GET, POST, OPTIONS";
-const ALLOWED_HEADERS =
-  "Content-Type, Authorization, X-Api-Key, X-Nvidia-Api-Key, X-Mistral-Api-Key";
 const MAX_AGE_SECONDS = "3600";
+
+/**
+ * The request headers a browser is allowed to SEND us. Derived from the provider
+ * table, not hand-written.
+ *
+ * It was hand-written, and it was wrong: the list named the NVIDIA and Mistral
+ * BYOK headers and omitted `x-groq-api-key`, so a cross-origin caller supplying a
+ * Groq key had its request stopped by preflight before it left the browser —
+ * "BYOK does not work" with nothing in our logs, because the request never
+ * arrived. Deriving from PROVIDER_ENDPOINTS means a new provider's byokHeader is
+ * allowed the moment the provider exists, which is the only version of this list
+ * that cannot drift.
+ *
+ * The import is safe on the cold-start path: api/_providers.js imports nothing
+ * at all, so this stays dependency-free in the sense that matters (no npm
+ * resolution, no I/O, no env reads at module scope).
+ */
+const BASE_ALLOWED_HEADERS = ["Content-Type", "Authorization", "X-Api-Key"];
+export function allowedRequestHeaders() {
+  const byok = Object.values(PROVIDER_ENDPOINTS)
+    .map((cfg) => cfg.byokHeader)
+    .filter(Boolean);
+  // Case-insensitively unique, so a provider that one day shares a header with
+  // the base list cannot produce a duplicated entry.
+  const seen = new Set();
+  return [...BASE_ALLOWED_HEADERS, ...byok]
+    .filter((h) => {
+      const key = h.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join(", ");
+}
 
 /** Header lookup that tolerates array values and casing. */
 function header(req, name) {
@@ -81,8 +119,16 @@ export function applyGuard(req, res) {
   }
 
   res.setHeader("Access-Control-Allow-Methods", ALLOWED_METHODS);
-  res.setHeader("Access-Control-Allow-Headers", ALLOWED_HEADERS);
+  res.setHeader("Access-Control-Allow-Headers", allowedRequestHeaders());
   res.setHeader("Access-Control-Max-Age", MAX_AGE_SECONDS);
+
+  // Which RESPONSE headers a cross-origin caller may read. The attribution pair
+  // (X-Served-By / X-Served-Model) is a custom header, so without this a
+  // cross-origin fetch resolves with both reading back as null and the UI shows
+  // no attribution at all — while the identical call same-origin, which is every
+  // dev run and the web deploy, works perfectly. release/ ships desktop builds
+  // pointed at the deployed API and is exactly that caller.
+  res.setHeader("Access-Control-Expose-Headers", exposedResponseHeaders());
 
   // Preflight: headers above are the entire answer.
   if (req.method === "OPTIONS") {

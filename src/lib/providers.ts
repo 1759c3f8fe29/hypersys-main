@@ -131,6 +131,21 @@ export interface ModelRoute {
   /** The exact model id this provider expects. */
   modelId: string;
   /**
+   * What to call these weights when this route is the one that answered, for a
+   * non-primary leg.
+   *
+   * A backup serves weights the entry's own name does not describe — "Flyer"
+   * answering from qwen/qwen3.8-27b is the misattribution the catalogue's
+   * single-source rule exists to prevent, and a byline that keeps saying "Flyer"
+   * after such a failover is exactly that lie, just quieter. The label is the
+   * name of THIS route's weights and nothing else, so it cannot drift from what
+   * it describes. Read by src/lib/attribution.ts; served-attribution.test.ts
+   * asserts every non-primary leg carries one — which is not a formality: that
+   * assertion failed the first time it ran, on two legs that had shipped without
+   * a name (see nemotron-vision and fast-small below).
+   */
+  label?: string;
+  /**
    * Extra time-to-first-byte headroom this route is known to need beyond the
    * router's per-attempt cap (FIRST_BYTE_TIMEOUT_MS in api/llm.js). The router
    * already gives a *last* route the whole remaining chain budget, so this
@@ -279,9 +294,11 @@ export const MODELS: ModelSpec[] = [
   // A mistral middle leg was considered and left out deliberately: the
   // mistral-medium route is its own picker entry now, and the old
   // open-mistral-nemo leg (2026-09-12) skipped tool calls on streamed tool
-  // passes — the exact failure a chain exists to absorb. flash's
-  // firstByteAllowanceMs: 90_000 below is what keeps the client's guard ahead
-  // of the 190s chain budget the server grants this entry.
+  // passes — the exact failure a chain exists to absorb.
+  // (That history also explains a field the chain no longer sets: the last leg
+  // used to declare firstByteAllowanceMs: 90_000 so the client's guard stayed
+  // ahead of the 190s chain budget. The 2026-10-12 two-leg cut removed the leg
+  // that needed it — see the routes block below for what that changes.)
   {
     // RE-CONVERGED 2026-10-04. An uncommitted edit had renamed this id to
     // "deepseek-v4.1-flash" and replaced the two-leg chain with a single NVIDIA
@@ -335,51 +352,44 @@ export const MODELS: ModelSpec[] = [
     shortLabel: "GLM Flash",
     description: "The default model. Flyer, with fast fallback.",
     routes: [
-      // RE-ORDERED 2026-10-09 FROM MEASUREMENT, not from preference.
-      // `scripts/probe-default-candidates.mjs`, streamed TTFB with a real tools
-      // payload, three runs each, all four candidates alive:
+      // CUT TO TWO LEGS 2026-10-12, maintainer-directed: "speedup response by
+      // removing the system that check which model to use by testing — always
+      // use glm 5.3 flash with qwen fallback". This is the chain, and there is
+      // nothing behind it to try: flash answers, or qwen answers, or the turn
+      // fails visibly.
       //
-      //   qwen/qwen3.8-27b           217ms   219ms   229ms
-      //   z-ai/glm-5.3-flash         815ms   550ms   626ms
-      //   z-ai/glm-5.3            49021ms 21338ms 21361ms   (1.3-1.7s once warm)
-      //   deepseek-ai/…-v4.1-flash 87914ms 53903ms 91202ms
-      //
-      // That retired the previous order, which led with `z-ai/glm-5.3`. Its best
-      // cold TTFB is 21.3s and the server's non-final first-byte cap is 22s
-      // (FIRST_BYTE_TIMEOUT_MS), so the default model was one jitter away from
-      // being aborted on every cold start — and the abort looks to the user like
-      // the app hanging, not like a failover.
-      //
-      // 1. Flyer — maintainer-directed as the default (2026-10-09) and
-      // the measurement agrees: 550ms, 3/3, accepts tools. Qwen is measurably
-      // faster still (217ms); the default is the maintainer's call, and the
-      // faster model sits directly behind it so failover costs nothing.
+      // 1. Flyer — the maintainer's pick, and the measurement agreed with it
+      // (550ms, 3/3, accepts tools; the probe table is pinned in
+      // providers.test.ts along with this order). Qwen is measurably faster
+      // still (217ms), which is why it sits directly behind: a failover to it
+      // costs nothing and can be quicker than the primary.
       { provider: "nvidia", modelId: "z-ai/glm-5.3-flash" },
       // 2. Qwen 3.8 27B — the fastest leg in the file, on a different provider
       // with a four-key pool, so a Groq rate limit costs a key rotation rather
-      // than the route.
-      { provider: "groq", modelId: "qwen/qwen3.8-27b" },
-      // 3. gpt-oss-120b, same pool, 763ms. A DIFFERENT FAMILY on purpose: a
-      // chain of near-identical models fails together when one family has a bad
-      // afternoon.
-      { provider: "groq", modelId: "openai/gpt-oss-120b" },
-      // 4. GLM 5.3 full. Demoted from first to fourth by the numbers above. It is
-      // genuinely quick warm (1.3-1.7s measured immediately after the cold runs)
-      // and genuinely unusable cold, and a first leg has to be the one that is
-      // never the problem. Mid-chain it is capped at the 22s non-final cap, which
-      // its cold case will sometimes miss — acceptable here, because missing it
-      // means failing over rather than failing.
-      { provider: "nvidia", modelId: "z-ai/glm-5.3" },
-      {
-        provider: "nvidia",
-        modelId: "deepseek-ai/deepseek-v4.1-flash",
-        // LAST, and it can only ever be last: 54-91s measured TTFB is far past
-        // the 22s cap every non-final position is held to, so anywhere else in
-        // this chain it would be aborted before it ever answered. Only the final
-        // position gets the server's isLastRoute relaxation and the whole
-        // remaining budget.
-        firstByteAllowanceMs: 90_000,
-      },
+      // than the route. Labelled because it can be the one that answers: see
+      // ModelRoute.label — a reply from these weights must not be attributed to
+      // the entry's own name.
+      { provider: "groq", modelId: "qwen/qwen3.8-27b", label: "Qwen 3.8 27B" },
+      // THE THREE LEGS THIS REPLACED, and what dropping them costs. Recorded
+      // because each was there for a reason, and the reasons are given up
+      // deliberately rather than overlooked:
+      //
+      //   openai/gpt-oss-120b — 763ms, same Groq pool. It was insurance against
+      //     a bad afternoon for one model FAMILY: a chain of near-identical
+      //     models fails together. That safeguard is gone by choice; if flash
+      //     and qwen are both down, the turn fails with a visible error.
+      //   z-ai/glm-5.3 — 1.3-1.7s warm but 49s/21.3s/21.3s cold, so in a
+      //     non-final position the 22s cap aborts its cold case, and a hop that
+      //     gets aborted is pure added latency before the backup answers.
+      //   deepseek-ai/deepseek-v4.1-flash — 54-91s, and the reason this chain
+      //     used to declare firstByteAllowanceMs: 90_000 on its last leg. With
+      //     it gone the entry declares no allowance, so the client's cold-start
+      //     guard for the default falls from 220s to the flat 130s
+      //     (requestBudgetMs in Chat.tsx). That is the intended direction: the
+      //     server would still grant a last leg the whole 190s chain deadline,
+      //     but neither remaining leg has ever measured above a second, so a
+      //     turn that hangs is reported to the user at 130s instead of being
+      //     waited out.
     ],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
@@ -915,7 +925,14 @@ export const MODELS: ModelSpec[] = [
     hidden: true,
     routes: [
       { provider: "nvidia", modelId: "meta/llama-3.2-11b-vision-instruct" },
-      { provider: "nvidia", modelId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" },
+      // Labelled 2026-10-12. This leg shipped without a name, so a vision turn
+      // that fell through to it was reported as "NVIDIA NIM route" — true, and
+      // useless to a reader who wants to know which weights answered. Vision is
+      // the path where a failover changes the answer most: the leg above is a
+      // fast image captioner, this one a reasoning omni model, so reply length
+      // and character shift mid-chain and the byline is the only thing that can
+      // say why.
+      { provider: "nvidia", modelId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", label: "Nemotron Nano Omni" },
     ],
     contextWindow: 128_000,
     maxOutputTokens: 4096,
@@ -940,7 +957,13 @@ export const MODELS: ModelSpec[] = [
     // user reads.
     routes: [
       { provider: "nvidia", modelId: "nvidia/nvidia-nemotron-nano-9b-v2" },
-      { provider: "mistral", modelId: "ministral-8b-latest" },
+      // Labelled 2026-10-12, from the same sweep as nemotron-vision's second
+      // leg. Hidden entry, so no user reads this byline — but "hidden" is not
+      // "unreached": this is UTILITY_MODEL_ID, so a title generated on a failover
+      // holds this name in its attribution fields, and an anonymous route name
+      // there is the kind of gap that reads as a bug the first time anyone opens
+      // the data.
+      { provider: "mistral", modelId: "ministral-8b-latest", label: "Ministral 8B" },
     ],
     contextWindow: 128_000,
     maxOutputTokens: 2048,

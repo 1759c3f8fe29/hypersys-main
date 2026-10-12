@@ -28,6 +28,7 @@
 
 import { generateRoutedResponse } from "@/lib/ai";
 import type { ChatMessage, ToolCall, WireToolCall } from "@/lib/ai";
+import type { ServedLeg } from "@/lib/attribution";
 import { getModel, supportsTools } from "@/lib/providers";
 import { getTool, toolRecoveryInfos, toolSchemas } from "@/lib/tools";
 import type { AttachmentRef, ToolArtifacts, ToolContext } from "@/lib/tools";
@@ -113,6 +114,12 @@ export interface AgentRunResult {
   truncated?: boolean;
   /** The finish reason of the final pass, when the provider sent one. */
   finishReason?: string;
+  /**
+   * Which route answered — the FINAL pass's route, i.e. the one that wrote the
+   * text the user is reading. Earlier passes only produced tool calls, so their
+   * route is not what this field reports. Null when the server did not say.
+   */
+  served?: ServedLeg | null;
 }
 
 /** Parse model-supplied arguments without trusting them to be valid JSON. */
@@ -258,6 +265,7 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
       hitStepLimit: false,
       truncated: plain.finishReason === "length",
       finishReason: plain.finishReason,
+      served: plain.served ?? null,
     };
   }
 
@@ -298,6 +306,7 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
         hitStepLimit: lastStep,
         truncated: result.finishReason === "length",
         finishReason: result.finishReason,
+        served: result.served ?? null,
       };
     }
 
@@ -398,6 +407,7 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
         hitStepLimit: true,
         truncated: final.finishReason === "length",
         finishReason: final.finishReason,
+        served: final.served ?? null,
       };
     }
   }

@@ -158,6 +158,21 @@ export interface FirestoreMessage {
    * rated.
    */
   rating?: 'up' | 'down';
+  /**
+   * Who actually answered, for the replies where that is not the model the user
+   * picked (see src/lib/attribution.ts). Written only on a failover, so a null
+   * servedName means "the named weights answered" — which is also what every
+   * document written before these fields existed means, making the absence
+   * self-describing rather than a gap to guess about.
+   *
+   * servedNote is the sentence composed at the time of the turn, persisted
+   * rather than re-derived on read: the derivation needs the request's tool
+   * state as well as the route, and only the turn that ran holds both.
+   */
+  servedBy?: string | null;
+  servedName?: string | null;
+  servedNote?: string | null;
+  toolsWithheld?: boolean | null;
 }
 
 export const firestoreDb = {
@@ -294,7 +309,16 @@ export const firestoreDb = {
           // 'up' | 'down' when the reply was rated, undefined when it was not
           // (or when the rating was cleared) — never null, so the UI's truthiness
           // checks stay two-state.
-          rating: data.rating === 'up' || data.rating === 'down' ? data.rating : undefined
+          rating: data.rating === 'up' || data.rating === 'down' ? data.rating : undefined,
+          // Attribution. Undefined (never null, never '') when absent: the
+          // renderer's test is `servedName ? show it : show nothing`, and an
+          // empty string would pass a truthiness check in some renderers and
+          // produce an empty badge. A document written by another client with a
+          // non-string here is dropped rather than rendered.
+          servedBy: typeof data.servedBy === 'string' && data.servedBy ? data.servedBy : undefined,
+          servedName: typeof data.servedName === 'string' && data.servedName ? data.servedName : undefined,
+          servedNote: typeof data.servedNote === 'string' && data.servedNote ? data.servedNote : undefined,
+          toolsWithheld: data.toolsWithheld === true ? true : undefined,
         };
       });
       // Sort client-side to avoid needing a composite index
@@ -353,7 +377,12 @@ export const firestoreDb = {
     // The thinking block's payload (see FirestoreMessage.reasoning), plus the
     // staged checklist (batch #9). An object so the reasoning-free call sites
     // stay as they were rather than growing two more undefineds each.
-    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> }; imageResults?: FirestoreMessage['imageResults'] }
+    // The attribution fields (servedBy/servedName/servedNote/toolsWithheld) ride
+    // in here too, and only ever for a reply a backup route produced — see
+    // FirestoreMessage. They are part of `meta` for the same reason reasoning
+    // is: they are per-turn facts about how the reply was produced, not part of
+    // what the model said.
+    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> }; imageResults?: FirestoreMessage['imageResults']; servedBy?: string; servedName?: string; servedNote?: string; toolsWithheld?: boolean }
   ): Promise<string> {
     // Compute the sibling index: how many children this parent already has.
     // This is a read-then-write (not transactional), which is fine here —
@@ -423,6 +452,14 @@ export const firestoreDb = {
       // Retrieved-image gallery (spec §5). Null rather than omitted so a doc
       // with no gallery has the same shape as one that never could have one.
       imageResults: meta?.imageResults ?? null,
+      // Attribution, for the replies where it is not the obvious answer. Null
+      // (not absent) for the same shape reason as above, and the reader treats
+      // a null servedName as "the picked model answered" — which is what every
+      // message written before this existed means too.
+      servedBy: meta?.servedBy ?? null,
+      servedName: meta?.servedName ?? null,
+      servedNote: meta?.servedNote ?? null,
+      toolsWithheld: meta?.toolsWithheld === true ? true : null,
       createdAt: serverTimestamp()
     });
 

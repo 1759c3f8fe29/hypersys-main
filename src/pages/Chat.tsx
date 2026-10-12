@@ -32,6 +32,7 @@ import {
 } from '@/lib/prompts';
 import { webSearch, buildSearchContext } from '@/lib/search';
 import { runAgentTurn, AGENT_TOOLS_ENABLED, MAX_STEPS } from '@/lib/agent';
+import { describeAttribution, type ServedLeg } from '@/lib/attribution';
 import type { ToolArtifacts } from '@/lib/tools';
 import { LOGO_URL } from '@/lib/assets';
 import { extractDocument, canExtract, buildDocumentContext } from '@/lib/documents';
@@ -130,6 +131,29 @@ interface Message {
   // this reply, absent when unrated or cleared. Optimistic in session state;
   // persisted per message so it survives reloads and branch switches.
   rating?: 'up' | 'down';
+
+  // --- Attribution: who actually answered ---------------------------------
+  // Present ONLY when the reply came from a route other than the one the picked
+  // model's name promises (see src/lib/attribution.ts). Its absence is the
+  // common, silent case; there is no "servedBy === selected" state to check for.
+  //
+  // Kept as four flat fields rather than a nested object because that is how
+  // reasoning/thinkSeconds/truncated are stored, and because the Firestore write
+  // in firestore-db.ts sets each one explicitly.
+  /** Provider id that streamed it ("groq"), for logs and for the flag below. */
+  servedBy?: string;
+  /** What to call those weights — a backup leg's own name, never the picked one's. */
+  servedName?: string;
+  /** One sentence naming what happened, written when the turn ran so the wording
+   *  cannot drift from the state it describes. Shown as a tooltip. */
+  servedNote?: string;
+  /**
+   * True when this turn advertised tools and the serving route cannot accept
+   * them, so the payload gate stripped them before the request went out. The
+   * reply that follows could not have searched, read a file or run any code —
+   * which is otherwise indistinguishable from a model choosing not to.
+   */
+  toolsWithheld?: boolean;
 }
 
 interface Conversation {
@@ -1440,6 +1464,12 @@ export default function Chat() {
         // Filled in by the agent loop's tools; merged onto the message when the
         // turn finishes, alongside anything this pre-flight search produced.
         let agentArtifacts: ToolArtifacts = {};
+        // Which route actually streamed the reply, from the router's response
+        // headers (read into StreamResult.served). Every stream path below sets
+        // it; the last one to run wins, because that is the pass that wrote the
+        // text the user is reading. Null means the server did not say — an older
+        // deployment — and the message then claims no attribution at all.
+        let turnServed: ServedLeg | null = null;
         const shouldSearch = !hasImages && !useAgent && !isImageGen && forceWebSearch;
         const searchQuery = requestContent.trim();
         if (shouldSearch && searchQuery) {
@@ -1717,6 +1747,7 @@ export default function Chat() {
               { deepThink, onReasoning: handleReasoning },
             );
             if (r2?.finishReason === "length") runPrimaryTruncated = true;
+            turnServed = r2?.served ?? null;
           } else if (useAgent) {
             // The agent path. The model decides whether it needs to search,
             // render an image, or write a file, and this runs whatever it asks
@@ -1799,6 +1830,7 @@ export default function Chat() {
               onDiscardPartial: discardStreamed,
             });
             agentArtifacts = run.artifacts;
+            turnServed = run.served ?? null;
             if (run.truncated) runPrimaryTruncated = true;
             if (run.hitStepLimit) {
               // Not surfaced to the user: the loop still forces a prose answer
@@ -1810,6 +1842,7 @@ export default function Chat() {
             setStatusText(deepThink ? 'Thinking deeply...' : 'Generating response...');
             const r3 = await generateChatResponse(messagesForModel, effectiveModelId, handleDelta, abortControllerRef.current!.signal, { deepThink, onReasoning: handleReasoning });
             if (r3?.finishReason === "length") runPrimaryTruncated = true;
+            turnServed = r3?.served ?? null;
           }
 
           return sanitizeAssistantText(fullContent);
@@ -1864,6 +1897,31 @@ export default function Chat() {
         // unlike agentImageUrl (a single *generated* image) this is the whole list.
         const agentImageResults = agentArtifacts.imageResults || [];
 
+        // Who answered, versus who was asked. The router announces the winner on
+        // every stream (X-Served-By / X-Served-Model) and nothing read it until
+        // now — src/lib/attribution.ts has the full story of what that hid.
+        //
+        // `useAgent` is passed because toolsWithheld is only meaningful on a turn
+        // that actually asked for tools: on a model the catalogue already marks
+        // tool-less, the absence of tools was this client's own decision, not a
+        // route refusing them.
+        //
+        // Only a DISAGREEMENT is stamped. The common case — the named weights
+        // answered — stores nothing, so no reader has to ask whether the
+        // attribution "really" matches, and messages written before this existed
+        // stay readable with the fields simply absent.
+        const attribution = turnServed
+          ? describeAttribution(effectiveModelId, turnServed, { toolsAdvertised: useAgent })
+          : null;
+        const turnAttribution = attribution && !attribution.sameLeg && turnServed
+          ? {
+              servedBy: turnServed.provider,
+              servedName: attribution.servedName,
+              servedNote: attribution.note,
+              toolsWithheld: attribution.toolsWithheld || undefined,
+            }
+          : undefined;
+
         if (cleaned) {
           const finalText = usedVisionFallback
             ? `${cleaned}\n\n*🔎 Analyzed with ${AI_MODELS.find(m => m.id === DEFAULT_VISION_MODEL)?.name || 'a vision model'} since ${selectedModelMeta.name} can't read images.*`
@@ -1889,6 +1947,9 @@ export default function Chat() {
                 imageResults: agentImageResults.length ? agentImageResults : m.imageResults,
                 sources: mergedSources.length ? mergedSources : undefined,
                 followUps: mergedFollowUps.length ? mergedFollowUps : undefined,
+                // Absent when the model the user picked answered. Spread rather
+                // than assigned so an undefined attribution adds no keys at all.
+                ...turnAttribution,
                 arenaResponses: activeArenaMode && m.arenaResponses
                   ? m.arenaResponses.map((ar, i) => ({ ...ar, content: secondaryResults[i] || ar.content }))
                   : undefined
@@ -1915,7 +1976,7 @@ export default function Chat() {
             // the explicit Image-model path has always done, and it renders the
             // same: ChatMessage hoists the markdown image out of the prose with
             // stripMarkdownImages, so this adds nothing visible to the reply.
-            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined });
+            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, ...turnAttribution });
             maybeExtractMemories(finalText);
           }
         } else if (agentImageUrl || agentFiles.length || agentImageResults.length) {
@@ -1925,12 +1986,12 @@ export default function Chat() {
           const madeText = agentImageUrl ? 'Here you go.' : agentImageResults.length ? `Here are ${agentImageResults.length} image${agentImageResults.length === 1 ? '' : 's'}.` : `Created ${agentFiles.map((f) => f.filename).join(', ')}.`;
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantMessage.id
-              ? { ...m, content: madeText, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns, taskList: agentTaskList ?? m.taskList, imageResults: agentImageResults.length ? agentImageResults : m.imageResults }
+              ? { ...m, content: madeText, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns, taskList: agentTaskList ?? m.taskList, imageResults: agentImageResults.length ? agentImageResults : m.imageResults, ...turnAttribution }
               : m)),
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
           if (convId && isAuthenticated) {
-            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined });
+            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, ...turnAttribution });
             maybeExtractMemories(madeText);
           }
         } else {
@@ -2798,6 +2859,9 @@ export default function Chat() {
                           sources={msg.sources}
                           followUps={msg.followUps}
                           files={msg.files}
+                          servedName={msg.servedName}
+                          servedNote={msg.servedNote}
+                          toolsWithheld={msg.toolsWithheld}
                           codeRuns={msg.codeRuns}
                           taskList={msg.taskList}
                           imageResults={msg.imageResults}

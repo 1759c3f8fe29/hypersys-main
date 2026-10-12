@@ -50,6 +50,15 @@ interface ChatMessageProps {
   imageResults?: MessageImage[];
   followUps?: string[];
   files?: MessageFile[];
+  // Attribution, present only when a route OTHER than the picked model's own
+  // first route produced this reply (src/lib/attribution.ts). All three are
+  // absent together in the common case — there is no "matched" value to check
+  // for, because a badge on every reply is noise.
+  servedName?: string;
+  servedNote?: string;
+  // The turn advertised tools and the serving route could not accept them, so
+  // api/_providers.js stripped them from the payload before it went out.
+  toolsWithheld?: boolean;
   // Python the run_code tool staged this turn (Part G). Nothing has executed:
   // each entry renders as a runnable block whose Run button — beside Copy — is
   // the only thing that starts the interpreter.
@@ -1248,7 +1257,7 @@ export function buildMarkdownComponents(): Components {
  };
 }
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, imageResults, followUps, files, codeRuns, taskList, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, imageResults, followUps, files, servedName, servedNote, toolsWithheld, codeRuns, taskList, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedUser, setCopiedUser] = useState(false);
@@ -1558,6 +1567,27 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   <img src={LOGO_URL} alt="Flyer AI" className="w-full h-full object-cover" />
                 </div>
                 <span className="text-sm font-bold bg-gradient-to-r from-primary to-brand2 bg-clip-text text-transparent">{modelName}</span>
+                {/* Who actually answered, when it was not the model the name
+                    above promises. The router has always said so on the
+                    response (X-Served-By / X-Served-Model); nothing read it, so
+                    a reply Qwen wrote was presented as Flyer's. Rendered from
+                    the stored fields, so it survives a reload — an attribution
+                    that vanished on refresh would be worse than none, because
+                    the byline would silently go back to the wrong answer.
+                    `title` carries the full sentence; the visible chip stays
+                    short so it does not compete with the reply itself. */}
+                {servedName && (
+                  <span
+                    title={servedNote || undefined}
+                    className="inline-flex items-center gap-1 text-[10px] font-semibold tracking-wide text-muted-foreground bg-secondary/60 border border-border/50 rounded-full px-2 py-0.5 cursor-help"
+                  >
+                    <span aria-hidden="true">↩</span>
+                    {servedName}
+                    <span className="sr-only">
+                      {servedNote || `This reply was produced by ${servedName}, not ${modelName}.`}
+                    </span>
+                  </span>
+                )}
                 {isArenaMode && (
                   <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-primary bg-primary/20 border border-primary/40 rounded-full px-2.5 py-0.5 shadow-sm">
                     👑 MODEL A
@@ -1596,6 +1626,22 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   lands when the reply ends. This is the ChatGPT placement: the
                   task list item #7. */}
             </div>
+
+            {/* The capability this turn lost, stated before the answer rather
+                than discovered by reading it. A reply from a route that cannot
+                accept tools could not have searched, read a file or run code,
+                and with no line here that is indistinguishable from the model
+                choosing not to use them — the spec's "if it displays a
+                capability it must connect to a real implementation, or be
+                clearly marked unavailable" read from the other direction.
+                Rendered only when the turn actually advertised tools, so a
+                model the catalogue already marks tool-less says nothing. */}
+            {toolsWithheld && (
+              <p className="mb-2 flex items-center gap-1.5 text-[11px] text-amber-500/90">
+                <span aria-hidden="true">⚠</span>
+                Tools were unavailable on this reply — no search, files or code could run.
+              </p>
+            )}
 
             {/* Content */}
             <div className="w-full pt-1">

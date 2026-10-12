@@ -14,6 +14,7 @@ import {
 // that lets `api/_failover.js` stay dependency-free (see providers.ts).
 import { parseTextToolCalls, stripReasoning } from "./chat-format";
 import type { RecoverySchemaInfo } from "./chat-format";
+import { readServedLeg, type ServedLeg } from "./attribution";
 
 // ---------------------------------------------------------------------------
 // API base — same-origin on the web, absolute on the desktop shell
@@ -180,6 +181,13 @@ export interface StreamResult {
    * something to show", not as "a `content` delta arrived".
    */
   sawContent: boolean;
+  /**
+   * The route that actually streamed this pass, from the router's response
+   * headers, or null when the server did not report one. A chain's later legs
+   * can be different weights, so this is not decoration: it is the only way to
+   * tell the user which model wrote the answer. See src/lib/attribution.ts.
+   */
+  served?: ServedLeg | null;
 }
 
 /** An OpenAI-style function schema advertised to the model. */
@@ -205,9 +213,14 @@ export async function generateChatResponse(
 ): Promise<StreamResult> {
   // The catalogue in providers.ts is the single source of truth: a known id
   // goes through the unified /api/llm router, which walks that model's
-  // provider chain and streams from the first one that answers. Every route
-  // in a chain serves the SAME model, so failing over changes who served the
-  // reply, never what model produced it.
+  // provider chain and streams from the first one that answers.
+  //
+  // This used to say that every route in a chain serves the SAME model, so a
+  // failover changed only who served the reply. That was true when every entry
+  // was single-route; it is false for the default entry, whose second leg is
+  // different weights (see the ModelRoute.routes rule in providers.ts). A
+  // failover therefore can change which MODEL wrote the answer, and the router
+  // says which one did — StreamResult.served, read from its response headers.
   if (getModel(modelId)) {
     return generateRoutedResponse(messages, modelId, onChunk, signal, opts);
   }
@@ -286,7 +299,7 @@ export async function generateRoutedResponse(
     throw new Error(routerError(response.status, errText));
   }
 
-  return pumpOpenAiStream(response, onChunk, {
+  const result = await pumpOpenAiStream(response, onChunk, {
     // Text-form recovery only applies to a pass that advertised tools — see the
     // pump's doc note. The names come from the schemas so prose that merely
     // mentions a tool can never match. The recovery schemas come through opts
@@ -297,6 +310,14 @@ export async function generateRoutedResponse(
     recoverySchemas: opts?.recoverySchemas,
     onReasoning: opts?.onReasoning,
   });
+
+  // Which route streamed this pass, off the router's own response headers. Read
+  // here rather than inside the pump because the pump is a payload parser and
+  // this is a wire contract — and because the header is only meaningful for a
+  // response that came from /api/llm at all. Null means the server did not
+  // report one (an older deployment, or a cross-origin call whose headers were
+  // never exposed), and callers must then claim nothing: see attribution.ts.
+  return { ...result, served: readServedLeg(response.headers) };
 }
 
 /**

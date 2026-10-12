@@ -22,6 +22,7 @@ import { applyMeter } from "./_meter.js";
 import { FAILOVER_STATUSES, RETRY_STATUSES, OVERLOAD_STATUSES, GONE_STATUSES } from "./_failover.js";
 import { sanitiseMessages } from "./_messages.js";
 import { PROVIDER_ENDPOINTS, routePayloadFor } from "./_providers.js";
+import { setRouteHeaders } from "./_headers.js";
 
 // Keep in step with PROVIDERS in src/lib/providers.ts. Server-side only, so no
 // VITE_-prefixed key is read here by preference — those get inlined into the
@@ -543,9 +544,12 @@ export default async function handler(req, res) {
     });
 
     if (result.upstream) {
-      // The client reads these to show who actually served the reply.
-      res.setHeader("X-Served-By", route.provider);
-      res.setHeader("X-Served-Model", route.modelId);
+      // The client reads these to show who actually served the reply — see
+      // src/lib/attribution.ts. Set through api/_headers.js rather than inline:
+      // the dev proxy emits the same pair, and two literal copies of a wire
+      // contract is the shape that let the provider table drift and left
+      // `npm run dev` sending no tools at all.
+      setRouteHeaders(res, route.provider, route.modelId);
       await pipeStream(result.upstream, res, req);
       return;
     }
