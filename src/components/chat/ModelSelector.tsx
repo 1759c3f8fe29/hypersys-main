@@ -1,15 +1,15 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, Search, Check } from 'lucide-react';
-import { AI_MODELS, type AIModel } from '@/components/chat/ChatSidebar';
+import { SELECTABLE_MODELS, type ModelSpec } from '@/lib/providers';
 
 interface ModelSelectorProps {
   selectedModel: string;
   onSelectModel: (id: string) => void;
 }
 
-const KIND_ORDER: AIModel['kind'][] = ['Chat', 'Vision', 'Image'];
-const KIND_META: Record<AIModel['kind'], { label: string; emoji: string }> = {
+const KIND_ORDER: ModelSpec['kind'][] = ['Chat', 'Vision', 'Image'];
+const KIND_META: Record<ModelSpec['kind'], { label: string; emoji: string }> = {
   Chat: { label: 'Chat', emoji: '💬' },
   Vision: { label: 'Vision', emoji: '👁️' },
   Image: { label: 'Image', emoji: '🎨' },
@@ -24,7 +24,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }: ModelSel
   const searchRef = useRef<HTMLInputElement>(null);
   const [panelPos, setPanelPos] = useState<{ top: number; right: number } | null>(null);
 
-  const active = AI_MODELS.find((m) => m.id === selectedModel) || AI_MODELS[0];
+  const active = SELECTABLE_MODELS.find((m) => m.id === selectedModel) || SELECTABLE_MODELS[0];
 
   // Compute the dropdown position when opening (below trigger, aligned right).
   const updatePosition = useCallback(() => {
@@ -68,10 +68,10 @@ export default function ModelSelector({ selectedModel, onSelectModel }: ModelSel
 
   const grouped = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const matches = AI_MODELS.filter((m) =>
+    const matches = SELECTABLE_MODELS.filter((m) =>
       !q ||
       m.label.toLowerCase().includes(q) ||
-      m.name.toLowerCase().includes(q) ||
+      m.shortLabel?.toLowerCase().includes(q) ||
       m.description.toLowerCase().includes(q),
     );
     return KIND_ORDER
@@ -171,7 +171,7 @@ export default function ModelSelector({ selectedModel, onSelectModel }: ModelSel
                       >
                         <span className="text-lg leading-none flex-shrink-0">{m.emoji}</span>
                         <span className="flex-1 min-w-0">
-                          <span className={`block text-sm font-medium truncate ${isActive ? 'text-primary' : 'text-foreground/90'}`}>{m.name}</span>
+                          <span className={`block text-sm font-medium truncate ${isActive ? 'text-primary' : 'text-foreground/90'}`}>{m.shortLabel || m.label}</span>
                           <span className="block text-[11px] text-muted-foreground/50 truncate">{m.description}</span>
                         </span>
                         {isActive && <Check className="w-4 h-4 text-primary flex-shrink-0" />}

@@ -107,9 +107,9 @@ describe("applyGuard", () => {
   it("advertises the BYOK key headers as allowed", () => {
     const res = mockRes();
     applyGuard(req("OPTIONS"), res);
-    const allowed = res.headers["Access-Control-Allow-Headers"];
-    expect(allowed).toContain("X-Nvidia-Api-Key");
-    expect(allowed).toContain("X-Mistral-Api-Key");
-    expect(allowed).toContain("Authorization");
+    const allowed = res.headers["Access-Control-Allow-Headers"].toLowerCase();
+    expect(allowed).toContain("x-nvidia-api-key");
+    expect(allowed).toContain("x-mistral-api-key");
+    expect(allowed).toContain("authorization");
   });
 });

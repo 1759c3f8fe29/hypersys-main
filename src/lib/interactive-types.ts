@@ -1,0 +1,464 @@
+// ---------------------------------------------------------------------------
+// Interactive Content Types — Safe, Typed Component Protocol
+// ---------------------------------------------------------------------------
+//
+// This module defines the typed protocol for interactive content that can be
+// rendered inside chat messages. The model generates structured component
+// descriptions, and trusted application code renders them using approved
+// components. No arbitrary HTML/JS execution.
+//
+// ---------------------------------------------------------------------------
+
+/** All supported interactive component types. */
+export type InteractiveComponentType =
+  | "calculator"
+  | "chart"
+  | "data_table"
+  | "map"
+  | "bill_splitter"
+  | "unit_converter"
+  | "planner"
+  | "quiz"
+  | "comparison"
+  | "percentage_calculator"
+  | "compound_interest_calculator"
+  | "time_calculator"
+  | "grade_calculator";
+
+/** Base interface for all interactive components. */
+export interface InteractiveComponentBase {
+  /** Stable component type identifier. */
+  type: InteractiveComponentType;
+  /** Optional unique key for persistence/updates. */
+  key?: string;
+  /** Human-readable title for accessibility and fallbacks. */
+  title: string;
+  /** Optional description/explanation shown alongside the component. */
+  description?: string;
+}
+
+/** Calculator components — editable inputs, immediate results. */
+export interface CalculatorComponent extends InteractiveComponentBase {
+  type: "calculator" | "percentage_calculator" | "compound_interest_calculator" | "time_calculator" | "grade_calculator";
+  /** Initial input values. */
+  inputs: Record<string, number | string>;
+  /** Input field definitions. */
+  fields: CalculatorField[];
+  /** Formula identifier — maps to a registered calculator function. */
+  formula: string;
+  /** Result precision (decimal places). */
+  precision?: number;
+  /** Whether to show the formula explanation. */
+  showExplanation?: boolean;
+}
+
+export interface CalculatorField {
+  /** Field identifier (matches inputs key). */
+  id: string;
+  /** Human label. */
+  label: string;
+  /** Input type. */
+  type: "number" | "select";
+  /** Unit suffix (e.g., "%", "$", "years"). */
+  unit?: string;
+  /** Minimum value (for numbers). */
+  min?: number;
+  /** Maximum value (for numbers). */
+  max?: number;
+  /** Step increment. */
+  step?: number;
+  /** Select options (for select type). */
+  options?: { value: string | number; label: string }[];
+  /** Placeholder text. */
+  placeholder?: string;
+  /** Whether this field is required. */
+  required?: boolean;
+}
+
+/** Chart components — real data visualizations. */
+export interface ChartComponent extends InteractiveComponentBase {
+  type: "chart";
+  /** Chart type. */
+  chartType: "bar" | "line" | "scatter" | "pie" | "donut" | "area";
+  /** Dataset for the chart. */
+  data: ChartDataset[];
+  /** Chart options. */
+  options?: ChartOptions;
+  /** Whether to show a data table below the chart. */
+  showDataTable?: boolean;
+  /** X-axis key (for line/scatter/bar). */
+  xKey?: string;
+  /** Y-axis keys (for line/scatter/bar). */
+  yKeys?: string[];
+  /** Label key (for pie/donut). */
+  labelKey?: string;
+  /** Value key (for pie/donut). */
+  valueKey?: string;
+}
+
+export interface ChartDataset {
+  /** Dataset label. */
+  label: string;
+  /** Data points. */
+  data: ChartDataPoint[];
+  /** Optional color override. */
+  color?: string;
+}
+
+export type ChartDataPoint = Record<string, string | number | null>;
+
+export interface ChartOptions {
+  /** Responsive container. */
+  responsive?: boolean;
+  /** Show legend. */
+  legend?: boolean;
+  /** Show grid lines. */
+  grid?: boolean;
+  /** Animation duration. */
+  animationDuration?: number;
+  /** Custom tooltip formatter. */
+  tooltipFormatter?: string; // Function name from registry
+  /** X-axis label. */
+  xAxisLabel?: string;
+  /** Y-axis label. */
+  yAxisLabel?: string;
+}
+
+/** Data table component — sortable, filterable tables. */
+export interface DataTableComponent extends InteractiveComponentBase {
+  type: "data_table";
+  /** Column definitions. */
+  columns: DataTableColumn[];
+  /** Row data. */
+  rows: Record<string, unknown>[];
+  /** Enable sorting. */
+  sortable?: boolean;
+  /** Enable filtering. */
+  filterable?: boolean;
+  /** Enable pagination. */
+  paginated?: boolean;
+  /** Rows per page. */
+  pageSize?: number;
+  /** Default sort column and direction. */
+  defaultSort?: { column: string; direction: "asc" | "desc" };
+}
+
+export interface DataTableColumn {
+  /** Column key (matches row data). */
+  key: string;
+  /** Column header. */
+  header: string;
+  /** Data type for sorting/formatting. */
+  type?: "string" | "number" | "date" | "boolean";
+  /** Format function name from registry. */
+  format?: string;
+  /** Column width. */
+  width?: string | number;
+  /** Whether column is visible by default. */
+  visible?: boolean;
+}
+
+/** Map component — interactive geographic display. */
+export interface MapComponent extends InteractiveComponentBase {
+  type: "map";
+  /** Map center coordinates [lat, lng]. */
+  center: [number, number];
+  /** Initial zoom level. */
+  zoom: number;
+  /** Map markers. */
+  markers: MapMarker[];
+  /** Optional polyline/polygon paths. */
+  paths?: MapPath[];
+  /** Map tile provider. */
+  tileProvider?: "openstreetmap" | "cartodb" | "stadia";
+  /** Show marker popups on click. */
+  showPopups?: boolean;
+  /** Height in pixels. */
+  height?: number;
+}
+
+export interface MapMarker {
+  /** Unique marker ID. */
+  id: string;
+  /** Coordinates [lat, lng]. */
+  position: [number, number];
+  /** Popup title. */
+  title?: string;
+  /** Popup description. */
+  description?: string;
+  /** Optional icon URL or emoji. */
+  icon?: string;
+  /** Custom marker color. */
+  color?: string;
+}
+
+export interface MapPath {
+  /** Path ID. */
+  id: string;
+  /** Coordinates [[lat, lng], ...]. */
+  coordinates: [number, number][];
+  /** Path color. */
+  color?: string;
+  /** Path weight. */
+  weight?: number;
+  /** Whether path is a polygon (closed). */
+  closed?: boolean;
+}
+
+/** Bill splitter component. */
+export interface BillSplitterComponent extends InteractiveComponentBase {
+  type: "bill_splitter";
+  /** Total bill amount. */
+  total: number;
+  /** Number of people. */
+  people: number;
+  /** Tip percentage. */
+  tipPercent?: number;
+  /** Tax percentage. */
+  taxPercent?: number;
+  /** Custom splits (overrides equal split). */
+  customSplits?: { name: string; amount: number; }[];
+  /** Currency symbol. */
+  currency?: string;
+}
+
+/** Unit converter component. */
+export interface UnitConverterComponent extends InteractiveComponentBase {
+  type: "unit_converter";
+  /** Conversion category. */
+  category: "length" | "weight" | "temperature" | "volume" | "area" | "speed" | "time" | "data" | "pressure";
+  /** From unit. */
+  fromUnit: string;
+  /** To unit. */
+  toUnit: string;
+  /** Input value. */
+  value: number;
+  /** Available units for this category. */
+  availableUnits: { value: string; label: string; symbol?: string }[];
+}
+
+/** Planner component — task scheduling, timelines. */
+export interface PlannerComponent extends InteractiveComponentBase {
+  type: "planner";
+  /** Planner mode. */
+  mode: "timeline" | "schedule" | "budget" | "tasks";
+  /** Items/tasks. */
+  items: PlannerItem[];
+  /** Total budget (for budget mode). */
+  totalBudget?: number;
+  /** Currency (for budget mode). */
+  currency?: string;
+  /** Start date (for timeline/schedule). */
+  startDate?: string;
+  /** End date (for timeline/schedule). */
+  endDate?: string;
+}
+
+export interface PlannerItem {
+  /** Item ID. */
+  id: string;
+  /** Item name. */
+  name: string;
+  /** Duration or cost. */
+  value: number;
+  /** Unit (hours, days, dollars, etc.). */
+  unit?: string;
+  /** Category/group. */
+  category?: string;
+  /** Start date (for timeline). */
+  startDate?: string;
+  /** End date (for timeline). */
+  endDate?: string;
+  /** Dependencies (other item IDs). */
+  dependencies?: string[];
+  /** Whether item is completed. */
+  completed?: boolean;
+}
+
+/** Quiz/flashcard component. */
+export interface QuizComponent extends InteractiveComponentBase {
+  type: "quiz";
+  /** Quiz questions. */
+  questions: QuizQuestion[];
+  /** Quiz mode. */
+  mode?: "practice" | "test" | "flashcard";
+  /** Shuffle questions. */
+  shuffle?: boolean;
+  /** Show explanations. */
+  showExplanations?: boolean;
+}
+
+export interface QuizQuestion {
+  /** Question ID. */
+  id: string;
+  /** Question text. */
+  question: string;
+  /** Question type. */
+  type: "multiple_choice" | "true_false" | "short_answer" | "flashcard";
+  /** Options (for multiple choice). */
+  options?: { id: string; text: string }[];
+  /** Correct answer(s). */
+  correctAnswer: string | string[];
+  /** Explanation for the answer. */
+  explanation?: string;
+  /** Points. */
+  points?: number;
+}
+
+/** Comparison component — side-by-side comparison. */
+export interface ComparisonComponent extends InteractiveComponentBase {
+  type: "comparison";
+  /** Items to compare. */
+  items: ComparisonItem[];
+  /** Comparison criteria. */
+  criteria: ComparisonCriterion[];
+  /** Layout orientation. */
+  orientation?: "horizontal" | "vertical";
+}
+
+export interface ComparisonItem {
+  /** Item ID. */
+  id: string;
+  /** Item name. */
+  name: string;
+  /** Item description. */
+  description?: string;
+  /** Criterion values (keyed by criterion ID). */
+  values: Record<string, string | number | boolean>;
+  /** Optional image/icon. */
+  image?: string;
+}
+
+export interface ComparisonCriterion {
+  /** Criterion ID. */
+  id: string;
+  /** Criterion label. */
+  label: string;
+  /** Criterion type. */
+  type: "text" | "number" | "boolean" | "rating" | "yes_no";
+  /** Higher is better (for sorting). */
+  higherIsBetter?: boolean;
+  /** Unit. */
+  unit?: string;
+}
+
+/** Union of all interactive component types. */
+export type InteractiveComponent =
+  | CalculatorComponent
+  | ChartComponent
+  | DataTableComponent
+  | MapComponent
+  | BillSplitterComponent
+  | UnitConverterComponent
+  | PlannerComponent
+  | QuizComponent
+  | ComparisonComponent;
+
+/** Response block — the structured protocol for streaming responses. */
+export type ResponseBlock =
+  | { type: "text"; content: string }
+  | { type: "markdown"; content: string }
+  | { type: "table"; headers: string[]; rows: string[][]; caption?: string }
+  | { type: "citations"; citations: Citation[] }
+  | { type: "image_gallery"; images: ImageGalleryItem[]; layout?: "grid" | "masonry" }
+  | { type: "interactive"; component: InteractiveComponent }
+  | { type: "artifact_card"; artifactId: string; title: string; kind: string; preview?: string }
+  | { type: "tool_activity"; tool: string; status: "running" | "completed" | "failed"; message?: string; metadata?: Record<string, unknown> }
+  | { type: "research_finding"; finding: ResearchFinding }
+  | { type: "chart_preview"; chartType: string; dataPreview: unknown; loading: boolean };
+
+export interface Citation {
+  id: string;
+  title: string;
+  url: string;
+  source?: string;
+  date?: string;
+  snippet?: string;
+}
+
+export interface ImageGalleryItem {
+  id: string;
+  url: string;
+  thumbnailUrl?: string;
+  title?: string;
+  alt?: string;
+  sourceUrl?: string;
+  sourceDomain?: string;
+  width?: number;
+  height?: number;
+  attribution?: string;
+}
+
+export interface ResearchFinding {
+  id: string;
+  claim: string;
+  evidence: string[];
+  citations: string[]; // citation IDs
+  confidence: "high" | "medium" | "low";
+  subtopic?: string;
+}
+
+/** Validation result for component data. */
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+/** Component registry entry. */
+export interface ComponentRegistryEntry<T extends InteractiveComponent = InteractiveComponent> {
+  type: InteractiveComponentType;
+  /** Component display name. */
+  name: string;
+  /** Description of what this component does. */
+  description: string;
+  /** Validate component data. */
+  validate: (data: unknown) => ValidationResult;
+  /** Default props for the component. */
+  defaults: Partial<T>;
+  /** Maximum limits for safety. */
+  limits: ComponentLimits;
+}
+
+export interface ComponentLimits {
+  maxFields?: number;
+  maxDataPoints?: number;
+  maxRows?: number;
+  maxColumns?: number;
+  maxMarkers?: number;
+  maxItems?: number;
+  maxQuestions?: number;
+  maxCriteria?: number;
+  maxTextLength?: number;
+}
+
+/** Registry of all approved interactive components. */
+export class InteractiveComponentRegistry {
+  private components = new Map<InteractiveComponentType, ComponentRegistryEntry>();
+
+  register<T extends InteractiveComponent>(entry: ComponentRegistryEntry<T>): void {
+    this.components.set(entry.type, entry as ComponentRegistryEntry);
+  }
+
+  get(type: InteractiveComponentType): ComponentRegistryEntry | undefined {
+    return this.components.get(type);
+  }
+
+  has(type: InteractiveComponentType): boolean {
+    return this.components.has(type);
+  }
+
+  validateComponent(component: InteractiveComponent): ValidationResult {
+    const entry = this.components.get(component.type);
+    if (!entry) {
+      return { valid: false, errors: [`Unknown component type: ${component.type}`], warnings: [] };
+    }
+    return entry.validate(component);
+  }
+
+  getAllTypes(): InteractiveComponentType[] {
+    return Array.from(this.components.keys());
+  }
+}
+
+export const interactiveComponentRegistry = new InteractiveComponentRegistry();

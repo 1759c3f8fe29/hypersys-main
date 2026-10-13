@@ -1,4 +1,7 @@
 import type { ImageResult } from '@/lib/search';
+import type { InteractiveComponent } from '@/lib/interactive-types';
+
+export type { InteractiveComponent };
 
 export interface ChatAttachment {
   id: string;
@@ -7,6 +10,13 @@ export interface ChatAttachment {
   type: 'image' | 'file';
   mimeType?: string;
   size?: number;
+}
+
+// Tool call being executed during streaming - for real-time display
+export interface StreamingToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
 }
 
 // Web-search results shown under an assistant reply that was grounded.

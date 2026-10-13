@@ -82,6 +82,12 @@ export interface RunAgentOptions {
   /** Fired when it finishes, so the status can clear or show a failure. */
   onToolEnd?: (event: AgentToolEvent & { ok: boolean }) => void;
   /**
+   * Fired when a tool call is assembled (id, name, arguments) — allows the UI
+   * to show tool calls in real-time during streaming (e.g., "Searching for...").
+   * This fires once per tool call when its arguments are complete.
+   */
+  onToolCall?: (call: { id: string; name: string; arguments: Record<string, unknown> }) => void;
+  /**
    * Fired when a step turned out to be a tool call, meaning any prose streamed
    * during it was narration ("Let me look that up") rather than the answer.
    *
@@ -248,7 +254,7 @@ const EMPTY_TURN_NOTICE =
  * design, because a model that cannot search should still answer.
  */
 export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResult> {
-  const { messages, modelId, onChunk, onReasoning, signal, deepThink, attachments, onToolStart, onToolEnd, onDiscardPartial } =
+  const { messages, modelId, onChunk, onReasoning, signal, deepThink, attachments, onToolStart, onToolEnd, onToolCall, onDiscardPartial } =
     opts;
 
   const artifacts: ToolArtifacts = {};
@@ -329,6 +335,9 @@ export async function runAgentTurn(opts: RunAgentOptions): Promise<AgentRunResul
     const outcomes = await Promise.all(
       result.toolCalls.map(async (call) => {
         const { args, error: parseError } = parseArgs(call, result.finishReason);
+        // Fire onToolCall with the parsed arguments so the UI can display
+        // the tool call in real-time during streaming.
+        onToolCall?.({ id: call.id, name: call.name, arguments: args });
         onToolStart?.({ name: call.name, args });
 
         if (parseError) {

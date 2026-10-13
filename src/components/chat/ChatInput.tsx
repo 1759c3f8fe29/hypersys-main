@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Mic, Square, ImagePlus, X, FileText, Atom, Globe, Plus } from 'lucide-react';
+import { Send, Mic, Square, ImagePlus, X, FileText, Atom, Globe, Plus, Sparkles, Zap, FlaskConical, Hammer } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSpeechToText } from '@/hooks/useSpeechToText';
 import { cn } from '@/lib/utils';
+import { ExecutionMode, EXECUTION_MODES, getModeOrder } from '@/lib/execution-modes';
 
 /**
  * Per-file attachment ceiling.
@@ -43,6 +44,8 @@ interface ChatInputProps {
   onToggleDeepThink?: () => void;
   webSearch?: boolean;
   onToggleWebSearch?: () => void;
+  executionMode?: ExecutionMode;
+  onChangeExecutionMode?: (mode: ExecutionMode) => void;
 }
 
 export default function ChatInput({
@@ -59,11 +62,14 @@ export default function ChatInput({
   onToggleDeepThink,
   webSearch = false,
   onToggleWebSearch,
+  executionMode = "auto",
+  onChangeExecutionMode,
 }: ChatInputProps) {
   const [message, setMessage] = useState(initialDraft);
   const [isFocused, setIsFocused] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [plusOpen, setPlusOpen] = useState(false);
+  const [modeOpen, setModeOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Which draft is currently loaded. A ref rather than state because it is not
   // rendered and must not cause a second pass: this is bookkeeping for "have I
@@ -607,6 +613,59 @@ export default function ChatInput({
                       <Globe className="w-[15px] h-[15px] flex-shrink-0" />
                       <span className="hidden md:inline">Search</span>
                     </button>
+                  )}
+
+                  {/* Execution mode selector — Auto/Quick/Research/Build.
+                      Shows the current mode with an icon, opens a dropdown on click. */}
+                  {onChangeExecutionMode && (
+                    <div className="relative flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setModeOpen(!modeOpen)}
+                        aria-label={`Execution mode: ${EXECUTION_MODES[executionMode].label}`}
+                        aria-expanded={modeOpen}
+                        aria-haspopup="listbox"
+                        title={EXECUTION_MODES[executionMode].description}
+                        className={cn(
+                          'flex items-center gap-1 h-8 px-1.5 sm:h-9 sm:px-2.5 rounded-full text-[12.5px] font-medium transition-colors flex-shrink-0',
+                          modeOpen
+                            ? 'bg-primary/20 text-primary border border-primary/50'
+                            : 'text-muted-foreground/70 hover:text-foreground border border-transparent hover:border-border/40',
+                        )}
+                      >
+                        <span className="text-[14px] flex-shrink-0" aria-hidden="true">{EXECUTION_MODES[executionMode].emoji}</span>
+                        <span className="hidden md:inline">{EXECUTION_MODES[executionMode].shortLabel}</span>
+                        <span className="hidden md:inline" aria-hidden="true">▼</span>
+                      </button>
+
+                      {modeOpen && (
+                        <div className="absolute bottom-full left-0 mb-1 z-20 w-40 sm:w-48">
+                          <div className="bg-popover border border-border rounded-lg shadow-lg overflow-hidden p-1">
+                            {getModeOrder().map((mode) => (
+                              <button
+                                key={mode}
+                                type="button"
+                                onClick={() => {
+                                  onChangeExecutionMode(mode);
+                                  setModeOpen(false);
+                                }}
+                                role="option"
+                                aria-selected={mode === executionMode}
+                                className={cn(
+                                  'w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs sm:text-sm font-medium transition-colors text-left',
+                                  mode === executionMode
+                                    ? 'bg-primary/20 text-primary'
+                                    : 'text-muted-foreground hover:text-foreground hover:bg-accent/50',
+                                )}
+                              >
+                                <span className="text-[14px] flex-shrink-0" aria-hidden="true">{EXECUTION_MODES[mode].emoji}</span>
+                                <span className="flex-1 truncate">{EXECUTION_MODES[mode].label}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   )}
 
                   {/* Voice — browser Web Speech API (live transcription). Hidden once

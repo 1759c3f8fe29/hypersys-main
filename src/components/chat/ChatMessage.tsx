@@ -24,9 +24,10 @@ import { openCodeArtifact, openFileArtifact, useHasArtifact } from '@/components
 import { LOGO_URL } from '@/lib/assets';
 import { formatElapsed } from '@/lib/duration';
 import { freshSeed, retryImageUrl } from '@/lib/image-url';
-import type { ChatAttachment, MessageCodeRun, MessageFile, MessageImage, MessageSource, MessageTaskList } from './types';
+import type { ChatAttachment, MessageCodeRun, MessageFile, MessageImage, MessageSource, MessageTaskList, InteractiveComponent, StreamingToolCall } from './types';
 import { RunButton, RunOutput } from './CodeRunner';
 import { isRunnableLanguage, useCodeRunner } from './use-code-runner';
+import { InteractiveContentRenderer } from '@/lib/interactive-renderer';
 
 interface ArenaResponse {
   modelId: string;
@@ -68,6 +69,10 @@ interface ChatMessageProps {
   // a reload (persisted text) while tick state resets — the honest behavior for
   // state the model cannot see and the user owns.
   taskList?: MessageTaskList;
+  // Interactive components (calculators, charts, tables, etc.) rendered in the message
+  interactiveComponents?: InteractiveComponent[];
+  // Tool calls being executed during streaming (for real-time display)
+  streamingToolCalls?: StreamingToolCall[];
   onFollowUp?: (question: string) => void;
   onRegenerate?: () => void;
   canRegenerate?: boolean;
@@ -300,6 +305,119 @@ function FollowUpChips({ followUps, onFollowUp }: { followUps: string[]; onFollo
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+// Tool calls being executed during streaming - shows what the model is doing
+// (searching, generating images, running code, etc.) in real-time like ChatGPT
+function ToolCallsDisplay({ toolCalls, isStreaming }: { toolCalls: StreamingToolCall[]; isStreaming: boolean }) {
+  const [expanded, setExpanded] = useState(true);
+
+  // Format tool call arguments for display
+  const formatArgs = (args: Record<string, unknown>): string => {
+    try {
+      const entries = Object.entries(args);
+      if (entries.length === 0) return '{}';
+      return entries
+        .map(([key, value]) => {
+          const strValue = typeof value === 'string' ? `"${value}"` : JSON.stringify(value);
+          return `${key}: ${strValue}`;
+        })
+        .join(', ');
+    } catch {
+      return JSON.stringify(args);
+    }
+  };
+
+  // Get a friendly label for each tool
+  const getToolLabel = (name: string): string => {
+    switch (name) {
+      case 'web_search':
+        return 'Web Search';
+      case 'generate_image':
+        return 'Generate Image';
+      case 'create_file':
+        return 'Create File';
+      case 'edit_file':
+        return 'Edit File';
+      case 'run_code':
+        return 'Run Code';
+      case 'ocr_image':
+        return 'OCR Image';
+      case 'search_images':
+        return 'Image Search';
+      default:
+        return name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+  };
+
+  // Get the appropriate icon for each tool
+  const getToolIcon = (name: string) => {
+    switch (name) {
+      case 'web_search':
+        return <Globe className="w-3.5 h-3.5" />;
+      case 'generate_image':
+        return <Sparkles className="w-3.5 h-3.5" />;
+      case 'create_file':
+        return <FileText className="w-3.5 h-3.5" />;
+      case 'edit_file':
+        return <FileCode2 className="w-3.5 h-3.5" />;
+      case 'run_code':
+        return <Terminal className="w-3.5 h-3.5" />;
+      case 'ocr_image':
+        return <ImageOff className="w-3.5 h-3.5" />;
+      case 'search_images':
+        return <Globe className="w-3.5 h-3.5" />;
+      default:
+        return <Sparkles className="w-3.5 h-3.5" />;
+    }
+  };
+
+  return (
+    <div className="border border-border/30 rounded-xl bg-secondary/30 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-secondary/50 transition-colors text-left"
+        aria-expanded={expanded}
+      >
+        <div className="flex items-center gap-2 text-primary/80">
+          <Loader2 className={`w-4 h-4 ${isStreaming ? 'animate-spin' : ''}`} />
+          <span className="text-sm font-medium text-foreground">Tools in progress</span>
+          {isStreaming && (
+            <span className="text-xs px-1.5 py-0.5 rounded-full bg-primary/20 text-primary font-medium">
+              Working…
+            </span>
+          )}
+        </div>
+        <div className="ml-auto flex items-center gap-1.5">
+          <span className="text-xs text-muted-foreground tabular-nums">{toolCalls.length}</span>
+          <ChevronDown className={`w-4 h-4 text-muted-foreground/50 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+        </div>
+      </button>
+      {expanded && (
+        <div className="border-t border-border/30 p-3 space-y-3 max-h-64 overflow-y-auto">
+          {toolCalls.map((call, index) => (
+            <div key={`${call.id}-${index}`} className="flex flex-col gap-2 text-sm">
+              <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-primary/15 text-primary">
+                  {getToolIcon(call.name)}
+                </div>
+                <span className="font-medium text-foreground">{getToolLabel(call.name)}</span>
+                {isStreaming && index === toolCalls.length - 1 && (
+                  <span className="ml-auto text-xs text-primary/70 animate-pulse">In progress…</span>
+                )}
+              </div>
+              <div className="ml-9 flex flex-col gap-1">
+                <div className="font-mono text-xs text-muted-foreground/80 bg-background/50 rounded px-2 py-1.5 border border-border/30">
+                  {formatArgs(call.arguments)}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -952,39 +1070,47 @@ function SourceChips({ sources }: { sources: MessageSource[] }) {
 
   return (
     <div className="mt-4 pt-3 border-t border-border/30">
-      <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-muted-foreground">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
+        className="flex items-center gap-1.5 mb-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+      >
         <Globe className="w-3.5 h-3.5" />
-        <span>Sources</span>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {shown.map((s, i) => (
-          <a
-            key={`${s.link}-${i}`}
-            href={s.link}
-            target="_blank"
-            rel="noopener noreferrer"
-            title={s.title}
-            className="group flex items-center gap-2 max-w-[260px] px-2.5 py-2 rounded-xl bg-secondary/50 hover:bg-secondary border border-border/30 transition-colors active:scale-[0.98]"
-          >
-            <span className="flex items-center justify-center w-4 h-4 shrink-0 rounded-full bg-primary/15 text-primary text-[10px] font-semibold">
-              {sources.indexOf(s) + 1}
-            </span>
-            <span className="flex flex-col min-w-0 leading-tight">
-              <span className="truncate text-xs text-foreground/90">{s.title}</span>
-              <span className="truncate text-[10px] text-muted-foreground">{s.source || hostOf(s.link)}</span>
-            </span>
-            <ExternalLink className="w-3 h-3 shrink-0 text-muted-foreground/60 group-hover:text-foreground/70" />
-          </a>
-        ))}
-        {hidden > 0 && (
-          <button
-            onClick={() => setExpanded(true)}
-            className="px-3 py-2 rounded-xl bg-secondary/40 hover:bg-secondary border border-border/30 text-xs text-muted-foreground transition-colors active:scale-[0.98]"
-          >
-            +{hidden} more
-          </button>
-        )}
-      </div>
+        <span>Sources ({sources.length})</span>
+        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="flex flex-wrap gap-2">
+          {shown.map((s, i) => (
+            <a
+              key={`${s.link}-${i}`}
+              href={s.link}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={s.title}
+              className="group flex items-center gap-2 max-w-[260px] px-2.5 py-2 rounded-xl bg-secondary/50 hover:bg-secondary border border-border/30 transition-colors active:scale-[0.98]"
+            >
+              <span className="flex items-center justify-center w-4 h-4 shrink-0 rounded-full bg-primary/15 text-primary text-[10px] font-semibold">
+                {sources.indexOf(s) + 1}
+              </span>
+              <span className="flex flex-col min-w-0 leading-tight">
+                <span className="truncate text-xs text-foreground/90">{s.title}</span>
+                <span className="truncate text-[10px] text-muted-foreground">{s.source || hostOf(s.link)}</span>
+              </span>
+              <ExternalLink className="w-3 h-3 shrink-0 text-muted-foreground/60 group-hover:text-foreground/70" />
+            </a>
+          ))}
+          {hidden > 0 && (
+            <button
+              onClick={() => setExpanded(true)}
+              className="px-3 py-2 rounded-xl bg-secondary/40 hover:bg-secondary border border-border/30 text-xs text-muted-foreground transition-colors active:scale-[0.98]"
+            >
+              +{hidden} more
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1257,7 +1383,7 @@ export function buildMarkdownComponents(): Components {
  };
 }
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, imageResults, followUps, files, servedName, servedNote, toolsWithheld, codeRuns, taskList, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, imageResults, followUps, files, servedName, servedNote, toolsWithheld, codeRuns, taskList, interactiveComponents, streamingToolCalls, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedUser, setCopiedUser] = useState(false);
@@ -1296,15 +1422,25 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
   const liveContentRef = useRef(strippedContent);
   liveContentRef.current = strippedContent;
   const [renderedContent, setRenderedContent] = useState(strippedContent);
+  // Track previous isStreaming to detect the transition from streaming -> not streaming
+  const prevIsStreamingRef = useRef(isStreaming);
   useEffect(() => {
     if (isUser) return;
-    if (!isStreaming) {
+    // Detect streaming -> not streaming transition and do a final flush
+    const wasStreaming = prevIsStreamingRef.current;
+    const nowStreaming = isStreaming;
+    prevIsStreamingRef.current = nowStreaming;
+
+    if (!nowStreaming) {
       // Final state: snap to the complete content immediately so there is no
       // one-frame lag where the last chunk is absent. Also resyncs when the
       // prop changes while idle (e.g. branch switch), which the old
       // [isStreaming,isUser] deps missed, leaving stale sibling text on screen.
       const next = liveContentRef.current;
       if (renderedContent !== next) setRenderedContent(next);
+      // If we just transitioned from streaming, the interval/raf from the
+      // previous effect run may not have flushed the final chunk yet.
+      // The snap above handles it synchronously in this render.
       return;
     }
     let cancelled = false;
@@ -1691,6 +1827,22 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
             {!isUser && files && files.length > 0 && <FileChips files={files} />}
             {!isUser && codeRuns && codeRuns.length > 0 && <CodeRunBlocks runs={codeRuns} />}
             {!isUser && taskList && taskList.tasks.length > 0 && <TaskListBlock list={taskList} />}
+            {!isUser && interactiveComponents && interactiveComponents.length > 0 && (
+              <div className="mt-4 space-y-4" data-interactive-components>
+                {interactiveComponents.map((comp, idx) => (
+                  <InteractiveContentRenderer
+                    key={`${comp.type}-${comp.key || idx}`}
+                    component={comp}
+                    instanceId={comp.key}
+                  />
+                ))}
+              </div>
+            )}
+            {!isUser && streamingToolCalls && streamingToolCalls.length > 0 && (
+              <div className="mt-4" data-streaming-tool-calls>
+                <ToolCallsDisplay toolCalls={streamingToolCalls} isStreaming={isStreaming} />
+              </div>
+            )}
             {!isUser && sources && sources.length > 0 && <SourceChips sources={sources} />}
             {!isUser && imageResults && imageResults.length > 0 && <SearchedImageGallery images={imageResults} />}
 
@@ -1723,29 +1875,6 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                     title="Copy response">
                     {copiedAll ? <><Check className="w-3.5 h-3.5 text-primary" /><span className="text-primary font-medium">Copied</span></> : <><Copy className="w-3.5 h-3.5" /><span>Copy</span></>}
                   </button>
-                )}
-                {/* Feedback (ChatGPT-style): rating is parent-owned state — the
-                    parent persists it per message, so it survives branch switches
-                    and reloads. Clicking the active thumb clears the rating, so one
-                    control covers rate/correct/unrate. Icon-only, so both carry
-                    state-tracking aria-labels (see the read-aloud button's note). */}
-                {onRate && hasReplyBody && (
-                  <>
-                    <button type="button"
-                      onClick={() => onRate('up')}
-                      aria-label={rating === 'up' ? 'Remove good rating' : 'Rate this response as good'}
-                      title={rating === 'up' ? 'Remove rating' : 'Good response'}
-                      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${rating === 'up' ? 'bg-primary/20 text-primary border-primary/30' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
-                      <ThumbsUp className="w-3.5 h-3.5" />
-                    </button>
-                    <button type="button"
-                      onClick={() => onRate('down')}
-                      aria-label={rating === 'down' ? 'Remove bad rating' : 'Rate this response as bad'}
-                      title={rating === 'down' ? 'Remove rating' : 'Bad response'}
-                      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all border ${rating === 'down' ? 'bg-destructive/20 text-destructive border-destructive/30' : 'bg-secondary/50 hover:bg-secondary text-muted-foreground hover:text-foreground border-border/30 hover:border-primary/30'}`}>
-                      <ThumbsDown className="w-3.5 h-3.5" />
-                    </button>
-                  </>
                 )}
                 {/* Named, because it is icon-only and it is *the* control a screen
                     reader user reaches for: unlabelled it announced as "button".

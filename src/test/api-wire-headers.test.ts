@@ -33,9 +33,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// @ts-expect-error - plain JS module shared with the serverless routes, no .d.ts
 import { PROVIDER_ENDPOINTS } from "../../api/_providers.js";
-// @ts-expect-error - plain JS module shared with the serverless routes, no .d.ts
 import {
   SERVED_BY_HEADER,
   SERVED_MODEL_HEADER,
@@ -43,7 +41,6 @@ import {
   setRouteHeaders,
   exposedResponseHeaders,
 } from "../../api/_headers.js";
-// @ts-expect-error - plain JS module shared with the serverless routes, no .d.ts
 import { applyGuard, allowedRequestHeaders } from "../../api/_guard.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

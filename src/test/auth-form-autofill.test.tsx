@@ -146,9 +146,9 @@ describe("the sign-in form describes itself to a password manager", () => {
     walk(resolve(ROOT, "src"));
 
     // Control: a walk or a regex that finds nothing would report a clean codebase.
-    // Three known fields at the time of writing — the sign-in password and the two
-    // provider keys — so anything below that means the scan stopped seeing them.
-    expect(inputsFound, "the password-input scan found nothing").toBeGreaterThanOrEqual(3);
+    // One known field at the time of writing — the sign-in password. The API key
+    // dialog was removed from ChatSidebar, so only the sign-in password remains.
+    expect(inputsFound, "the password-input scan found nothing").toBeGreaterThanOrEqual(1);
     expect(offenders).toEqual([]);
   });
 });

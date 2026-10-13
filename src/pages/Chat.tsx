@@ -11,18 +11,35 @@ import {
 } from '@/lib/conversation-export';
 import type { SearchableMessage } from '@/lib/conversation-search';
 import { generateFile } from '@/lib/file-generator';
-import ChatSidebar, { AI_MODELS } from '@/components/chat/ChatSidebar';
+import ChatSidebar from '@/components/chat/ChatSidebar';
 import {
   DEFAULT_MODEL_ID,
   canonicalModelId,
-  supportsTools,
   getModel,
+  DEFAULT_VISION_MODEL_ID,
+  SELECTABLE_MODELS,
 } from '@/lib/providers';
+import {
+  computeUseAgent,
+  getEffectiveModelId,
+  getPromptModelName,
+  getPromptToolsAvailable,
+  modelIsImageModel,
+  modelIsVisionCapable,
+  requireCapabilities,
+} from '@/lib/capabilities';
+import {
+  ExecutionMode,
+  EXECUTION_MODES,
+  getDefaultMode,
+  setDefaultMode,
+  resolveExecutionContext,
+} from '@/lib/execution-modes';
 import ChatMessage from '@/components/chat/ChatMessage';
 import ChatInput from '@/components/chat/ChatInput';
 import ModelSelector from '@/components/chat/ModelSelector';
 import WelcomeScreen from '@/components/chat/WelcomeScreen';
-import { generateChatResponse, generateVisionResponse, generateImageResponse, buildImagePrompt, craftVisionPrompt, generateSmartChatTitle, isVisionModel, isVisionCapableModel, isImageModel, VISION_ENGINE_MODEL, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
+import { generateChatResponse, generateVisionResponse, generateImageResponse, buildImagePrompt, craftVisionPrompt, generateSmartChatTitle, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
 import {
   buildFlyerSystemPrompt,
   buildFlyerThinkingPrompt,
@@ -45,10 +62,31 @@ import { UNAVAILABLE_REASONS } from '@/lib/shortcuts';
 import { conversationDocumentTitle } from '@/hooks/useDocumentTitle';
 import { ShortcutsDialog } from '@/components/chat/ShortcutsDialog';
 import { Button } from '@/components/ui/button';
-import type { ChatAttachment, MessageCodeRun, MessageFile, MessageImage, MessageSource, MessageTaskList } from '@/components/chat/types';
+import type { ChatAttachment, MessageCodeRun, MessageFile, MessageImage, MessageSource, MessageTaskList, InteractiveComponent, StreamingToolCall } from '@/components/chat/types';
 import { Menu, ArrowDown, Sparkles, AlertTriangle, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
+
+// Project and SavedImage types (also in ChatSidebar)
+interface Project {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+  color?: string;
+  icon?: string;
+}
+
+interface SavedImage {
+  id: string;
+  url: string;
+  title: string;
+  createdAt: string;
+  thumbnailUrl?: string;
+  tags?: string[];
+}
+
 import { extractFirstMarkdownImage, sanitizeAssistantText, withPersistedImage, closeUnterminatedFence, extractReasoning } from '@/lib/chat-format';
 import { buildMessageForest, linearizeForest, switchBranch, toTreeMessages, type TreeNode } from '@/lib/message-tree';
 import { extractMemories, dedupeMemories } from '@/lib/memory';
@@ -90,6 +128,10 @@ interface Message {
   // the Firestore doc so a reload keeps the plan; tick state is UI-only (the
   // model cannot see ticks — see TaskListBlock), so it is not carried here.
   taskList?: MessageTaskList;
+  // Interactive components rendered in the message (calculators, charts, etc.)
+  interactiveComponents?: InteractiveComponent[];
+  // Tool calls being executed during streaming (for real-time display of searches, etc.)
+  streamingToolCalls?: StreamingToolCall[];
   // Arena Mode
   isArenaMode?: boolean;
   arenaResponses?: ArenaResponse[];
@@ -208,7 +250,7 @@ function requestBudgetMs(modelId: string): number {
 // be cut. The abort it triggers reuses the existing AbortError path, so no new
 // teardown is needed.
 const STREAM_IDLE_TIMEOUT_MS = 60_000;
-const DEFAULT_VISION_MODEL = VISION_ENGINE_MODEL;
+const DEFAULT_VISION_MODEL = DEFAULT_VISION_MODEL_ID;
 
 /** Whether the conversations panel was collapsed when the app was last closed.
  *  Namespaced like `Flyer_guest`, the only other app-owned key in localStorage —
@@ -446,6 +488,14 @@ export default function Chat() {
   const readingStyle = useMemo(() => readingPrefsStyle(readingPrefs), [readingPrefs]);
   const [statusText, setStatusText] = useState('');
   const [isSearching, setIsSearching] = useState(false);
+
+  // Execution mode — Auto/Quick/Research/Build
+  // Persisted in localStorage, defaults to "auto"
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>(() => getDefaultMode());
+  useEffect(() => {
+    setDefaultMode(executionMode);
+  }, [executionMode]);
+
   // Explicit user overrides for the automatic intent classifier. DeepThink
   // forces extended step-by-step reasoning; forceWebSearch always grounds the
   // turn in live results instead of letting the classifier decide.
@@ -483,16 +533,62 @@ export default function Chat() {
     return window.innerWidth < 1024;
   });
 
-  // Persisted on change rather than on unmount: the desktop shell is normally closed
-  // by killing the window, and an unmount-time write would never run.
+  // Projects feature - persisted in localStorage
+  const [projects, setProjects] = useState<Project[]>(() => {
+    try {
+      const saved = localStorage.getItem('flyer-projects');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('flyer-active-project') || null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Saved images feature - persisted in localStorage
+  const [savedImages, setSavedImages] = useState<SavedImage[]>(() => {
+    try {
+      const saved = localStorage.getItem('flyer-saved-images');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Persisted on change
   useEffect(() => {
     try {
-      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
+      localStorage.setItem('flyer-projects', JSON.stringify(projects));
     } catch {
-      // Same reasoning as the read above — this is a convenience, not state the app
-      // depends on.
+      // Same reasoning — convenience, not critical state
     }
-  }, [sidebarCollapsed]);
+  }, [projects]);
+
+  useEffect(() => {
+    try {
+      if (activeProjectId) {
+        localStorage.setItem('flyer-active-project', activeProjectId);
+      } else {
+        localStorage.removeItem('flyer-active-project');
+      }
+    } catch {
+      // Same reasoning
+    }
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('flyer-saved-images', JSON.stringify(savedImages));
+    } catch {
+      // Same reasoning
+    }
+  }, [savedImages]);
+
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL_ID);
   
   // Arena Mode state
@@ -1082,7 +1178,7 @@ export default function Chat() {
 
     const requestContent = trimmedContent || (pendingAttachments.length > 0 ? 'Describe this image in detail.' : '');
 
-    const selectedModelMeta = AI_MODELS.find((model) => model.id === selectedModel) || AI_MODELS[0];
+    const selectedModelMeta = SELECTABLE_MODELS.find((model) => model.id === selectedModel) || SELECTABLE_MODELS[0];
     const imageAttachments = pendingAttachments.filter((a) => a.type === 'image');
     const hasImages = imageAttachments.length > 0;
 
@@ -1106,7 +1202,7 @@ export default function Chat() {
     if (typeof window !== 'undefined') clearDraft(window.localStorage, draftKeyFor(activeConversationId, user?.uid ?? null));
 
     const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: trimmedContent || requestContent, attachments: pendingAttachments, parentMessageId: userParentId };
-    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', modelName: selectedModelMeta.name, parentMessageId: userMessage.id };
+    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', modelName: selectedModelMeta.label, parentMessageId: userMessage.id };
 
     // ── INSTANT UI UPDATE — show user message + thinking placeholder NOW ──
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
@@ -1169,39 +1265,57 @@ export default function Chat() {
     // the loop does not cover (no tool support, Arena mode) that means no search
     // unless the toggle is on: those models cannot call the tool themselves, so
     // the toggle is the only grounding they get.
-    const isImageGen = isImageModel(selectedModel);
+    //
+    // ALL capability decisions now route through the single-source-of-truth
+    // registry in src/lib/capabilities.ts. This replaces the scattered helpers
+    // (isImageModel, isVisionCapableModel, supportsTools, effectiveModelId logic)
+    // with one consistent decision point. The registry guarantees:
+    //   - The prompt's toolsAvailable matches the agent loop's useAgent
+    //   - The effective model always supports vision when images are attached
+    //   - Image models never have tools or vision
+    //   - Vision models always have vision
+    //
+    // Execution modes (Auto/Quick/Research/Build) layer on top of the capability
+    // registry to provide user-facing behaviour presets. They resolve to concrete
+    // gate values (allowTools, forceDeepThink, forceWebSearch) via
+    // resolveExecutionContext, which reads the effective model's capabilities.
+    const isImageGen = modelIsImageModel(selectedModel);
 
-    let effectiveModelId = selectedModel;
-    if (!isImageGen && hasImages && !isVisionCapableModel(selectedModel)) {
-      effectiveModelId = DEFAULT_VISION_MODEL;
-    }
+    // Resolve execution context from mode + model capabilities + turn context
+    const execContext = resolveExecutionContext(executionMode, selectedModel, {
+      hasImages,
+      isArenaMode,
+      isImageGen,
+      agentToolsEnabled: AGENT_TOOLS_ENABLED,
+    }, {
+      getCapabilities: (id) => {
+        const caps = requireCapabilities(id);
+        return {
+          supportsTools: caps.supportsTools,
+          supportsVision: caps.supportsVision,
+          effectiveModel: caps.effectiveModel,
+          promptModelName: caps.promptModelName,
+        };
+      },
+    });
+
+    const effectiveModelId = execContext.effectiveModelId;
     const usedVisionFallback = effectiveModelId !== selectedModel;
 
-    // Tools are on for every turn the provider will accept them on — the point
-    // of the loop is that the model reaches for one whenever it judges one
-    // useful, so the only legitimate reasons to withhold them are mechanical.
-    //
-    // Gated on effectiveModelId, not selectedModel: on a vision fallback the
-    // request goes to a different model, and asking THAT model for tools when it
-    // has none is a provider-level rejection.
-    //
-    // Attached images used to disable the loop outright. That was wrong on the
-    // default model, which is both vision- and tool-capable on one route: "read
-    // this chart and compute the CAGR" needs run_code exactly as much as a text
-    // turn does, and "what is this landmark, and what does it cost to visit now"
-    // needs web_search. supportsTools() already withholds them from the
-    // vision-only engines, so the mechanical check is sufficient on its own.
-    const useAgent =
-      AGENT_TOOLS_ENABLED &&
-      !isArenaMode &&
-      !isImageGen &&
-      supportsTools(effectiveModelId);
+    // Single decision point for the agent loop. Matches the prompt's
+    // toolsAvailable flag exactly (see getPromptToolsAvailable below).
+    // Now driven by execution mode.
+    const useAgent = execContext.allowTools;
+    const deepThink = execContext.forceDeepThink;
+    const forceWebSearch = execContext.forceWebSearch;
 
     // Build the API message history (text only) and the current turn (multimodal
     // when the effective model can accept images).
+    // Use the capability registry's vision check — effectiveModelId is guaranteed
+    // to support vision when hasImages is true.
     const historyMessages: AiChatMessage[] = messages.map((message) => ({ role: message.role, content: message.content }));
     const currentTurn: AiChatMessage =
-      hasImages && isVisionCapableModel(effectiveModelId)
+      hasImages
         ? {
             role: 'user',
             content: [
@@ -1216,14 +1330,15 @@ export default function Chat() {
     // unauthenticated/guest users they are empty strings and contextBlocks()
     // renders nothing, preserving the previous behaviour exactly.
     const promptOpts = {
-      modelName: selectedModelMeta.name,
+      modelName: execContext.modelNameForPrompt,
       memories: memoriesAsPromptBlock(memoriesRef.current),
       userInstructions: instructionsAsPromptBlock(userSettingsRef.current),
       // Renders the tool-use policy section. Passed the SAME expression that
       // decides whether the schemas actually go out, because the two disagreeing
       // is what produces fabricated tool output (block without tools) or a model
       // that hedges instead of searching (tools without block).
-      toolsAvailable: useAgent,
+      // getPromptToolsAvailable MUST match shouldUseAgent for the same context.
+      toolsAvailable: execContext.allowTools,
     };
 
     const allMessages: AiChatMessage[] = [
@@ -1404,7 +1519,7 @@ export default function Chat() {
         receivedAssistantContent = true;
 
         if (convId && isAuthenticated) {
-          await saveMessage(convId, 'assistant', imageContent, selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id);
+          await saveMessage(convId, 'assistant', imageContent, selectedModelMeta.label, undefined, assistantMessage.parentMessageId, assistantMessage.id);
         }
       } else {
         const messagesForModel = [...allMessages];
@@ -1558,7 +1673,7 @@ export default function Chat() {
           });
         }
 
-        const selectedModelMeta = AI_MODELS.find((model) => model.id === selectedModel) || AI_MODELS[0];
+        const selectedModelMeta = SELECTABLE_MODELS.find((model) => model.id === selectedModel) || SELECTABLE_MODELS[0];
         // Arena mode is disabled for image generation requests
         const activeArenaMode = isArenaMode && !isImageGen;
 
@@ -1573,7 +1688,7 @@ export default function Chat() {
                   arenaResponses: activeArenaMode
                     ? compareModels.map(modelId => ({
                         modelId,
-                        modelName: AI_MODELS.find(x => x.id === modelId)?.name || 'AI',
+                        modelName: SELECTABLE_MODELS.find(x => x.id === modelId)?.label || 'AI',
                         content: ''
                       }))
                     : undefined,
@@ -1682,7 +1797,7 @@ export default function Chat() {
             );
           };
 
-          if (hasImages && isVisionCapableModel(selectedModel)) {
+          if (hasImages && modelIsVisionCapable(selectedModel)) {
             // The selected model can read the image itself, so answer in one hop.
             // The old two-hop path (vision engine → text-only synthesis) dropped
             // the image before the second call, so the model that actually wrote
@@ -1776,6 +1891,17 @@ export default function Chat() {
                   mimeType: a.mimeType,
                   ...(a.type === 'image' ? { url: a.url } : {}),
                 })),
+              onToolCall: ({ id, name, arguments: args }) => {
+                // Store the tool call in the message so the UI can display it
+                // in real-time during streaming (e.g., "Searching for...").
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantMessage.id
+                      ? { ...m, streamingToolCalls: [...(m.streamingToolCalls || []), { id, name, arguments: args }] }
+                      : m
+                  )
+                );
+              },
               onToolStart: ({ name, args }) => {
                 // A tool call is proof of life just as much as a first token is:
                 // the provider answered, it just answered with a call instead of
@@ -1924,7 +2050,7 @@ export default function Chat() {
 
         if (cleaned) {
           const finalText = usedVisionFallback
-            ? `${cleaned}\n\n*🔎 Analyzed with ${AI_MODELS.find(m => m.id === DEFAULT_VISION_MODEL)?.name || 'a vision model'} since ${selectedModelMeta.name} can't read images.*`
+            ? `${cleaned}\n\n*🔎 Analyzed with ${SELECTABLE_MODELS.find(m => m.id === DEFAULT_VISION_MODEL_ID)?.label || 'a vision model'} since ${selectedModelMeta.label} can't read images.*`
             : cleaned;
 
           setMessages((prev) =>
@@ -1976,7 +2102,7 @@ export default function Chat() {
             // the explicit Image-model path has always done, and it renders the
             // same: ChatMessage hoists the markdown image out of the prose with
             // stripMarkdownImages, so this adds nothing visible to the reply.
-            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, ...turnAttribution });
+            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.label, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, ...turnAttribution });
             maybeExtractMemories(finalText);
           }
         } else if (agentImageUrl || agentFiles.length || agentImageResults.length) {
@@ -1991,7 +2117,7 @@ export default function Chat() {
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
           if (convId && isAuthenticated) {
-            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.name, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, ...turnAttribution });
+            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.label, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, ...turnAttribution });
             maybeExtractMemories(madeText);
           }
         } else {
@@ -2038,7 +2164,7 @@ export default function Chat() {
               convId,
               'assistant',
               persistedPartial,
-              selectedModelMeta.name,
+              selectedModelMeta.label,
               undefined,
               assistantMessage.parentMessageId,
               assistantMessage.id,
@@ -2301,17 +2427,17 @@ export default function Chat() {
     // name; falling back to the picker. Otherwise a mid-thread model switch
     // changes voice mid-answer.
     const resumeModelId =
-      AI_MODELS.find((m) => m.name === target.modelName)?.id || selectedModel;
-    const modelMeta = AI_MODELS.find((m) => m.id === resumeModelId) || AI_MODELS[0];
+      SELECTABLE_MODELS.find((m) => m.label === target.modelName)?.id || selectedModel;
+    const modelMeta = SELECTABLE_MODELS.find((m) => m.id === resumeModelId) || SELECTABLE_MODELS[0];
     const systemContent = deepThink
       ? buildFlyerThinkingPrompt({
-          modelName: modelMeta.name,
+          modelName: modelMeta.label,
           memories: memoriesAsPromptBlock(memoriesRef.current),
           userInstructions: instructionsAsPromptBlock(userSettingsRef.current),
           toolsAvailable: false,
         })
       : buildFlyerSystemPrompt({
-          modelName: modelMeta.name,
+          modelName: modelMeta.label,
           memories: memoriesAsPromptBlock(memoriesRef.current),
           userInstructions: instructionsAsPromptBlock(userSettingsRef.current),
           toolsAvailable: false,
@@ -2374,7 +2500,7 @@ export default function Chat() {
         // Older docs predate clientId (see getMessages fallback): fall back to
         // a new save so the continued text still survives a reload.
         if (!ok) {
-          await saveMessage(activeConversationId, 'assistant', withPersistedImage(finalText, undefined), modelMeta.name, undefined, target.parentMessageId, target.id, {
+          await saveMessage(activeConversationId, 'assistant', withPersistedImage(finalText, undefined), modelMeta.label, undefined, target.parentMessageId, target.id, {
             reasoning: finalReasoning || undefined,
             thinkSeconds: target.thinkSeconds,
             truncated: stillTruncated || undefined,
@@ -2555,7 +2681,41 @@ export default function Chat() {
     [],
   );
 
-  const selectedModelMeta = AI_MODELS.find((model) => model.id === selectedModel) || AI_MODELS[0];
+  // Projects feature handlers
+  const handleCreateProject = useCallback(async (name: string) => {
+    const newProject: Project = {
+      id: crypto.randomUUID(),
+      name,
+      description: '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      color: '#3b82f6',
+      icon: '📁',
+    };
+    setProjects((prev) => [...prev, newProject]);
+    setActiveProjectId(newProject.id);
+    toast.success('Project created');
+  }, []);
+
+  const handleSelectProject = useCallback((id: string) => {
+    setActiveProjectId(id);
+  }, []);
+
+  const handleDeleteProject = useCallback(async (id: string) => {
+    setProjects((prev) => prev.filter((p) => p.id !== id));
+    if (activeProjectId === id) {
+      setActiveProjectId(null);
+    }
+    toast.success('Project deleted');
+  }, [activeProjectId]);
+
+  // Images feature handlers
+  const handleDeleteImage = useCallback(async (id: string) => {
+    setSavedImages((prev) => prev.filter((img) => img.id !== id));
+    toast.success('Image deleted');
+  }, []);
+
+  const selectedModelMeta = SELECTABLE_MODELS.find((model) => model.id === selectedModel) || SELECTABLE_MODELS[0];
 
   return (
     <div 
@@ -2612,12 +2772,19 @@ export default function Chat() {
           fetchConversationBodies={fetchConversationBodies}
           isCollapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
-          selectedModel={selectedModel}
-          onSelectModel={handleSelectModel}
           onMemoriesChanged={reloadMemories}
           readingPrefs={readingPrefs}
           onReadingPrefsChange={applyReadingPrefs}
           onInstructionsChanged={reloadInstructions}
+          // Projects feature
+          projects={projects}
+          activeProjectId={activeProjectId}
+          onCreateProject={handleCreateProject}
+          onSelectProject={handleSelectProject}
+          onDeleteProject={handleDeleteProject}
+          // Images feature
+          savedImages={savedImages}
+          onDeleteImage={handleDeleteImage}
         />
       )}
 
@@ -2666,7 +2833,7 @@ export default function Chat() {
                 {activeConversationId ? conversations.find((c) => c.id === activeConversationId)?.title || 'Chat' : 'Flyer'}
               </h1>
               {!isGuest && (
-                <span className="text-xs text-muted-foreground/70 truncate block">{selectedModelMeta?.name || 'Default'} · {selectedModelMeta?.kind || 'Chat'}</span>
+                <span className="text-xs text-muted-foreground/70 truncate block">{selectedModelMeta?.label || 'Default'} · {selectedModelMeta?.kind || 'Chat'}</span>
               )}
               {isGuest && (
                 /* `<Link>`, not `<a href="/auth">`. The raw anchor was a genuine
@@ -2805,7 +2972,7 @@ export default function Chat() {
               </div>
             ) : (messages.length === 0 && regenText === null) ? (
               <div key="welcome" className="h-full overflow-y-auto scrollbar-thin">
-                <WelcomeScreen onSuggestionClick={handleSendMessage} modelName={selectedModelMeta?.name || 'AI'} />
+                <WelcomeScreen onSuggestionClick={handleSendMessage} modelName={selectedModelMeta?.label || 'AI'} />
               </div>
             ) : (
               <motion.div key="messages" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="h-full transition-all duration-300">
@@ -2865,6 +3032,8 @@ export default function Chat() {
                           codeRuns={msg.codeRuns}
                           taskList={msg.taskList}
                           imageResults={msg.imageResults}
+                          interactiveComponents={msg.interactiveComponents}
+                          streamingToolCalls={msg.streamingToolCalls}
                           onFollowUp={(q) => handleSendMessage(q)}
                           onRegenerate={handleRegenerate}
                           canRegenerate={msg.role === 'assistant' && index === messages.length - 1 && !isLoading}
@@ -2935,12 +3104,14 @@ export default function Chat() {
                persisted into the middle of a thread it never saw. A disabled
                composer next to a Retry button is the honest pair. */
             disabled={messagesError}
-            modelName={selectedModelMeta?.name || 'AI'}
+            modelName={selectedModelMeta?.label || 'AI'}
             modelKind={selectedModelMeta?.kind || 'Chat'}
             deepThink={deepThink}
             onToggleDeepThink={() => setDeepThink((v) => !v)}
             webSearch={forceWebSearch}
             onToggleWebSearch={() => setForceWebSearch((v) => !v)}
+            executionMode={executionMode}
+            onChangeExecutionMode={setExecutionMode}
           />
         </div>
 

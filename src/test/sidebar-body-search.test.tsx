@@ -69,8 +69,6 @@ function props(overrides: Partial<Props> = {}): Props {
     onDeleteConversation: vi.fn(),
     isCollapsed: false,
     onToggleCollapse: vi.fn(),
-    selectedModel: "nvidia/llama-3.3-nemotron-super-49b-v1",
-    onSelectModel: vi.fn(),
     ...overrides,
   };
 }

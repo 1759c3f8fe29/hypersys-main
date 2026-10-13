@@ -1,11 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, Sparkles, Bot, ChevronDown, ChevronUp, Search, History, Settings, Brain, Pencil, Copy, AlertTriangle, RotateCw, X, Pin, Download, FileDown, Type } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, ChevronDown, Search, History, Settings, Brain, Pencil, Copy, AlertTriangle, RotateCw, X, Pin, Download, FileDown, Type, Moon, Sun, Monitor, Zap, Shield, Bell, Languages, Folder, Image, Sparkles, Layout, Code, Globe, Bot, BookOpen, FolderPlus, Archive, ExternalLink, Palette } from 'lucide-react';
 import { matchesConversation, countBodyHits, type SearchableMessage } from '@/lib/conversation-search';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import { format, isToday, isYesterday, differenceInCalendarDays } from 'date-fns';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from '@/components/ui/dialog';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -18,41 +18,9 @@ import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 import { copyText } from '@/lib/clipboard';
 
-import { SELECTABLE_MODELS, type ModelSpec } from '@/lib/providers';
 import { DENSITIES, FONT_SCALES, WIDTHS, steppedScale, type ReadingPrefs } from '@/lib/reading-prefs';
 import { LOGO_URL } from '@/lib/assets';
 import MemoriesPanel from './MemoriesPanel';
-
-/**
- * The picker's view of a model.
- *
- * This used to be a second hardcoded catalogue whose ids had drifted from the
- * router's, so most selections resolved to nothing in getModel() and quietly
- * fell through to a legacy proxy — the user picked one model and another
- * answered. It is now a projection of MODELS in src/lib/providers.ts. Add
- * models there, not here.
- */
-export interface AIModel {
-  id: string;
-  name: string;
-  label: string;
-  description: string;
-  emoji: string;
-  kind: 'Chat' | 'Vision' | 'Image';
-  featured?: boolean;
-}
-
-const toAIModel = (spec: ModelSpec): AIModel => ({
-  id: spec.id,
-  name: spec.label,
-  label: spec.shortLabel || spec.label,
-  description: spec.description,
-  emoji: spec.emoji,
-  kind: spec.kind,
-  featured: spec.featured,
-});
-
-export const AI_MODELS: AIModel[] = SELECTABLE_MODELS.map(toAIModel);
 
 
 
@@ -65,6 +33,27 @@ interface Conversation {
   // Pin state, mirrored from Chat.tsx's Conversation. Undefined = never pinned;
   // see the note on the same field there for why a number, not a boolean.
   pinnedAt?: number;
+}
+
+// Project feature types
+interface Project {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+  color?: string;
+  icon?: string;
+}
+
+// Saved images feature types
+interface SavedImage {
+  id: string;
+  url: string;
+  title: string;
+  createdAt: string;
+  thumbnailUrl?: string;
+  tags?: string[];
 }
 
 interface ChatSidebarProps {
@@ -111,8 +100,6 @@ interface ChatSidebarProps {
   fetchConversationBodies?: (id: string) => Promise<SearchableMessage[]>;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
-  selectedModel: string;
-  onSelectModel: (id: string) => void;
   // Refresh hooks so the parent's prompt-injection cache picks up panel edits
   // without waiting for a reload. Optional because the panel still owns its
   // own reads; without these the only consequence is a one-turn-stale snapshot.
@@ -126,6 +113,16 @@ interface ChatSidebarProps {
   readingPrefs?: ReadingPrefs;
   onReadingPrefsChange?: (prefs: ReadingPrefs) => void;
   onInstructionsChanged?: () => void;
+  // Projects feature
+  projects?: Project[];
+  activeProjectId?: string | null;
+  onCreateProject?: (name: string) => void;
+  onSelectProject?: (id: string) => void;
+  onDeleteProject?: (id: string) => void;
+  // Images feature
+  savedImages?: SavedImage[];
+  onSaveImage?: (imageUrl: string, title: string) => void;
+  onDeleteImage?: (id: string) => void;
 }
 
 /**
@@ -186,16 +183,11 @@ export default function ChatSidebar({
   onNewConversation, onDeleteConversation, onRenameConversation, isCollapsed, onToggleCollapse,
   onTogglePinConversation, onExportConversation,
   fetchConversationBodies,
-  selectedModel, onSelectModel,
   onMemoriesChanged, onInstructionsChanged, readingPrefs, onReadingPrefsChange,
+  projects = [], activeProjectId, onCreateProject, onSelectProject, onDeleteProject,
+  savedImages = [], onSaveImage, onDeleteImage,
 }: ChatSidebarProps) {
   const { user, signOut } = useAuth();
-  const [showAllModels, setShowAllModels] = useState(false);
-  const [modelPanelOpen, setModelPanelOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  // Filters the conversation list, not the model list — `searchQuery` above is the
-  // model picker's. Separate state because they are separate fields serving separate
-  // lists; sharing one would mean typing a model name silently hid every chat.
   const [historyQuery, setHistoryQuery] = useState('');
   // Body-search state (§8 Part F). `bodyHits` is per-conversation, computed once
   // per (conversation, needle) fetch and kept for the field's lifetime: re-typing
@@ -310,6 +302,55 @@ export default function ChatSidebar({
     return () => clearTimeout(timer);
   }, [isCollapsed]);
 
+  // Settings State - Enhanced settings panel
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [displayOpen, setDisplayOpen] = useState(false);
+  const [generalOpen, setGeneralOpen] = useState(false);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  // Memories + custom instructions panel (Part F.2/F.3). Self-contained — owns
+  // its Firestore reads via useAuth — so no extra prop drilling here.
+  const [memoriesOpen, setMemoriesOpen] = useState(false);
+  // Projects panel state
+  const [projectsOpen, setProjectsOpen] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const newProjectInputRef = useRef<HTMLInputElement | null>(null);
+  // Images panel state
+  const [imagesOpen, setImagesOpen] = useState(false);
+
+  // Settings state
+  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>(() => {
+    if (typeof window !== 'undefined') {
+      return (localStorage.getItem('flyer-theme') as 'light' | 'dark' | 'system') || 'system';
+    }
+    return 'system';
+  });
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('flyer-notifications') !== 'false';
+    }
+    return true;
+  });
+  const [language, setLanguage] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('flyer-language') || 'en';
+    }
+    return 'en';
+  });
+  const [autoSave, setAutoSave] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('flyer-auto-save') !== 'false';
+    }
+    return true;
+  });
+  const [compactMode, setCompactMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('flyer-compact-mode') === 'true';
+    }
+    return false;
+  });
+
   // ---- inline rename (task #14, item 7: app-level context menus) ---------
   // Which row is being renamed, and the draft. Inline rather than a modal because
   // renaming a list item in place is what every native file manager, mail client
@@ -347,46 +388,24 @@ export default function ChatSidebar({
     }
   }, [renamingId]);
 
-  // Settings State for API Keys (NVIDIA + Mistral only)
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [displayOpen, setDisplayOpen] = useState(false);
-  // Memories + custom instructions panel (Part F.2/F.3). Self-contained — owns
-  // its Firestore reads via useAuth — so no extra prop drilling here.
-  const [memoriesOpen, setMemoriesOpen] = useState(false);
-  const [nvidiaKey, setNvidiaKey] = useState(() => localStorage.getItem('VITE_NVIDIA_API_KEY') || '');
-  const [mistralKey, setMistralKey] = useState(() => localStorage.getItem('VITE_MISTRAL_API_KEY') || '');
-
-  // Re-sync with localStorage when dialog opens
+  // Apply theme on change
   useEffect(() => {
-    if (settingsOpen) {
-      setNvidiaKey(localStorage.getItem('VITE_NVIDIA_API_KEY') || '');
-      setMistralKey(localStorage.getItem('VITE_MISTRAL_API_KEY') || '');
-    }
-  }, [settingsOpen]);
-
-  const handleSaveKeys = () => {
-    if (nvidiaKey.trim()) {
-      localStorage.setItem('VITE_NVIDIA_API_KEY', nvidiaKey.trim());
+    localStorage.setItem('flyer-theme', theme);
+    const root = document.documentElement;
+    if (theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      root.classList.add('dark');
     } else {
-      localStorage.removeItem('VITE_NVIDIA_API_KEY');
+      root.classList.remove('dark');
     }
-    if (mistralKey.trim()) {
-      localStorage.setItem('VITE_MISTRAL_API_KEY', mistralKey.trim());
-    } else {
-      localStorage.removeItem('VITE_MISTRAL_API_KEY');
-    }
-    setSettingsOpen(false);
-    toast.success('API keys updated successfully!');
-  };
+  }, [theme]);
 
-  const selectedModelMeta = AI_MODELS.find((m) => m.id === selectedModel) || AI_MODELS[0];
+  useEffect(() => {
+    localStorage.setItem('flyer-notifications', String(notificationsEnabled));
+  }, [notificationsEnabled]);
 
-  const filteredModels = AI_MODELS.filter((model) =>
-    model.label.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    model.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    model.description.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-  const visibleModels = showAllModels ? filteredModels : filteredModels.filter((model) => model.featured);
+  useEffect(() => {
+    localStorage.setItem('flyer-language', language);
+  }, [language]);
 
   // Group conversations by recency for a cleaner, scannable history list.
   const groupLabel = (dateStr: string): string => {
@@ -535,29 +554,28 @@ export default function ChatSidebar({
               <span className="text-sm">New Chat</span>
             </Button>
 
-            {/* Model Selector — collapsible so History always has room.
-                The full model picker also lives in the chat header. */}
+            {/* Projects Section */}
             <div className="space-y-2">
               <button
                 type="button"
-                onClick={() => setModelPanelOpen((v) => !v)}
+                onClick={() => setProjectsOpen((v) => !v)}
                 className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl border border-sidebar-border/50 bg-sidebar-accent/10 hover:bg-sidebar-accent/30 transition-all duration-300 group"
-                aria-expanded={modelPanelOpen}
+                aria-expanded={projectsOpen}
               >
                 <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary/20 to-brand2/20 flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform">
-                  <Bot className="w-4 h-4 text-primary/80" />
+                  <Folder className="w-4 h-4 text-primary/80" />
                 </div>
                 <span className="flex flex-col items-start min-w-0 flex-1">
-                  <span className="text-[10px] font-bold text-sidebar-foreground/50 uppercase tracking-widest leading-none mb-1">AI Model</span>
+                  <span className="text-[10px] font-bold text-sidebar-foreground/50 uppercase tracking-widest leading-none mb-1">Projects</span>
                   <span className="text-sm font-medium text-sidebar-foreground truncate max-w-full">
-                    {selectedModelMeta.emoji} {selectedModelMeta.label}
+                    {projects.length} project{projects.length !== 1 ? 's' : ''}
                   </span>
                 </span>
-                <ChevronDown className={`w-4 h-4 text-sidebar-foreground/50 transition-transform duration-300 flex-shrink-0 ${modelPanelOpen ? 'rotate-180 text-primary' : 'group-hover:text-primary/70'}`} />
+                <ChevronDown className={`w-4 h-4 text-sidebar-foreground/50 transition-transform duration-300 flex-shrink-0 ${projectsOpen ? 'rotate-180 text-primary' : 'group-hover:text-primary/70'}`} />
               </button>
 
               <AnimatePresence initial={false}>
-                {modelPanelOpen && (
+                {projectsOpen && (
                   <motion.div
                     initial={{ height: 0, opacity: 0 }}
                     animate={{ height: 'auto', opacity: 1 }}
@@ -565,54 +583,141 @@ export default function ChatSidebar({
                     transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
                     className="overflow-hidden"
                   >
-                    <div className="space-y-2 pt-1">
-                      {/* Search input for AI models */}
-                      <div className="relative group px-1">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-sidebar-foreground/45 group-focus-within:text-primary transition-colors" />
-                        <input
-                          type="text"
-                          placeholder="Search models..."
-                          value={searchQuery}
-                          onChange={(e) => setSearchQuery(e.target.value)}
-                          className="w-full pl-8 pr-3 py-1.5 bg-sidebar-accent/20 hover:bg-sidebar-accent/40 border border-sidebar-border/40 focus:border-primary/40 focus:ring-1 focus:ring-primary/20 rounded-lg text-xs text-sidebar-foreground placeholder:text-sidebar-foreground/30 focus:outline-none transition-all"
-                        />
-                      </div>
-
-                      <div className="space-y-1 max-h-[26vh] overflow-y-auto pr-1 scrollbar-thin">
-                        {visibleModels.map((model) => (
+                    <div className="space-y-1 pt-1">
+                      <div className="space-y-1 max-h-[30vh] overflow-y-auto pr-1 scrollbar-thin">
+                        {projects.map((project) => (
                           <button
-                            key={model.id}
-                            onClick={() => onSelectModel(model.id)}
-                            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-all duration-200 text-sm liquid-model-button
-                              ${selectedModel === model.id
+                            key={project.id}
+                            onClick={() => onSelectProject?.(project.id)}
+                            className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-left transition-all duration-200 text-sm liquid-model-button
+                              ${activeProjectId === project.id
                                 ? 'bg-primary/15 text-primary border border-primary/25 shadow-sm shadow-primary/10'
                                 : 'hover:bg-sidebar-accent/50 text-sidebar-foreground/70 hover:text-sidebar-foreground border border-transparent'
                               }`}
                           >
-                            <span className="text-base">{model.emoji}</span>
+                            <span className="text-base">{project.icon ? <span>{project.icon}</span> : <Folder className="w-4 h-4" />}</span>
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-1.5">
-                                <span className="font-medium truncate">{model.label}</span>
-                                <span className="text-[10px] text-sidebar-foreground/40 truncate">{model.kind}</span>
+                                <span className="font-medium truncate">{project.name}</span>
+                                {activeProjectId === project.id && (
+                                  <div className="w-1.5 h-1.5 rounded-full bg-primary flex-shrink-0" />
+                                )}
                               </div>
-                              <p className="text-[11px] text-sidebar-foreground/45 truncate">{model.description}</p>
+                              <p className="text-[11px] text-sidebar-foreground/45 truncate">{project.description || 'No description'}</p>
                             </div>
-                            {selectedModel === model.id && (
-                              <div className="w-1.5 h-1.5 rounded-full bg-primary flex-shrink-0" />
-                            )}
                           </button>
                         ))}
-                      </div>
-                      {AI_MODELS.length > AI_MODELS.filter((model) => model.featured).length && (
                         <button
-                          type="button"
-                          onClick={() => setShowAllModels((prev) => !prev)}
-                          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40 transition-colors"
+                          onClick={() => setCreatingProject(true)}
+                          className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-left transition-all duration-200 text-sm hover:bg-sidebar-accent/50 text-sidebar-foreground/70 hover:text-sidebar-foreground border border-transparent"
                         >
-                          {showAllModels ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                          {showAllModels ? 'Show less' : `Show all ${AI_MODELS.length} models`}
+                          <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
+                            <Plus className="w-4 h-4 text-primary" />
+                          </div>
+                          <span className="font-medium">New Project</span>
                         </button>
-                      )}
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* Creating new project inline */}
+            {creatingProject && (
+              <div className="space-y-2 pt-2">
+                <input
+                  ref={newProjectInputRef}
+                  type="text"
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newProjectName.trim()) {
+                      onCreateProject?.(newProjectName.trim());
+                      setNewProjectName('');
+                      setCreatingProject(false);
+                    } else if (e.key === 'Escape') {
+                      setNewProjectName('');
+                      setCreatingProject(false);
+                    }
+                  }}
+                  placeholder="Project name..."
+                  className="w-full px-3 py-2 bg-sidebar-accent/60 border border-primary/40 rounded-lg text-sm text-sidebar-foreground outline-none focus:ring-1 focus:ring-primary/20"
+                  autoFocus
+                />
+                <div className="flex items-center justify-end gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => { setNewProjectName(''); setCreatingProject(false); }}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={() => { if (newProjectName.trim()) { onCreateProject?.(newProjectName.trim()); setNewProjectName(''); setCreatingProject(false); } }} disabled={!newProjectName.trim()}>
+                    Create
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Saved Images Section */}
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setImagesOpen((v) => !v)}
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl border border-sidebar-border/50 bg-sidebar-accent/10 hover:bg-sidebar-accent/30 transition-all duration-300 group"
+                aria-expanded={imagesOpen}
+              >
+                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-brand2/20 to-primary/20 flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform">
+                  <Image className="w-4 h-4 text-brand2/80" />
+                </div>
+                <span className="flex flex-col items-start min-w-0 flex-1">
+                  <span className="text-[10px] font-bold text-sidebar-foreground/50 uppercase tracking-widest leading-none mb-1">Saved Images</span>
+                  <span className="text-sm font-medium text-sidebar-foreground truncate max-w-full">
+                    {savedImages.length} image{savedImages.length !== 1 ? 's' : ''}
+                  </span>
+                </span>
+                <ChevronDown className={`w-4 h-4 text-sidebar-foreground/50 transition-transform duration-300 flex-shrink-0 ${imagesOpen ? 'rotate-180 text-primary' : 'group-hover:text-primary/70'}`} />
+              </button>
+
+              <AnimatePresence initial={false}>
+                {imagesOpen && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+                    className="overflow-hidden"
+                  >
+                    <div className="space-y-1 pt-1">
+                      <div className="space-y-1 max-h-[30vh] overflow-y-auto pr-1 scrollbar-thin">
+                        {savedImages.length === 0 ? (
+                          <div className="px-3 py-4 text-center text-sidebar-foreground/40 text-sm">
+                            No saved images yet. Generate or upload images to save them here.
+                          </div>
+                        ) : (
+                          savedImages.map((image) => (
+                            <div
+                              key={image.id}
+                              className="relative flex items-center gap-3 px-3 py-2.5 rounded-lg border border-sidebar-border/50 bg-sidebar-accent/30 transition-all duration-200 hover:bg-sidebar-accent/50 group"
+                            >
+                              <img
+                                src={image.thumbnailUrl || image.url}
+                                alt={image.title}
+                                className="w-12 h-12 rounded-lg object-cover flex-shrink-0"
+                                onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium truncate text-sidebar-foreground">{image.title}</p>
+                                <p className="text-[11px] text-sidebar-foreground/45 truncate">{format(new Date(image.createdAt), 'MMM d, h:mm a')}</p>
+                              </div>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); onDeleteImage?.(image.id); }}
+                                className="p-1.5 rounded-lg bg-background/40 hover:bg-destructive/20 text-sidebar-foreground/50 hover:text-destructive transition-all opacity-0 scale-90 group-hover:opacity-100 group-hover:scale-100"
+                                aria-label={`Delete image: ${image.title}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
                     </div>
                   </motion.div>
                 )}
@@ -1155,85 +1260,332 @@ export default function ChatSidebar({
       </motion.aside>
 
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent className="sm:max-w-[425px] border-white/10 bg-background/95 backdrop-blur-xl text-foreground rounded-2xl shadow-2xl">
+        <DialogContent className="sm:max-w-[500px] border-white/10 bg-background/95 backdrop-blur-xl text-foreground rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-xl font-bold flex items-center gap-2">
-              <Settings className="w-5 h-5 text-primary animate-[spin_8s_linear_infinite]" />
-              Configure API Keys
+              <Settings className="w-5 h-5 text-primary" />
+              Settings
             </DialogTitle>
             <DialogDescription className="text-muted-foreground/80 text-xs">
-              Provide your own API keys fo and Mistral AI. These keys are stored safely on your device and never sent to external servers other than the API proxy endpoints.
+              Customize your Flyer experience. Changes apply immediately and are saved to your device.
             </DialogDescription>
           </DialogHeader>
+
           <div className="grid gap-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="nvidia-key" className="text-sm font-semibold text-foreground/80 flex items-center gap-1.5">
-                🧠 NVIDIA API Key
-              </Label>
-              {/* `type="password"` here is masking, not a credential field: these
-                  are provider API keys, not this site's password. Without
-                  `autoComplete="off"` a browser manager treats the dialog as a
-                  login form — it will offer to fill the user's saved website
-                  password into a key field, and offer to save an API key as a
-                  password for this origin. Honest about the limit: Chrome has
-                  historically ignored `off` on password inputs in some versions,
-                  so this states the intent rather than guaranteeing the behaviour.
-                  `spellCheck` off because a key is not prose, and a red squiggle
-                  under a 70-character token is noise. */}
-              <Input
-                id="nvidia-key"
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="nvapi-..."
-                value={nvidiaKey}
-                onChange={(e) => setNvidiaKey(e.target.value)}
-                className="bg-secondary/40 border-border/40 focus:border-primary/40 focus:ring-primary/20 text-sm placeholder:text-muted-foreground/30 rounded-xl"
-              />
+            {/* General Settings */}
+            <div className="space-y-4 border-b border-border/30 pb-4">
+              <div className="flex items-center gap-2">
+                <ChevronDown className={`w-4 h-4 text-muted-foreground/60 transition-transform ${generalOpen ? 'rotate-180' : ''}`} />
+                <h3 className="text-sm font-semibold text-foreground/90 uppercase tracking-wider flex-1 cursor-pointer" onClick={() => setGeneralOpen(!generalOpen)}>
+                  General
+                </h3>
+              </div>
+              <AnimatePresence>
+                {generalOpen && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }} className="overflow-hidden mt-2 space-y-4">
+                    {/* Theme */}
+                    <div className="space-y-2">
+                      <Label htmlFor="theme" className="text-sm font-medium text-foreground/80 flex items-center gap-1.5">
+                        <Monitor className="w-3.5 h-3.5" />
+                        Theme
+                      </Label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {(['light', 'dark', 'system'] as const).map((t) => (
+                          <button
+                            key={t}
+                            onClick={() => setTheme(t)}
+                            className={`flex flex-col items-center gap-1.5 p-3 rounded-xl border-2 transition-all ${
+                              theme === t
+                                ? 'border-primary/50 bg-primary/10 text-primary'
+                                : 'border-border/30 hover:border-border/50 text-foreground/70 hover:text-foreground'
+                            }`}
+                          >
+                            <span className="text-lg">{t === 'light' ? <Sun className="w-5 h-5" /> : t === 'dark' ? <Moon className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}</span>
+                            <span className="text-xs font-medium capitalize">{t}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Language */}
+                    <div className="space-y-2">
+                      <Label htmlFor="language" className="text-sm font-medium text-foreground/80 flex items-center gap-1.5">
+                        <Languages className="w-3.5 h-3.5" />
+                        Language
+                      </Label>
+                      <select
+                        id="language"
+                        value={language}
+                        onChange={(e) => setLanguage(e.target.value)}
+                        className="w-full bg-secondary/40 border border-border/40 focus:border-primary/40 focus:ring-primary/20 rounded-xl px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none"
+                      >
+                        <option value="en">English</option>
+                        <option value="es">Español</option>
+                        <option value="fr">Français</option>
+                        <option value="de">Deutsch</option>
+                        <option value="zh">中文</option>
+                        <option value="ja">日本語</option>
+                        <option value="ko">한국어</option>
+                        <option value="pt">Português</option>
+                        <option value="ru">Русский</option>
+                        <option value="ar">العربية</option>
+                      </select>
+                    </div>
+
+                    {/* Auto-save */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Shield className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Auto-save conversations</p>
+                          <p className="text-xs text-muted-foreground/60">Automatically save chat history to local storage</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setAutoSave(!autoSave)}
+                        aria-pressed={autoSave}
+                        aria-label={autoSave ? 'Disable auto-save' : 'Enable auto-save'}
+                        className={`relative w-11 h-6 rounded-full transition-colors ${
+                          autoSave ? 'bg-primary' : 'bg-muted-foreground/20'
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform ${
+                          autoSave ? 'left-5' : 'left-0.5'
+                        }`} />
+                      </button>
+                    </div>
+
+                    {/* Compact mode */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Type className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Compact mode</p>
+                          <p className="text-xs text-muted-foreground/60">Reduce spacing for more content on screen</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setCompactMode(!compactMode)}
+                        aria-pressed={compactMode}
+                        aria-label={compactMode ? 'Disable compact mode' : 'Enable compact mode'}
+                        className={`relative w-11 h-6 rounded-full transition-colors ${
+                          compactMode ? 'bg-primary' : 'bg-muted-foreground/20'
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform ${
+                          compactMode ? 'left-5' : 'left-0.5'
+                        }`} />
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="mistral-key" className="text-sm font-semibold text-foreground/80 flex items-center gap-1.5">
-                🇫🇷 Mistral API Key
-              </Label>
-              <Input
-                id="mistral-key"
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="Enter Mistral API Key"
-                value={mistralKey}
-                onChange={(e) => setMistralKey(e.target.value)}
-                className="bg-secondary/40 border-border/40 focus:border-primary/40 focus:ring-primary/20 text-sm placeholder:text-muted-foreground/30 rounded-xl"
-              />
+
+            {/* Display Settings */}
+            <div className="space-y-4 border-b border-border/30 pb-4">
+              <div className="flex items-center gap-2">
+                <ChevronDown className={`w-4 h-4 text-muted-foreground/60 transition-transform ${displayOpen ? 'rotate-180' : ''}`} />
+                <h3 className="text-sm font-semibold text-foreground/90 uppercase tracking-wider flex-1 cursor-pointer" onClick={() => setDisplayOpen(!displayOpen)}>
+                  Display
+                </h3>
+              </div>
+              <AnimatePresence>
+                {displayOpen && readingPrefs && onReadingPrefsChange && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }} className="overflow-hidden mt-2 space-y-4">
+                    {/* Text size */}
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium text-foreground/80 flex items-center gap-1.5">
+                        <Type className="w-3.5 h-3.5" />
+                        Text Size
+                      </Label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => onReadingPrefsChange({ ...readingPrefs, fontScale: steppedScale(readingPrefs.fontScale, -1) })}
+                          disabled={readingPrefs.fontScale === FONT_SCALES[0]}
+                          aria-label="Smaller text"
+                          className="w-6 h-6 rounded-md bg-secondary/40 hover:bg-secondary/50 disabled:opacity-30 disabled:hover:bg-secondary/40 text-foreground text-xs font-bold transition-colors"
+                        >A</button>
+                        <div className="flex-1 flex items-center justify-center gap-1.5">
+                          {FONT_SCALES.map((scale) => (
+                            <button
+                              key={scale}
+                              onClick={() => onReadingPrefsChange({ ...readingPrefs, fontScale: scale })}
+                              aria-label={`Text size ${Math.round(scale * 100)}%`}
+                              aria-pressed={readingPrefs.fontScale === scale}
+                              className={`h-1.5 rounded-full transition-all ${readingPrefs.fontScale === scale ? 'w-5 bg-primary' : 'w-1.5 bg-muted-foreground/25 hover:bg-muted-foreground/40'}`}
+                            />
+                          ))}
+                        </div>
+                        <button
+                          onClick={() => onReadingPrefsChange({ ...readingPrefs, fontScale: steppedScale(readingPrefs.fontScale, 1) })}
+                          disabled={readingPrefs.fontScale === FONT_SCALES[FONT_SCALES.length - 1]}
+                          aria-label="Larger text"
+                          className="w-6 h-6 rounded-md bg-secondary/40 hover:bg-secondary/50 disabled:opacity-30 disabled:hover:bg-secondary/40 text-foreground text-base font-bold transition-colors leading-none"
+                        >A</button>
+                      </div>
+                    </div>
+
+                    {/* Column width */}
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium text-foreground/80 flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5" />
+                        Column Width
+                      </Label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {WIDTHS.map((w, i) => (
+                          <button
+                            key={w}
+                            onClick={() => onReadingPrefsChange({ ...readingPrefs, width: w })}
+                            aria-pressed={readingPrefs.width === w}
+                            className={`py-2 rounded-xl text-xs font-medium transition-colors ${
+                              readingPrefs.width === w
+                                ? 'bg-primary/15 text-primary border border-primary/30'
+                                : 'bg-secondary/40 text-foreground/60 hover:text-foreground border border-transparent'
+                            }`}
+                          >
+                            {['Narrow', 'Default', 'Wide'][i]}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Density */}
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium text-foreground/80 flex items-center gap-1.5">
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        Row Density
+                      </Label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {DENSITIES.map((d) => (
+                          <button
+                            key={d}
+                            onClick={() => onReadingPrefsChange({ ...readingPrefs, density: d })}
+                            aria-pressed={readingPrefs.density === d}
+                            className={`py-2 rounded-xl text-xs font-medium capitalize transition-colors ${
+                              readingPrefs.density === d
+                                ? 'bg-primary/15 text-primary border border-primary/30'
+                                : 'bg-secondary/40 text-foreground/60 hover:text-foreground border border-transparent'
+                            }`}
+                          >
+                            {d}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Timestamps */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <History className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Show timestamps</p>
+                          <p className="text-xs text-muted-foreground/60">Display time labels on messages</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => onReadingPrefsChange({ ...readingPrefs, timestamps: !readingPrefs.timestamps })}
+                        aria-pressed={readingPrefs.timestamps}
+                        aria-label={readingPrefs.timestamps ? 'Hide timestamps' : 'Show timestamps'}
+                        className={`relative w-11 h-6 rounded-full transition-colors ${
+                          readingPrefs.timestamps ? 'bg-primary' : 'bg-muted-foreground/20'
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform ${
+                          readingPrefs.timestamps ? 'left-5' : 'left-0.5'
+                        }`} />
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* Notifications Settings */}
+            <div className="space-y-4 border-b border-border/30 pb-4">
+              <div className="flex items-center gap-2">
+                <ChevronDown className={`w-4 h-4 text-muted-foreground/60 transition-transform ${notificationsOpen ? 'rotate-180' : ''}`} />
+                <h3 className="text-sm font-semibold text-foreground/90 uppercase tracking-wider flex-1 cursor-pointer" onClick={() => setNotificationsOpen(!notificationsOpen)}>
+                  Notifications
+                </h3>
+              </div>
+              <AnimatePresence>
+                {notificationsOpen && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }} className="overflow-hidden mt-2 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Bell className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Enable notifications</p>
+                          <p className="text-xs text-muted-foreground/60">Receive browser notifications for new messages</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setNotificationsEnabled(!notificationsEnabled)}
+                        aria-pressed={notificationsEnabled}
+                        aria-label={notificationsEnabled ? 'Disable notifications' : 'Enable notifications'}
+                        className={`relative w-11 h-6 rounded-full transition-colors ${
+                          notificationsEnabled ? 'bg-primary' : 'bg-muted-foreground/20'
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform ${
+                          notificationsEnabled ? 'left-5' : 'left-0.5'
+                        }`} />
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* Privacy Settings */}
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <ChevronDown className={`w-4 h-4 text-muted-foreground/60 transition-transform ${privacyOpen ? 'rotate-180' : ''}`} />
+                <h3 className="text-sm font-semibold text-foreground/90 uppercase tracking-wider flex-1 cursor-pointer" onClick={() => setPrivacyOpen(!privacyOpen)}>
+                  Privacy & Data
+                </h3>
+              </div>
+              <AnimatePresence>
+                {privacyOpen && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }} className="overflow-hidden mt-2 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Shield className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Local-only storage</p>
+                          <p className="text-xs text-muted-foreground/60">All settings and keys stored locally on this device</p>
+                        </div>
+                      </div>
+                      <span className="text-xs text-green-500/80 font-medium">Active</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <RotateCw className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Clear all local data</p>
+                          <p className="text-xs text-muted-foreground/60">Remove all settings, history, and cached data</p>
+                        </div>
+                      </div>
+                      <Button variant="outline" size="sm" className="text-destructive border-destructive/30 hover:bg-destructive/10">
+                        Clear Data
+                      </Button>
+                    </div>
+                    {/* Accessibility: the toggle switches below need aria-labels since they only contain visual indicators */}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           </div>
           <DialogFooter className="gap-2 sm:gap-0 border-t border-border/30 pt-4 mt-2">
-            <Button
-              variant="outline"
-              type="button"
-              onClick={() => {
-                setNvidiaKey('');
-                setMistralKey('');
-              }}
-              className="bg-destructive/10 hover:bg-destructive/20 border-destructive/20 text-destructive text-xs h-9 rounded-xl transition-all duration-200 mr-auto"
-            >
-              Clear Keys
-            </Button>
             <div className="flex gap-2">
               <Button
                 variant="ghost"
                 type="button"
                 onClick={() => setSettingsOpen(false)}
-                className="hover:bg-secondary/60 text-xs h-9 border border-border/40 rounded-xl"
+                className="hover:bg-secondary/60 text-sm h-9 border border-border/40 rounded-xl"
               >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                onClick={handleSaveKeys}
-                className="  bg-primary hover:bg-primary/90 text-primary-foreground text-xs font-semibold h-9 rounded-xl transition-all duration-200"
-              >
-                Save Keys
+                Close
               </Button>
             </div>
           </DialogFooter>
