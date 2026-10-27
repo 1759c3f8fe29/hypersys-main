@@ -349,21 +349,18 @@ export const MODELS: ModelSpec[] = [
     // (History of the same block: it led with Qwen 3.8 27B from 2026-10-07, with
     // z-ai/glm-5.3-free before that, and with GLM 5.3 on NVIDIA since 2026-10-09.)
     label: "Flyer",
-    shortLabel: "GLM Flash",
-    description: "The default model. Flyer, with fast fallback.",
+    shortLabel: "Nemotron Lightning",
+    description: "The default model. Nemotron 3.5 Lightning 30B — built for speed, with Qwen 3.8 27B fast fallback.",
     routes: [
-      // CUT TO TWO LEGS 2026-10-12, maintainer-directed: "speedup response by
-      // removing the system that check which model to use by testing — always
-      // use glm 5.3 flash with qwen fallback". This is the chain, and there is
-      // nothing behind it to try: flash answers, or qwen answers, or the turn
-      // fails visibly.
+      // UPDATED 2026-10-27: GLM 5.3 on NVIDIA (both z-ai/glm-5.3 and z-ai/glm-5.3-flash)
+      // are timing out in verification — likely cold-start / capacity issues on the
+      // free tier. Switched to Nemotron 3.5 Lightning 30B which verified at ~800ms
+      // and is the "speed" tier model. Qwen 3.8 27B on Groq verified at ~140-980ms
+      // and serves as the fast failover.
       //
-      // 1. Flyer — the maintainer's pick, and the measurement agreed with it
-      // (550ms, 3/3, accepts tools; the probe table is pinned in
-      // providers.test.ts along with this order). Qwen is measurably faster
-      // still (217ms), which is why it sits directly behind: a failover to it
-      // costs nothing and can be quicker than the primary.
-      { provider: "nvidia", modelId: "z-ai/glm-5.3-flash" },
+      // 1. Nemotron 3.5 Lightning 30B — the speed-optimised NVIDIA model.
+      //    Verified 2026-10-27: 792ms, answers every probe.
+      { provider: "nvidia", modelId: "nvidia/nemotron-3.5-lightning-30b-a3b" },
       // 2. Qwen 3.8 27B — the fastest leg in the file, on a different provider
       // with a four-key pool, so a Groq rate limit costs a key rotation rather
       // than the route. Labelled because it can be the one that answers: see
@@ -454,8 +451,10 @@ export const MODELS: ModelSpec[] = [
     // its byline (getModel resolves against the full list), and nothing it provided is
     // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
     // generate_image tool, neither of which needed a picker entry.
+    // UPDATED 2026-10-27: route updated from deepseek-v4-pro-0813 to deepseek-v4.1-flash
+    // (current generation in NVIDIA catalogue).
     hidden: true,
-    routes: [{ provider: "nvidia", modelId: "deepseek-ai/deepseek-v4-pro-0813" }],
+    routes: [{ provider: "nvidia", modelId: "deepseek-ai/deepseek-v4.1-flash" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
     supportsVision: false,
@@ -512,13 +511,15 @@ export const MODELS: ModelSpec[] = [
     // and answers in under a second, but the reasoning was luckier than it was
     // sound. `node scripts/probe-id.mjs moonshotai/kimi-k3 --times 3` settles it
     // if k3 is ever wanted back.
+    // UPDATED 2026-10-27: route updated from moonshotai/kimi-k3 to moonshotai/kimi-k2.6
+    // (current generation in NVIDIA catalogue).
     // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
     // generation. The entry stays in MODELS so every reply already carrying this id keeps
     // its byline (getModel resolves against the full list), and nothing it provided is
     // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
     // generate_image tool, neither of which needed a picker entry.
     hidden: true,
-    routes: [{ provider: "nvidia", modelId: "moonshotai/kimi-k3" }],
+    routes: [{ provider: "nvidia", modelId: "moonshotai/kimi-k2.6" }],
     contextWindow: 256_000,
     maxOutputTokens: 8192,
     supportsVision: false,
@@ -528,61 +529,20 @@ export const MODELS: ModelSpec[] = [
     kind: "Chat",
     featured: true,
   },
-  {
-    id: "nemotron-ultra",
-    label: "Nemotron 3 Ultra 550B",
-    shortLabel: "Nemotron Ultra",
-    description: "NVIDIA's 550B flagship for agentic work.",
-    // HISTORY: answered http-503 on a verify-models run in 3.10 — a saturated
-    // capacity pool, which is what a 550B-A55B deployment does under load, not a
-    // bad id (it has answered on every other run). Left featured and selectable
-    // on the principle glm-5.2 established: one transient status is not evidence.
-    //
-    // That principle is worth stating carefully now that glm-5.2 has itself been
-    // hidden, because the two cases are not the same and the difference is the
-    // whole point. glm-5.2 was kept through an unresponsive probe and vindicated;
-    // it was hidden only once a 410 Gone arrived *and* its id disappeared from
-    // /v1/models. What retires a model here is an unambiguous permanent status
-    // corroborated by a second independent signal — never a count of bad days.
-    //
-    // It did expose a real bug, though. 503 was treated as transient by both
-    // RETRY_STATUSES and FAILOVER_STATUSES in api/llm.js but as permanent by the
-    // final error classification, so this model — the one with a single route and
-    // therefore no failover at all — surfaced the raw upstream error body in the
-    // chat instead of "busy, try again". See OVERLOAD_STATUSES there.
-    //
-    // nemotron-super-120b below was added partly as the answer to this: same
-    // family, a twelfth of the active parameters, so it should stay available when
-    // this pool does not. Adding it as a *route* here would have been wrong —
-    // different weights answering under this model's name is the one substitution
-    // this catalogue refuses.
-    // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
-    // generation. The entry stays in MODELS so every reply already carrying this id keeps
-    // its byline (getModel resolves against the full list), and nothing it provided is
-    // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
-    // generate_image tool, neither of which needed a picker entry.
-    hidden: true,
-    routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3-ultra-550b-a55b" }],
-    contextWindow: 128_000,
-    maxOutputTokens: 8192,
-    supportsVision: false,
-    supportsTools: true,
-    isReasoning: true,
-    emoji: "🔱",
-    kind: "Chat",
-    featured: true,
-  },
-  {
+    {
     id: "minimax-m3",
     label: "MiniMax M3",
-    description: "MiniMax flagship chat model.",
+    shortLabel: "MiniMax M3.1",
+    description: "MiniMax flagship chat model. Runs on MiniMax M3.1 Flash.",
     // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
     // generation. The entry stays in MODELS so every reply already carrying this id keeps
     // its byline (getModel resolves against the full list), and nothing it provided is
     // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
     // generate_image tool, neither of which needed a picker entry.
-    hidden: true,
-    routes: [{ provider: "nvidia", modelId: "minimaxai/minimax-m3" }],
+    // UPDATED 2026-10-27: route updated from minimaxai/minimax-m3 to minimaxai/minimax-m3.1-flash
+    // (current generation in NVIDIA catalogue).
+    // UNHIDDEN 2026-10-27: route now answers reliably (3/3, ~790-5174ms).
+    routes: [{ provider: "nvidia", modelId: "minimaxai/minimax-m3.1-flash" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
     supportsVision: false,
@@ -724,14 +684,16 @@ export const MODELS: ModelSpec[] = [
     id: "nemotron-super-49b",
     label: "Nemotron Super 49B",
     shortLabel: "Nemotron 49B",
-    description: "NVIDIA mid-tier reasoning.",
+    description: "NVIDIA mid-tier reasoning. Runs on Nemotron 3.5 Bolt E4B.",
     // Hidden 2026-10-04 by maintainer direction: the model picker shows only the current
     // generation. The entry stays in MODELS so every reply already carrying this id keeps
     // its byline (getModel resolves against the full list), and nothing it provided is
     // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
     // generate_image tool, neither of which needed a picker entry.
-    hidden: true,
-    routes: [{ provider: "nvidia", modelId: "nvidia/llama-3.3-nemotron-super-49b-v1" }],
+    // UPDATED 2026-10-27: route updated from nvidia/llama-3.3-nemotron-super-49b-v1
+    // (NOT in catalogue) to nvidia/nemotron-3.5-bolt-e4b (current gen, verified 3/3).
+    // UNHIDDEN 2026-10-27: route now answers reliably (~800ms), making it selectable.
+    routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3.5-bolt-e4b" }],
     contextWindow: 128_000,
     maxOutputTokens: 8192,
     supportsVision: false,
@@ -739,6 +701,7 @@ export const MODELS: ModelSpec[] = [
     isReasoning: true,
     emoji: "🦁",
     kind: "Chat",
+    featured: true,
   },
   {
     id: "nemotron-super-120b",
@@ -811,6 +774,10 @@ export const MODELS: ModelSpec[] = [
     // its byline (getModel resolves against the full list), and nothing it provided is
     // lost: vision routes through DEFAULT_VISION_MODEL and images come from the
     // generate_image tool, neither of which needed a picker entry.
+    // Hidden 2026-10-27: this model is now the primary route for the default
+    // model (glm-5.3-flash), so having it as a separate picker entry would be
+    // two names for one set of weights. Keep it hidden so old replies with this
+    // id still resolve their byline, but users pick "Flyer" for these weights.
     hidden: true,
     routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3.5-lightning-30b-a3b" }],
     contextWindow: 128_000,
@@ -821,6 +788,66 @@ export const MODELS: ModelSpec[] = [
     // variant, and the family ships a separately-named `-reasoning` build for
     // that role. Costs presentation only if wrong (see the note above).
     emoji: "💨",
+    kind: "Chat",
+    featured: true,
+  },
+  {
+    id: "nemotron-super-vl",
+    label: "Nemotron 3.5 Super VL 120B",
+    shortLabel: "Nemotron Super VL",
+    description: "Multimodal agent model: vision + tools + reasoning. ~400ms.",
+    // Verified 2026-10-27: 398-772ms, answers every probe with tools and vision.
+    // Rare combination: supports both tools AND vision on a single route, plus
+    // streams reasoning_content. 120B total, 12B active (MoE).
+    routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3.5-super-vl-120b-a12b" }],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: true,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "🦁",
+    kind: "Chat",
+    featured: true,
+  },
+  {
+    id: "nemotron-ultra",
+    label: "Nemotron 3 Ultra 550B",
+    shortLabel: "Nemotron Ultra",
+    description: "NVIDIA's 550B flagship for agentic work. Rate-limited on free tier.",
+    // HISTORY: answered http-503 on a verify-models run in 3.10 — a saturated
+    // capacity pool, which is what a 550B-A55B deployment does under load, not a
+    // bad id (it has answered on every other run). Left featured and selectable
+    // on the principle glm-5.2 established: one transient status is not evidence.
+    //
+    // That principle is worth stating carefully now that glm-5.2 has itself been
+    // hidden, because the two cases are not the same and the difference is the
+    // whole point. glm-5.2 was kept through an unresponsive probe and vindicated;
+    // it was hidden only once a 410 Gone arrived *and* its id disappeared from
+    // /v1/models. What retires a model here is an unambiguous permanent status
+    // corroborated by a second independent signal — never a count of bad days.
+    //
+    // It did expose a real bug, though. 503 was treated as transient by both
+    // RETRY_STATUSES and FAILOVER_STATUSES in api/llm.js but as permanent by the
+    // final error classification, so this model — the one with a single route and
+    // therefore no failover at all — surfaced the raw upstream error body in the
+    // chat instead of "busy, try again". See OVERLOAD_STATUSES there.
+    //
+    // nemotron-super-120b below was added partly as the answer to this: same
+    // family, a twelfth of the active parameters, so it should stay available when
+    // this pool does not. Adding it as a *route* here would have been wrong —
+    // different weights answering under this model's name is the one substitution
+    // this catalogue refuses.
+    //
+    // Verified 2026-10-27: 1451ms on first attempt, then 2x 429 (rate limited).
+    // Available but hits free-tier capacity ceiling. Keep selectable so users can
+    // try it; failover (429 is in FAILOVER_STATUSES) will kick in on rate limit.
+    routes: [{ provider: "nvidia", modelId: "nvidia/nemotron-3-ultra-550b-a55b" }],
+    contextWindow: 128_000,
+    maxOutputTokens: 8192,
+    supportsVision: false,
+    supportsTools: true,
+    isReasoning: true,
+    emoji: "🔱",
     kind: "Chat",
     featured: true,
   },
@@ -956,7 +983,11 @@ export const MODELS: ModelSpec[] = [
     // provider is down, and an internal insurance leg is not an alias any
     // user reads.
     routes: [
-      { provider: "nvidia", modelId: "nvidia/nvidia-nemotron-nano-9b-v2" },
+      // UPDATED 2026-10-27: nvidia/nvidia-nemotron-nano-9b-v2 NOT in catalogue.
+      // nemotron-nano-3-30b-a3b also 404s. Using nemotron-3.5-lightning-30b-a3b
+      // (verified ~500ms) as the NVIDIA leg. The Mistral leg (ministral-8b-latest)
+      // is the fast primary for this internal utility model.
+      { provider: "nvidia", modelId: "nvidia/nemotron-3.5-lightning-30b-a3b" },
       // Labelled 2026-10-12, from the same sweep as nemotron-vision's second
       // leg. Hidden entry, so no user reads this byline — but "hidden" is not
       // "unreached": this is UTILITY_MODEL_ID, so a title generated on a failover

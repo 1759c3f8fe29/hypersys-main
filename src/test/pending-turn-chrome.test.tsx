@@ -118,7 +118,6 @@ function mountReply(props: Partial<React.ComponentProps<typeof ChatMessage>> = {
       role="assistant"
       content=""
       modelName="Flyer"
-      onRate={vi.fn()}
       onRegenerate={vi.fn()}
       canRegenerate
       {...props}

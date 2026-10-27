@@ -174,7 +174,7 @@ describe("a turn the picked model answered", () => {
     // nothing to explain LATER: a stamp written here would be a stored claim that
     // the reply came from somewhere else, which survives reloads and is then
     // wrong for the life of the conversation.
-    agent.served = { provider: "nvidia", modelId: "z-ai/glm-5.3-flash" };
+    agent.served = { provider: "nvidia", modelId: "nvidia/nemotron-3.5-lightning-30b-a3b" };
     await sendOneTurn();
 
     for (const meta of assistantRows()) {

@@ -408,7 +408,7 @@ describe("Capability Registry — Route chain resolution", () => {
     const chain = resolveRouteChain(DEFAULT_MODEL_ID, allProviders);
     expect(chain.length).toBe(2);
     expect(chain[0].provider).toBe("nvidia");
-    expect(chain[0].modelId).toBe("z-ai/glm-5.3-flash");
+    expect(chain[0].modelId).toBe("nvidia/nemotron-3.5-lightning-30b-a3b");
     expect(chain[1].provider).toBe("groq");
     expect(chain[1].modelId).toBe("qwen/qwen3.8-27b");
   });

@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
 import { createPortal } from 'react-dom';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Maximize2, X, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ThumbsUp, ThumbsDown, ListChecks, Ellipsis, ImageOff } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Maximize2, X, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ListChecks, Ellipsis, ImageOff } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -103,12 +103,6 @@ interface ChatMessageProps {
   // How long the model thought, in whole seconds. The collapsed block's label
   // ("Thought for 12s") reads it; undefined falls back to "Thought process".
   thinkSeconds?: number;
-  // Feedback on a finished reply (ChatGPT-style thumbs up/down). The state is
-  // owned by the parent because it is persisted per message and must survive
-  // branch switches and reloads; this component only renders it. Both halves
-  // are optional so every other call site of this component compiles.
-  rating?: 'up' | 'down';
-  onRate?: (direction: 'up' | 'down') => void;
 }
 
 function hostOf(link: string): string {
@@ -207,11 +201,15 @@ function StreamingStatus({ label, tone }: { label: string; tone: "primary" | "ac
  * heading) and costs the same whole-string re-parse per chunk the message body
  * coalesces to avoid.
  */
-function ThinkingBlock({ reasoning, thinkSeconds, isThinking }: {
+function ThinkingBlock({ reasoning, thinkSeconds, isThinking, sources, isStreaming }: {
   reasoning: string;
   thinkSeconds?: number;
   /** True while the turn is still streaming — drives "Thinking…" vs the summary. */
   isThinking: boolean;
+  /** Web search sources that appeared during streaming — shown inside thinking block like ChatGPT. */
+  sources?: MessageSource[];
+  /** True when the message is still streaming — used to show sources inline during generation. */
+  isStreaming?: boolean;
 }) {
   // null means "no user click yet"; the stream's own state decides. Once set,
   // it is the decision forever — the stream will not re-open or re-close it.
@@ -271,6 +269,12 @@ function ThinkingBlock({ reasoning, thinkSeconds, isThinking }: {
           className="mt-2 pl-4 border-l-2 border-border/60 text-[13.5px] leading-relaxed text-muted-foreground whitespace-pre-wrap overflow-y-auto max-h-72 overscroll-contain"
         >
           {reasoning}
+        </div>
+      )}
+      {/* Show sources inside thinking block during streaming like ChatGPT */}
+      {isStreaming && sources && sources.length > 0 && expanded && (
+        <div className="mt-3 pl-4 border-l-2 border-border/60">
+          <SourceChips sources={sources} />
         </div>
       )}
     </div>
@@ -1383,7 +1387,7 @@ export function buildMarkdownComponents(): Components {
  };
 }
 
-export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, imageResults, followUps, files, servedName, servedNote, toolsWithheld, codeRuns, taskList, interactiveComponents, streamingToolCalls, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds, rating, onRate }: ChatMessageProps) {
+export default function ChatMessage({ role, content, isStreaming, attachments = [], imageUrl, modelName = "AI", statusText, sources, imageResults, followUps, files, servedName, servedNote, toolsWithheld, codeRuns, taskList, interactiveComponents, streamingToolCalls, onFollowUp, onRegenerate, canRegenerate, truncated, onResume, isArenaMode, arenaResponses, branchIndex, branchCount, onSwitchBranch, canEdit, onEdit, reasoning, thinkSeconds }: ChatMessageProps) {
   const isUser = role === 'user';
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedUser, setCopiedUser] = useState(false);
@@ -1799,6 +1803,8 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                   // textOnlyContent is the sanitized body, so thinking-only
                   // streams keep "Thinking…" instead of flipping early.
                   isThinking={isStreaming && !textOnlyContent}
+                  sources={sources}
+                  isStreaming={isStreaming}
                 />
               )}
 
@@ -1843,7 +1849,8 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                 <ToolCallsDisplay toolCalls={streamingToolCalls} isStreaming={isStreaming} />
               </div>
             )}
-            {!isUser && sources && sources.length > 0 && <SourceChips sources={sources} />}
+            {/* Sources shown after answer when not streaming, or when thinking block is collapsed */}
+            {!isUser && sources && sources.length > 0 && (!isStreaming || !reasoning) && <SourceChips sources={sources} />}
             {!isUser && imageResults && imageResults.length > 0 && <SearchedImageGallery images={imageResults} />}
 
             {/* Post-response actions (#7): Retry, Copy, rate, read aloud, and

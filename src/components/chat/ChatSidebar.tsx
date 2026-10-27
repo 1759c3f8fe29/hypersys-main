@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, ChevronDown, Search, History, Settings, Brain, Pencil, Copy, AlertTriangle, RotateCw, X, Pin, Download, FileDown, Type, Moon, Sun, Monitor, Zap, Shield, Bell, Languages, Folder, Image, Sparkles, Layout, Code, Globe, Bot, BookOpen, FolderPlus, Archive, ExternalLink, Palette } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, ChevronDown, Search, History, Settings, Brain, Pencil, Copy, AlertTriangle, RotateCw, X, Pin, Download, FileDown, Type, Moon, Sun, Monitor, Zap, Shield, Bell, Languages, Folder, Image, Sparkles, Layout, Code, Globe, Bot, BookOpen, FolderPlus, Archive, ExternalLink, Palette, Table, BarChart2, Calculator } from 'lucide-react';
 import { matchesConversation, countBodyHits, type SearchableMessage } from '@/lib/conversation-search';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
@@ -350,6 +350,31 @@ export default function ChatSidebar({
     }
     return false;
   });
+  const [genUIOpen, setGenUIOpen] = useState(false);
+  const [genUIEnabled, setGenUIEnabled] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('flyer-genui-enabled') !== 'false';
+    }
+    return true;
+  });
+  const [autoRenderTables, setAutoRenderTables] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('flyer-genui-auto-tables') !== 'false';
+    }
+    return true;
+  });
+  const [autoRenderCharts, setAutoRenderCharts] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('flyer-genui-auto-charts') !== 'false';
+    }
+    return true;
+  });
+  const [autoRenderCalculators, setAutoRenderCalculators] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('flyer-genui-auto-calculators') !== 'false';
+    }
+    return true;
+  });
 
   // ---- inline rename (task #14, item 7: app-level context menus) ---------
   // Which row is being renamed, and the draft. Inline rather than a modal because
@@ -406,6 +431,30 @@ export default function ChatSidebar({
   useEffect(() => {
     localStorage.setItem('flyer-language', language);
   }, [language]);
+
+  useEffect(() => {
+    localStorage.setItem('flyer-auto-save', String(autoSave));
+  }, [autoSave]);
+
+  useEffect(() => {
+    localStorage.setItem('flyer-compact-mode', String(compactMode));
+  }, [compactMode]);
+
+  useEffect(() => {
+    localStorage.setItem('flyer-genui-enabled', String(genUIEnabled));
+  }, [genUIEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('flyer-genui-auto-tables', String(autoRenderTables));
+  }, [autoRenderTables]);
+
+  useEffect(() => {
+    localStorage.setItem('flyer-genui-auto-charts', String(autoRenderCharts));
+  }, [autoRenderCharts]);
+
+  useEffect(() => {
+    localStorage.setItem('flyer-genui-auto-calculators', String(autoRenderCalculators));
+  }, [autoRenderCalculators]);
 
   // Group conversations by recency for a cleaner, scannable history list.
   const groupLabel = (dateStr: string): string => {
@@ -1145,7 +1194,7 @@ export default function ChatSidebar({
               <button onClick={() => setMemoriesOpen(true)} className="p-2 rounded-lg hover:bg-sidebar-accent text-sidebar-foreground/60 hover:text-sidebar-foreground transition-all duration-200" title="Memory & Instructions">
                 <Brain className="w-4 h-4" />
               </button>
-              <button onClick={() => setSettingsOpen(true)} className="p-2 rounded-lg hover:bg-sidebar-accent text-sidebar-foreground/60 hover:text-sidebar-foreground transition-all duration-200" title="API Settings">
+              <button onClick={() => setSettingsOpen(true)} className="p-2 rounded-lg hover:bg-sidebar-accent text-sidebar-foreground/60 hover:text-sidebar-foreground transition-all duration-200" title="Settings">
                 <Settings className="w-4 h-4 hover:rotate-45 transition-transform" />
               </button>
               <button
@@ -1539,7 +1588,7 @@ export default function ChatSidebar({
             </div>
 
             {/* Privacy Settings */}
-            <div className="space-y-4">
+            <div className="space-y-4 border-b border-border/30 pb-4">
               <div className="flex items-center gap-2">
                 <ChevronDown className={`w-4 h-4 text-muted-foreground/60 transition-transform ${privacyOpen ? 'rotate-180' : ''}`} />
                 <h3 className="text-sm font-semibold text-foreground/90 uppercase tracking-wider flex-1 cursor-pointer" onClick={() => setPrivacyOpen(!privacyOpen)}>
@@ -1572,6 +1621,106 @@ export default function ChatSidebar({
                       </Button>
                     </div>
                     {/* Accessibility: the toggle switches below need aria-labels since they only contain visual indicators */}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* GenUI Settings */}
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <ChevronDown className={`w-4 h-4 text-muted-foreground/60 transition-transform ${genUIOpen ? 'rotate-180' : ''}`} />
+                <h3 className="text-sm font-semibold text-foreground/90 uppercase tracking-wider flex-1 cursor-pointer" onClick={() => setGenUIOpen(!genUIOpen)}>
+                  Generative UI
+                </h3>
+              </div>
+              <AnimatePresence>
+                {genUIOpen && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }} className="overflow-hidden mt-2 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Sparkles className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Interactive Components</p>
+                          <p className="text-xs text-muted-foreground/60">Enable AI-generated calculators, charts, tables, maps, and more</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setGenUIEnabled(!genUIEnabled)}
+                        aria-pressed={genUIEnabled}
+                        aria-label={genUIEnabled ? 'Disable GenUI' : 'Enable GenUI'}
+                        className={`relative w-11 h-6 rounded-full transition-colors ${
+                          genUIEnabled ? 'bg-primary' : 'bg-muted-foreground/20'
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform ${
+                          genUIEnabled ? 'left-5' : 'left-0.5'
+                        }`} />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Table className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Auto-render Tables</p>
+                          <p className="text-xs text-muted-foreground/60">Automatically convert data tables to interactive components</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setAutoRenderTables(!autoRenderTables)}
+                        aria-pressed={autoRenderTables}
+                        aria-label={autoRenderTables ? 'Disable auto-render' : 'Enable auto-render'}
+                        className={`relative w-11 h-6 rounded-full transition-colors ${
+                          autoRenderTables ? 'bg-primary' : 'bg-muted-foreground/20'
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform ${
+                          autoRenderTables ? 'left-5' : 'left-0.5'
+                        }`} />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <BarChart2 className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Auto-render Charts</p>
+                          <p className="text-xs text-muted-foreground/60">Automatically render chart visualizations from data</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setAutoRenderCharts(!autoRenderCharts)}
+                        aria-pressed={autoRenderCharts}
+                        aria-label={autoRenderCharts ? 'Disable auto-render' : 'Enable auto-render'}
+                        className={`relative w-11 h-6 rounded-full transition-colors ${
+                          autoRenderCharts ? 'bg-primary' : 'bg-muted-foreground/20'
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform ${
+                          autoRenderCharts ? 'left-5' : 'left-0.5'
+                        }`} />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Calculator className="w-4 h-4 text-muted-foreground/60" />
+                        <div>
+                          <p className="text-sm font-medium text-foreground/90">Auto-render Calculators</p>
+                          <p className="text-xs text-muted-foreground/60">Automatically create calculators for math expressions</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setAutoRenderCalculators(!autoRenderCalculators)}
+                        aria-pressed={autoRenderCalculators}
+                        aria-label={autoRenderCalculators ? 'Disable auto-render' : 'Enable auto-render'}
+                        className={`relative w-11 h-6 rounded-full transition-colors ${
+                          autoRenderCalculators ? 'bg-primary' : 'bg-muted-foreground/20'
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform ${
+                          autoRenderCalculators ? 'left-5' : 'left-0.5'
+                        }`} />
+                      </button>
+                    </div>
                   </motion.div>
                 )}
               </AnimatePresence>

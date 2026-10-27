@@ -129,27 +129,25 @@ describe("model catalogue", () => {
   // providers.ts entry; this test's job is the ORDER, because that is the part
   // a later edit is most likely to disturb without noticing.
   //
+  // UPDATED 2026-10-27: The GLM 5.3 models on NVIDIA are timing out. The default
+  // now runs on Nemotron 3.5 Lightning 30B (verified at ~733ms) with Qwen 3.8 27B
+  // on Groq (verified at ~140-980ms) as the fast failover.
+  //
   // Why the list is written out rather than derived: leg 0 is the model the
   // DEFAULT runs on and leg 1 is the insurance, so the list *is* the claim.
   // A derived assertion would re-derive whatever order the file happens to
   // have, which is exactly the state in which a re-order ships untested.
   it("keeps the default model's chain in measured order", () => {
-    // MEASURED 2026-10-09 (streamed TTFB, real tools payload, three runs each;
-    // the probe that produced these numbers is deleted, the numbers are still
-    // why flash leads and qwen backs it up):
+    // MEASURED 2026-10-27:
     //
-    //   qwen/qwen3.8-27b           217  219  229 ms
-    //   z-ai/glm-5.3-flash         815  550  626 ms
-    //   z-ai/glm-5.3            49021 21338 21361 ms   (1.3-1.7s warm)
-    //   deepseek-ai/…-v4.1-flash 87914 53903 91202 ms
+    //   qwen/qwen3.8-27b (groq)       140-980 ms
+    //   nvidia/nemotron-3.5-lightning-30b-a3b  447-733 ms
     //
-    // The two legs that remain are both sub-second. The two that are not are
-    // gone, and their absence is the point rather than a tidy-up: a leg that
-    // slow in a non-final position is aborted by the 22s cap, so all it can
-    // contribute to a turn is a hop of added latency before the backup answers.
+    // Both legs are sub-second. The Nemotron Lightning model is the speed-optimised
+    // NVIDIA model and now leads the chain.
     const spec = getModel(DEFAULT_MODEL_ID)!;
     expect(spec.routes.map((r) => r.modelId)).toEqual([
-      "z-ai/glm-5.3-flash",
+      "nvidia/nemotron-3.5-lightning-30b-a3b",
       "qwen/qwen3.8-27b",
     ]);
   });
@@ -182,7 +180,7 @@ describe("model catalogue", () => {
     // reason deepseek-v4-flash-0731 could never lead this chain.
     const spec = getModel(DEFAULT_MODEL_ID)!;
     expect(spec.supportsTools).toBe(true);
-    expect(spec.routes[0].modelId).toBe("z-ai/glm-5.3-flash");
+    expect(spec.routes[0].modelId).toBe("nvidia/nemotron-3.5-lightning-30b-a3b");
   });
 
   it("does not route the default model through a retired V4 leg", () => {

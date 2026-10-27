@@ -12,6 +12,7 @@ import {
 import type { SearchableMessage } from '@/lib/conversation-search';
 import { generateFile } from '@/lib/file-generator';
 import ChatSidebar from '@/components/chat/ChatSidebar';
+import ModelSelector from '@/components/chat/ModelSelector';
 import {
   DEFAULT_MODEL_ID,
   canonicalModelId,
@@ -37,7 +38,6 @@ import {
 } from '@/lib/execution-modes';
 import ChatMessage from '@/components/chat/ChatMessage';
 import ChatInput from '@/components/chat/ChatInput';
-import ModelSelector from '@/components/chat/ModelSelector';
 import WelcomeScreen from '@/components/chat/WelcomeScreen';
 import { generateChatResponse, generateVisionResponse, generateImageResponse, buildImagePrompt, craftVisionPrompt, generateSmartChatTitle, type ChatMessage as AiChatMessage, type ContentPart } from '@/lib/ai';
 import {
@@ -244,12 +244,12 @@ function requestBudgetMs(modelId: string): number {
 // connection as dead. Distinct from REQUEST_TIMEOUT_MS, which guards only the
 // cold-start wait (cleared on the first token). This one arms AFTER streaming
 // starts and resets on every chunk, so it catches the failure the cold-start
-// guard structurally cannot — a model that streams one token then hangs. 60s is
+// guard structurally cannot — a model that streams one token then hangs. 90s is
 // above the pauses reasoning models take between their thinking block and the
-// answer, which measured at ~30s on minimax-m3; below it, healthy answers would
-// be cut. The abort it triggers reuses the existing AbortError path, so no new
-// teardown is needed.
-const STREAM_IDLE_TIMEOUT_MS = 60_000;
+// answer, which measured at ~30-45s on minimax-m3 and gpt-oss; below it, healthy
+// answers would be cut. The abort it triggers reuses the existing AbortError path,
+// so no new teardown is needed.
+const STREAM_IDLE_TIMEOUT_MS = 90_000;
 const DEFAULT_VISION_MODEL = DEFAULT_VISION_MODEL_ID;
 
 /** Whether the conversations panel was collapsed when the app was last closed.
@@ -1911,10 +1911,10 @@ export default function Chat() {
                 clearColdStartGuard();
                 // A tool is not a streamed token, so the idle watchdog must not
                 // count the tool's runtime against the stream. An image gen that
-                // takes 45s would else trip the 60s idle timer and abort the
+                // takes 45s would else trip the 90s idle timer and abort the
                 // turn mid-tool. handleDelta re-arms it when the model resumes.
                 // But a hung tool must not hang forever: arm a bounded tool
-                // watchdog (3 min) so a never-returning tool still aborts.
+                // watchdog (5 min) so a never-returning tool still aborts.
                 disarmIdleWatchdog();
                 armIdleWatchdog();
                 if (idleTimer) {
@@ -1922,7 +1922,7 @@ export default function Chat() {
                   idleTimer = setTimeout(() => {
                     stalledMidStream = true;
                     abortControllerRef.current?.abort();
-                  }, 180_000);
+                  }, 300_000);
                 }
                 // The answer is not being written yet, so the status line has to
                 // say what is actually happening — otherwise it reads
@@ -2374,35 +2374,6 @@ export default function Chat() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [regenText]);
-
-  // Feedback (ChatGPT-style thumbs up/down) on a finished reply. Optimistic:
-  // the icon flips immediately, and a failed persist reverts it. Clicking the
-  // already-active thumb clears the rating — one gesture for rate, correct
-  // and unrate. Guests get the buttons too (session state only, nothing
-  // persisted) so the affordance is not an account wall.
-  const handleRate = async (messageId: string, direction: 'up' | 'down') => {
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === messageId
-          ? { ...m, rating: m.rating === direction ? undefined : direction }
-          : m,
-      ),
-    );
-    if (!isAuthenticated) return; // guest: session-only, as the comment says
-    const target = messages.find((m) => m.id === messageId);
-    if (!target) return;
-    // Unrating is the persist of "clear" — the write deletes the field (see
-    // rateMessage's deleteField), and its success re-sets what is already on
-    // screen. A failure on clear reverts to the old rating rather than to
-    // blank, which would silently mislabel a rated reply as unrated.
-    const desired = target.rating === direction ? null : direction;
-    const ok = await firestoreDb.rateMessage(activeConversationId, messageId, desired);
-    if (!ok) {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === messageId ? { ...m, rating: target.rating } : m)),
-      );
-    }
-  };
 
   // Resume/Continue (ChatGPT-style): a truncated reply (finish_reason=length)
   // is a prefix, not a complete answer. Continue it IN PLACE by asking the
@@ -2884,23 +2855,21 @@ export default function Chat() {
               </button>
             </div>
 
-            {/* Model pickers — desktop only. On mobile the sidebar's model list
-                is the way in, so the header stays uncluttered. */}
+            {/* Arena Mode model pickers — desktop only */}
             <div className="hidden md:flex items-center gap-2">
-              <ModelSelector selectedModel={selectedModel} onSelectModel={handleSelectModel} />
               <AnimatePresence>
                 {isArenaMode && compareModels.map((mId, idx) => (
                   <motion.div key={`compare-${idx}`} initial={{ opacity: 0, width: 0, scale: 0.8 }} animate={{ opacity: 1, width: 'auto', scale: 1 }} exit={{ opacity: 0, width: 0, scale: 0.8 }} transition={{ duration: 0.3 }} className="flex items-center gap-2 overflow-hidden">
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-widest bg-gradient-to-r from-primary/20 via-brand2/20 to-primary/20 text-primary border border-primary/30 shadow-sm flex-shrink-0">VS</span>
-                    <ModelSelector 
-                      selectedModel={mId} 
+                    <ModelSelector
+                      selectedModel={mId}
                       onSelectModel={(newId) => {
                         const newModels = [...compareModels];
                         newModels[idx] = newId;
                         setCompareModels(newModels);
-                      }} 
+                      }}
                     />
-                    <button 
+                    <button
                       onClick={() => setCompareModels(prev => prev.filter((_, i) => i !== idx))}
                       className="w-5 h-5 rounded-full bg-secondary/50 flex items-center justify-center text-muted-foreground hover:bg-destructive hover:text-destructive-foreground transition-all flex-shrink-0"
                       title="Remove model"
@@ -3026,8 +2995,6 @@ export default function Chat() {
                           thinkSeconds={msg.thinkSeconds}
                           truncated={msg.truncated}
                           onResume={() => handleResume(msg.id)}
-                          rating={msg.rating}
-                          onRate={(dir) => handleRate(msg.id, dir)}
                           isStreaming={isLoading && msg.role === 'assistant' && index === messages.length - 1}
                           modelName={msg.modelName || 'AI'}
                           statusText={isLoading && msg.role === 'assistant' && index === messages.length - 1 ? statusText : undefined}
