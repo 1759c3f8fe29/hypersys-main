@@ -75,7 +75,7 @@ export interface PromptRenderOptions {
   /** Trait slider lines, one imperative sentence each. */
   traitLines?: string[];
   /**
-   * True when this request actually carries the tool schemas — i.e. the agent
+   * True when this request actually carries the tool schemas - i.e. the agent
    * loop is running for this turn. Gates the tool-use policy block.
    *
    * MUST mirror the real decision (Chat.tsx's `useAgent`), not a wish. Rendering
@@ -394,7 +394,7 @@ function mistakesBlock(): string[] {
  * *policy*, and the prompt around it actively pushed the other way: the accuracy
  * section above orders the model to "treat your own knowledge as stale and say
  * so" for exactly the categories web_search exists to answer. A model reading
- * only that complies by hedging — it writes "as of my knowledge cutoff I can't
+ * only that complies by hedging  -  it writes "as of my knowledge cutoff I can't
  * be sure" and never calls the tool, which is precisely the "tools don't work"
  * symptom. Advertising a tool is not the same as instructing the model to reach
  * for it unprompted.
@@ -403,7 +403,7 @@ function mistakesBlock(): string[] {
  *
  * The inverse failure is worse. On a turn where no tools are advertised (a model
  * with supportsTools:false, or Arena mode), a model told "you can execute Python"
- * cannot call anything — so it emits a plausible transcript of a tool call it
+ * cannot call anything  -  so it emits a plausible transcript of a tool call it
  * never made and invents the output. That is observed behaviour, not a
  * hypothetical: a run_code turn against a broken sandbox produced "I can run it
  * locally and report the result: H=5a3f7c8d9e1b2c4d" against a true value of
@@ -415,7 +415,7 @@ function mistakesBlock(): string[] {
  *
  * `run_code` no longer executes: it stages a script the user runs by pressing Run
  * (tools/run-code.ts, components/chat/CodeRunner.tsx). So the state that produced
- * the fake hash above — holding the tool while having no output from it — is now
+ * the fake hash above  -  holding the tool while having no output from it  -  is now
  * the NORMAL state of every code turn, not a broken-sandbox edge case. The gate
  * section below therefore has to say "you never see the output" in as many words;
  * a model left to infer it from silence fills the silence with a plausible number.
@@ -423,7 +423,7 @@ function mistakesBlock(): string[] {
 // REWRITTEN 2026-10-11, maintainer-directed ("remove unnessary junk waste
 // custum massive custum prompt ... for how to use tool in app make it use tool
 // use skills based"). The old block restated, at length, policy that already
-// lives on each tool's own schema description — the model reads the schema, so
+// lives on each tool's own schema description  -  the model reads the schema, so
 // the prose was a second copy that could only drift from it. What is left here
 // is what a schema CANNOT carry: the cross-tool policy (call automatically,
 // never ask permission, never fabricate a result) and the two ordering rules
@@ -444,6 +444,7 @@ function toolsBlock(): string[] {
     "- `edit_file`: rewrites an attached file as a new download.",
     "- `ocr_image`: reads the text out of an attached image (scan, receipt, form, table) verbatim.",
     "- `task_list`: stages a 2-to-15 step checklist before multi-step work. The user ticks the steps and you never see the ticks, so report what you DID and never claim a step is done on their behalf. Call it once, early; calling it again replaces the list.",
+    "- `render_component`: renders an interactive component inline in the chat. Use this when the user's request would benefit from a calculator, chart, data table, map, bill splitter, unit converter, planner, quiz, or comparison table. The component appears as an interactive widget the user can manipulate.",
     "",
     "## Call them automatically. Never ask for permission.",
     "",
@@ -470,6 +471,32 @@ function toolsBlock(): string[] {
     "## What the interface does with the results",
     "",
     "Images, files and charts the tools produce are attached to your message and rendered automatically: do NOT paste base64, data URLs or raw file bytes, re-describe a generated image at length, or paste a file's contents back after creating it. DO explain a staged script in prose: what it computes and what the user will see when they run it.",
+    "",
+    "## `render_component`  -  Interactive Components (GenUI)",
+    "",
+    "When the user asks for something that would benefit from an interactive widget  -  a calculation, a visualization, structured data, a plan, a quiz, or a comparison  -  call `render_component` with a full component specification. The component renders inline and the user can interact with it immediately.",
+    "",
+    "Component types and when to use them:",
+    "",
+    "- **calculator**  -  math, finance, percentages, time, grades. Variants: `basic`, `percentage`, `compound_interest`, `time`, `grade`.",
+    "- **chart**  -  data visualization, trends, distributions. Variants: `bar`, `line`, `scatter`, `pie`, `donut`, `area`.",
+    "- **data_table**  -  structured listings, sortable/filterable data, any tabular data.",
+    "- **map**  -  locations, routes, geographic points, place markers.",
+    "- **bill_splitter**  -  shared expenses, tips, tax, custom splits among people.",
+    "- **unit_converter**  -  any unit conversion (length, weight, temperature, currency, data, etc.).",
+    "- **planner**  -  schedules, timelines, budgets, task lists. Variants: `timeline`, `schedule`, `budget`, `tasks`.",
+    "- **quiz**  -  knowledge checks, practice, flashcards. Variants: `practice`, `test`, `flashcard`.",
+    "- **comparison**  -  side-by-side specs, feature matrices, product comparisons.",
+    "",
+    "The component argument is a full InteractiveComponent object. Key fields:",
+    "- `type`: one of the 9 types above",
+    "- `variant`: the specific variant for that type",
+    "- `title`: short descriptive title shown to the user",
+    "- `config`: type-specific configuration (see schema)",
+    "- `data`: the data to display (arrays, objects per type)",
+    "- `instanceId`: unique ID (generate one: `${type}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`)",
+    "",
+    "Call this tool automatically when appropriate  -  do not ask permission. Chain it with web_search if you need live data first.",
   ];
 }
 
@@ -690,8 +717,8 @@ function deepThinkSections(): string[] {
  *
  *   2. What it had instead was a six-section template presented as the format,
  *      with the condition that unlocks it two lines away under a different
- *      heading. That is the same bug the response spec had — an absolute shape
- *      directive sitting under a conditional one, where the absolute rule wins —
+ *      heading. That is the same bug the response spec had  -  an absolute shape
+ *      directive sitting under a conditional one, where the absolute rule wins  - 
  *      and here it was worse, because the sections were mandatory-shaped and
  *      OCR among them was shouted ("transcribe ALL visible text ... VERBATIM").
  *      Asking "what colour is the car" therefore produced six markdown headings,
@@ -785,15 +812,15 @@ export function buildVisionSystemPrompt(opts: PromptRenderOptions): string {
  * back as the version to change.
  *
  * A named function rather than three lines inside a JSX callback, and not for
- * tidiness — nothing in the suite renders `Chat.tsx`, so an expression there is
+ * tidiness  -  nothing in the suite renders `Chat.tsx`, so an expression there is
  * verified by reading and this is verified by running. The wrap is the part that
  * has been wrong: it used a literal ``` and CommonMark closes a block at the first
- * fence line at least as long as the opener, so a generated README — the artifact
- * most likely to be sent back for editing — arrived truncated at its own first
+ * fence line at least as long as the opener, so a generated README  -  the artifact
+ * most likely to be sent back for editing  -  arrived truncated at its own first
  * example, with the rest of itself trailing as prose. `fenceFor` outgrows whatever
  * is inside.
  */
 export function buildArtifactEditPrompt(text: string): string {
   const fence = fenceFor(text);
-  return `Here's the current version — make the changes I describe:\n${fence}\n${text}\n${fence}`;
+  return `Here's the current version  -  make the changes I describe:\n${fence}\n${text}\n${fence}`;
 }

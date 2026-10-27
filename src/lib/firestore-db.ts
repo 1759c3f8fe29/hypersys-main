@@ -17,7 +17,7 @@ import {
 } from 'firebase/firestore';
 import { db } from './firebase';
 import { sanitizeImages } from './search';
-import type { ChatAttachment } from '@/components/chat/types';
+import type { ChatAttachment, InteractiveComponent } from '@/components/chat/types';
 
 // ---------------------------------------------------------------------------
 // A note on the timestamp fields below, which were all `any`.
@@ -173,6 +173,13 @@ export interface FirestoreMessage {
   servedName?: string | null;
   servedNote?: string | null;
   toolsWithheld?: boolean | null;
+  /**
+   * Interactive components (GenUI) — calculators, charts, tables, maps, etc.
+   * Persisted so a reload re-renders the full component. Each component is a
+   * full InteractiveComponent specification (from interactive-types.ts).
+   * Null rather than absent so docs written before this field have the same shape.
+   */
+  interactiveComponents?: import("@/components/chat/types").InteractiveComponent[] | null;
 }
 
 export const firestoreDb = {
@@ -319,6 +326,10 @@ export const firestoreDb = {
           servedName: typeof data.servedName === 'string' && data.servedName ? data.servedName : undefined,
           servedNote: typeof data.servedNote === 'string' && data.servedNote ? data.servedNote : undefined,
           toolsWithheld: data.toolsWithheld === true ? true : undefined,
+          // Interactive components (GenUI). Revalidated on read — same pattern as imageResults.
+          interactiveComponents: Array.isArray(data.interactiveComponents)
+            ? data.interactiveComponents.slice(0, 20)
+            : undefined,
         };
       });
       // Sort client-side to avoid needing a composite index
@@ -382,7 +393,7 @@ export const firestoreDb = {
     // FirestoreMessage. They are part of `meta` for the same reason reasoning
     // is: they are per-turn facts about how the reply was produced, not part of
     // what the model said.
-    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> }; imageResults?: FirestoreMessage['imageResults']; servedBy?: string; servedName?: string; servedNote?: string; toolsWithheld?: boolean }
+    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> }; imageResults?: FirestoreMessage['imageResults']; interactiveComponents?: InteractiveComponent[]; servedBy?: string; servedName?: string; servedNote?: string; toolsWithheld?: boolean }
   ): Promise<string> {
     // Compute the sibling index: how many children this parent already has.
     // This is a read-then-write (not transactional), which is fine here —
@@ -452,6 +463,8 @@ export const firestoreDb = {
       // Retrieved-image gallery (spec §5). Null rather than omitted so a doc
       // with no gallery has the same shape as one that never could have one.
       imageResults: meta?.imageResults ?? null,
+      // Interactive components (GenUI) — persisted so reload re-renders them.
+      interactiveComponents: meta?.interactiveComponents ?? null,
       // Attribution, for the replies where it is not the obvious answer. Null
       // (not absent) for the same shape reason as above, and the reader treats
       // a null servedName as "the picked model answered" — which is what every

@@ -20,6 +20,7 @@ import { RUN_CODE_SCHEMA, executeRunCode } from "./run-code";
 import { SEARCH_IMAGES_SCHEMA, executeSearchImages } from "./search-images";
 import { TASK_LIST_TOOL } from "./task-list";
 import { WEB_SEARCH_SCHEMA, executeWebSearch } from "./web-search";
+import { INTERACTIVE_COMPONENT_SCHEMA, interactiveComponentExecutor } from "./interactive-component";
 import type { ToolSchema } from "@/lib/ai";
 
 export type { AttachmentRef, ToolArtifacts, ToolContext, ToolDefinition, ToolResult } from "./types";
@@ -44,6 +45,7 @@ const DEFINITIONS: ToolDefinition[] = [
     recognizeTextForm: TASK_LIST_TOOL.recognizeTextForm,
   },
   { name: "ocr_image", schema: OCR_IMAGE_SCHEMA, execute: executeOcrImage },
+  { name: "render_component", schema: INTERACTIVE_COMPONENT_SCHEMA, execute: interactiveComponentExecutor },
 ];
 
 export const TOOL_REGISTRY: Record<string, ToolDefinition> = Object.fromEntries(

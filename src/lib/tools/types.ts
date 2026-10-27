@@ -17,6 +17,7 @@
 import type { ToolSchema } from "@/lib/ai";
 import type { SearchResult } from "@/lib/search";
 import type { MessageCodeRun } from "@/components/chat/types";
+import type { InteractiveComponent } from "@/lib/interactive-types";
 
 /**
  * What an executor hands back to the model.
@@ -71,6 +72,12 @@ export interface ToolArtifacts {
    * codeRuns uses for Run).
    */
   taskList?: { title: string; tasks: Array<{ text: string; done: boolean }> };
+  /**
+   * Interactive components rendered during this turn. Each component is a full
+   * specification that the InteractiveContentRenderer can display. Persisted on the
+   * message document for reload support.
+   */
+  interactiveComponents?: InteractiveComponent[];
 }
 
 /**

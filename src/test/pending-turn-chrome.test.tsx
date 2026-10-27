@@ -110,7 +110,7 @@ import ChatMessage from "@/components/chat/ChatMessage";
 import { resetArtifacts } from "@/components/artifacts/ArtifactProvider";
 
 /** Every control in the post-reply footer, by the name a user (or a reader) sees. */
-const CONTENT_ACTIONS = [/^Copy$/i, /Rate this response as good/i, /Rate this response as bad/i, /Read aloud/i];
+const CONTENT_ACTIONS = [/^Copy$/i, /Read aloud/i];
 
 function mountReply(props: Partial<React.ComponentProps<typeof ChatMessage>> = {}) {
   return render(
@@ -163,16 +163,17 @@ describe("an assistant turn with nothing in it yet", () => {
     }
   });
 
-  it("counts a generated image as a reply, so an image turn can still be rated", () => {
+  it("counts a generated image as a reply, so an image turn can still be copied/read", () => {
     // An image turn's text is often empty — the picture is the answer. Keying the
-    // footer on text alone would strip rating and download-adjacent affordances
+    // footer on text alone would strip copy/read-aloud affordances
     // from every one of them.
     mountReply({
       isStreaming: false,
       content: "",
       imageUrl: "https://image.pollinations.ai/prompt/a%20car?nologo=true",
     });
-    expect(screen.getByRole("button", { name: /Rate this response as good/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Copy$/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Read aloud/i })).toBeTruthy();
   });
 });
 

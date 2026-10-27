@@ -1060,7 +1060,7 @@ export default function Chat() {
     // is optional and skipped by the paths that have no reasoning (the user
     // turn, the image turn), and the call sites above would otherwise become
     // long runs of `undefined, undefined, 0`.
-    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; imageResults?: MessageImage[] }
+    meta?: { reasoning?: string; thinkSeconds?: number; truncated?: boolean; imageResults?: MessageImage[]; interactiveComponents?: InteractiveComponent[] }
   ) => {
     if (!user) return false;
     try {
@@ -1945,6 +1945,11 @@ export default function Chat() {
                   setStatusText('Writing Python...');
                 } else if (name === 'ocr_image') {
                   setStatusText('Reading text from the image...');
+                } else if (name === 'render_component') {
+                  const compType = typeof args.component === 'object' && args.component && typeof (args.component as Record<string, unknown>).type === 'string'
+                    ? (args.component as Record<string, unknown>).type
+                    : 'component';
+                  setStatusText(`Rendering ${compType}...`);
                 } else {
                   setStatusText('Working...');
                 }
@@ -2022,6 +2027,8 @@ export default function Chat() {
         // Real retrieved pictures (search_images). A turn can carry several, so
         // unlike agentImageUrl (a single *generated* image) this is the whole list.
         const agentImageResults = agentArtifacts.imageResults || [];
+        // Interactive components (calculators, charts, tables, etc.)
+        const agentInteractiveComponents = agentArtifacts.interactiveComponents || [];
 
         // Who answered, versus who was asked. The router announces the winner on
         // every stream (X-Served-By / X-Served-Model) and nothing read it until
@@ -2071,6 +2078,7 @@ export default function Chat() {
                 codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns,
                 taskList: agentTaskList ?? m.taskList,
                 imageResults: agentImageResults.length ? agentImageResults : m.imageResults,
+                interactiveComponents: agentInteractiveComponents.length ? agentInteractiveComponents : m.interactiveComponents,
                 sources: mergedSources.length ? mergedSources : undefined,
                 followUps: mergedFollowUps.length ? mergedFollowUps : undefined,
                 // Absent when the model the user picked answered. Spread rather
@@ -2102,7 +2110,7 @@ export default function Chat() {
             // the explicit Image-model path has always done, and it renders the
             // same: ChatMessage hoists the markdown image out of the prose with
             // stripMarkdownImages, so this adds nothing visible to the reply.
-            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.label, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, ...turnAttribution });
+            await saveMessage(convId, 'assistant', withPersistedImage(finalText, agentImageUrl), selectedModelMeta.label, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, interactiveComponents: agentInteractiveComponents.length ? agentInteractiveComponents : undefined, ...turnAttribution });
             maybeExtractMemories(finalText);
           }
         } else if (agentImageUrl || agentFiles.length || agentImageResults.length) {
@@ -2112,12 +2120,12 @@ export default function Chat() {
           const madeText = agentImageUrl ? 'Here you go.' : agentImageResults.length ? `Here are ${agentImageResults.length} image${agentImageResults.length === 1 ? '' : 's'}.` : `Created ${agentFiles.map((f) => f.filename).join(', ')}.`;
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantMessage.id
-              ? { ...m, content: madeText, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns, taskList: agentTaskList ?? m.taskList, imageResults: agentImageResults.length ? agentImageResults : m.imageResults, ...turnAttribution }
+              ? { ...m, content: madeText, reasoning: runPrimaryReasoning || undefined, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageUrl: agentImageUrl || m.imageUrl, files: agentFiles.length ? agentFiles : m.files, codeRuns: agentCodeRuns.length ? agentCodeRuns : m.codeRuns, taskList: agentTaskList ?? m.taskList, imageResults: agentImageResults.length ? agentImageResults : m.imageResults, interactiveComponents: agentInteractiveComponents.length ? agentInteractiveComponents : m.interactiveComponents, ...turnAttribution }
               : m)),
           );
           ingestArtifacts(extractArtifacts(madeText, agentFiles, assistantMessage.id));
           if (convId && isAuthenticated) {
-            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.label, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, ...turnAttribution });
+            await saveMessage(convId, 'assistant', withPersistedImage(madeText, agentImageUrl), selectedModelMeta.label, undefined, assistantMessage.parentMessageId, assistantMessage.id, { reasoning: runPrimaryReasoning, thinkSeconds: runPrimaryThinkSeconds, truncated: runPrimaryTruncated || undefined, imageResults: agentImageResults.length ? agentImageResults : undefined, interactiveComponents: agentInteractiveComponents.length ? agentInteractiveComponents : undefined, ...turnAttribution });
             maybeExtractMemories(madeText);
           }
         } else {
