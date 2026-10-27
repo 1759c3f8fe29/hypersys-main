@@ -60,7 +60,7 @@ export default function CalculatorRenderer({
   }, [instanceId, onUpdate]);
 
   const handleNumberInput = useCallback((field: CalculatorField, e: React.ChangeEvent<HTMLInputElement>) => {
-    let value = e.target.value;
+    const value = e.target.value;
     if (value === "" || value === "-") {
       handleInputChange(field.id, value);
       return;

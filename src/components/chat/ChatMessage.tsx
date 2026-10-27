@@ -1849,8 +1849,7 @@ export default function ChatMessage({ role, content, isStreaming, attachments = 
                 <ToolCallsDisplay toolCalls={streamingToolCalls} isStreaming={isStreaming} />
               </div>
             )}
-            {/* Sources shown after answer when not streaming, or when thinking block is collapsed */}
-            {!isUser && sources && sources.length > 0 && (!isStreaming || !reasoning) && <SourceChips sources={sources} />}
+            {/* Sources shown inside thinking block during streaming like ChatGPT, or after thinking block collapses */}
             {!isUser && imageResults && imageResults.length > 0 && <SearchedImageGallery images={imageResults} />}
 
             {/* Post-response actions (#7): Retry, Copy, rate, read aloud, and
