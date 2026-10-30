@@ -18,8 +18,16 @@ import UnitConverterRenderer from "../components/interactive/UnitConverterRender
 import PlannerRenderer from "../components/interactive/PlannerRenderer";
 import QuizRenderer from "../components/interactive/QuizRenderer";
 import ComparisonRenderer from "../components/interactive/ComparisonRenderer";
+import SimulationRenderer from "../components/interactive/SimulationRenderer";
+import LiveWidgetRenderer from "../components/interactive/LiveWidgetRenderer";
+import EquationSolverRenderer from "../components/interactive/EquationSolverRenderer";
+import FunctionPlotterRenderer from "../components/interactive/FunctionPlotterRenderer";
+import SurfacePlotterRenderer from "../components/interactive/SurfacePlotterRenderer";
+import GeometryRenderer from "../components/interactive/GeometryRenderer";
+import CalculusVisualizationRenderer from "../components/interactive/CalculusVisualizationRenderer";
+import SeriesVisualizationRenderer from "../components/interactive/SeriesVisualizationRenderer";
 
-interface RendererProps {
+export interface RendererProps {
   component: InteractiveComponent;
   onUpdate?: (key: string, inputs: Record<string, unknown>) => void;
   className?: string;
@@ -42,6 +50,14 @@ const rendererMap: Record<InteractiveComponentType, React.ComponentType<Renderer
   planner: PlannerRenderer,
   quiz: QuizRenderer,
   comparison: ComparisonRenderer,
+  simulation: SimulationRenderer,
+  live_widget: LiveWidgetRenderer,
+  equation_solver: EquationSolverRenderer,
+  function_plotter: FunctionPlotterRenderer,
+  surface_plotter: SurfacePlotterRenderer,
+  geometry: GeometryRenderer,
+  calculus_visualization: CalculusVisualizationRenderer,
+  series_visualization: SeriesVisualizationRenderer,
 };
 
 /** Result of attempting to render a component. */

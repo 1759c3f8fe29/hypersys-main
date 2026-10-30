@@ -23,7 +23,15 @@ export type InteractiveComponentType =
   | "percentage_calculator"
   | "compound_interest_calculator"
   | "time_calculator"
-  | "grade_calculator";
+  | "grade_calculator"
+  | "simulation"
+  | "live_widget"
+  | "equation_solver"
+  | "function_plotter"
+  | "surface_plotter"
+  | "geometry"
+  | "calculus_visualization"
+  | "series_visualization";
 
 /** Base interface for all interactive components. */
 export interface InteractiveComponentBase {
@@ -81,21 +89,58 @@ export interface CalculatorField {
 export interface ChartComponent extends InteractiveComponentBase {
   type: "chart";
   /** Chart type. */
-  chartType: "bar" | "line" | "scatter" | "pie" | "donut" | "area";
+  chartType:
+    | "bar"
+    | "line"
+    | "scatter"
+    | "pie"
+    | "donut"
+    | "area"
+    | "histogram"
+    | "box_plot"
+    | "heatmap"
+    | "radar"
+    | "treemap"
+    | "waterfall"
+    | "funnel"
+    | "sankey"
+    | "network_graph";
   /** Dataset for the chart. */
   data: ChartDataset[];
   /** Chart options. */
   options?: ChartOptions;
   /** Whether to show a data table below the chart. */
   showDataTable?: boolean;
-  /** X-axis key (for line/scatter/bar). */
+  /** X-axis key (for line/scatter/bar/histogram). */
   xKey?: string;
   /** Y-axis keys (for line/scatter/bar). */
   yKeys?: string[];
-  /** Label key (for pie/donut). */
+  /** Label key (for pie/donut/funnel). */
   labelKey?: string;
-  /** Value key (for pie/donut). */
+  /** Value key (for pie/donut/funnel/waterfall). */
   valueKey?: string;
+  /** Category key (for box_plot/radar/heatmap). */
+  categoryKey?: string;
+  /** Series key (for radar/heatmap). */
+  seriesKey?: string;
+  /** Parent key (for treemap). */
+  parentKey?: string;
+  /** Source key (for sankey). */
+  sourceKey?: string;
+  /** Target key (for sankey). */
+  targetKey?: string;
+  /** Weight/value key (for sankey/network_graph). */
+  weightKey?: string;
+  /** Node ID key (for network_graph). */
+  nodeIdKey?: string;
+  /** Node label key (for network_graph). */
+  nodeLabelKey?: string;
+  /** Node group key (for network_graph). */
+  nodeGroupKey?: string;
+  /** Link source key (for network_graph). */
+  linkSourceKey?: string;
+  /** Link target key (for network_graph). */
+  linkTargetKey?: string;
 }
 
 export interface ChartDataset {
@@ -124,6 +169,46 @@ export interface ChartOptions {
   xAxisLabel?: string;
   /** Y-axis label. */
   yAxisLabel?: string;
+  /** Number of bins (histogram). */
+  bins?: number;
+  /** Bin range [min, max] (histogram). */
+  binRange?: [number, number];
+  /** Color scale for heatmap: sequential, diverging, categorical. */
+  colorScale?: "sequential" | "diverging" | "categorical";
+  /** Color range for heatmap [minColor, maxColor]. */
+  colorRange?: [string, string];
+  /** Heatmap cell labels. */
+  showLabels?: boolean;
+  /** Radar chart: max value for normalization. */
+  radarMax?: number;
+  /** Radar chart: number of levels. */
+  radarLevels?: number;
+  /** Treemap: layout algorithm. */
+  treemapLayout?: "squarify" | "slice" | "dice" | "sliceDice";
+  /** Treemap: padding between cells. */
+  treemapPadding?: number;
+  /** Waterfall: show connectors. */
+  showConnectors?: boolean;
+  /** Waterfall: starting value. */
+  startingValue?: number;
+  /** Funnel: show percentage labels. */
+  showPercentages?: boolean;
+  /** Funnel: sort by value. */
+  sortByValue?: boolean;
+  /** Sankey: node width. */
+  nodeWidth?: number;
+  /** Sankey: node padding. */
+  nodePadding?: number;
+  /** Sankey: layout iterations. */
+  layoutIterations?: number;
+  /** Network graph: link distance. */
+  linkDistance?: number;
+  /** Network graph: charge strength. */
+  chargeStrength?: number;
+  /** Network graph: gravity. */
+  gravity?: number;
+  /** Network graph: enable dragging. */
+  enableDragging?: boolean;
 }
 
 /** Data table component — sortable, filterable tables. */
@@ -307,6 +392,8 @@ export interface QuizQuestion {
   points?: number;
 }
 
+import type { SimulationState } from "./simulations";
+
 /** Comparison component — side-by-side comparison. */
 export interface ComparisonComponent extends InteractiveComponentBase {
   type: "comparison";
@@ -316,6 +403,21 @@ export interface ComparisonComponent extends InteractiveComponentBase {
   criteria: ComparisonCriterion[];
   /** Layout orientation. */
   orientation?: "horizontal" | "vertical";
+}
+
+/** Simulation component — interactive educational simulations. */
+export interface SimulationComponent extends InteractiveComponentBase {
+  type: "simulation";
+  /** Simulation template ID from the registry. */
+  simulationId: string;
+  /** Current parameter values (overrides defaults). */
+  parameters: Record<string, number | string | boolean>;
+  /** Whether simulation is running. */
+  running?: boolean;
+  /** Animation speed multiplier. */
+  speed?: number;
+  /** Initial state overrides. */
+  initialState?: Partial<SimulationState>;
 }
 
 export interface ComparisonItem {
@@ -344,6 +446,285 @@ export interface ComparisonCriterion {
   unit?: string;
 }
 
+/** Live Widget Types */
+export type LiveWidgetType =
+  | "weather"
+  | "currency"
+  | "stocks"
+  | "sports"
+  | "news"
+  | "crypto"
+  | "world_clock"
+  | "countdown";
+
+/** Live Widget Configuration */
+export interface LiveWidgetConfig {
+  /** Widget-specific configuration */
+  location?: string;           // Weather: city name or lat,lon
+  units?: "metric" | "imperial"; // Weather: units
+  fromCurrency?: string;       // Currency: base currency
+  toCurrency?: string;         // Currency: target currency
+  amount?: number;             // Currency: amount to convert
+  symbols?: string | string[]; // Stocks: comma-separated symbols or array
+  league?: string;             // Sports: league code (nba, nfl, mlb, etc.)
+  date?: string;               // Sports: date in YYYY-MM-DD
+  category?: string;           // News: category (general, business, tech, etc.)
+  country?: string;            // News: country code
+  limit?: number;              // News: number of articles
+  coins?: string | string[];   // Crypto: coin IDs
+  vsCurrency?: string;         // Crypto: quote currency
+  timezones?: string | string[]; // World clock: IANA timezone identifiers
+  format?: "12h" | "24h";      // World clock: time format
+  targetDate?: string;         // Countdown: ISO date string
+  label?: string;              // Countdown: custom label
+  /** Auto-refresh interval */
+  refreshInterval?: "manual" | "30s" | "1m" | "5m" | "15m";
+  /** Layout variant */
+  layout?: "compact" | "detailed" | "dashboard";
+}
+
+/** Live Widget Data (returned from API) */
+export interface LiveWidgetData {
+  // Weather
+  temperature?: number | null;
+  condition?: string | null;
+  humidity?: number | null;
+  windSpeed?: number | null;
+  icon?: string | null;
+  forecast?: Array<{ date: string; high: number; low: number; condition: string; icon: string }>;
+
+  // Currency
+  fromCurrency?: string;
+  toCurrency?: string;
+  rate?: number | null;
+  convertedAmount?: number | null;
+  history?: Array<{ date: string; rate: number }>;
+
+  // Stocks
+  symbols?: string | string[];
+  quotes?: Array<{
+    symbol: string;
+    price: number;
+    change: number;
+    changePercent: number;
+    volume?: number;
+    high?: number;
+    low?: number;
+    chart?: Array<{ time: string; price: number }>;
+  }>;
+
+  // Sports
+  league?: string;
+  games?: Array<{
+    homeTeam: string;
+    awayTeam: string;
+    homeScore: number | null;
+    awayScore: number | null;
+    status: string;
+    time?: string;
+    venue?: string;
+  }>;
+
+  // News
+  category?: string;
+  articles?: Array<{
+    title: string;
+    description?: string;
+    source: string;
+    publishedAt: string;
+    url: string;
+    imageUrl?: string;
+    content?: string;
+  }>;
+
+  // Crypto
+  coins?: string | string[];
+  prices?: Array<{
+    symbol: string;
+    name: string;
+    price: number;
+    changePercent24h: number;
+    marketCap?: number;
+    volume24h?: number;
+    chart?: Array<{ time: string; price: number }>;
+  }>;
+
+  // World Clock
+  clocks?: Array<{
+    timezone: string;
+    time: string;
+    date: string;
+    offset: number;
+  }>;
+
+  // Countdown
+  expired?: boolean;
+  days?: number;
+  hours?: number;
+  minutes?: number;
+  seconds?: number;
+  label?: string;
+  targetDate?: string;
+
+  // Error state
+  error?: string;
+}
+
+/** Live Widget Component */
+export interface LiveWidgetComponent extends InteractiveComponentBase {
+  type: "live_widget";
+  /** Widget subtype */
+  widgetType: LiveWidgetType;
+  /** Widget configuration */
+  config: LiveWidgetConfig;
+  /** Current data (populated after fetch) */
+  data?: LiveWidgetData;
+  /** Whether data is currently loading */
+  loading?: boolean;
+  /** Last fetch timestamp */
+  lastUpdated?: number;
+  /** Error message if any */
+  error?: string;
+}
+
+/** Equation Solver Component — find roots of equations */
+export interface EquationSolverComponent extends InteractiveComponentBase {
+  type: "equation_solver";
+  /** Equation expression (e.g., "x^2 - 4", "sin(x) - 0.5") */
+  expression: string;
+  /** Variable to solve for (default: "x") */
+  variable?: string;
+  /** Solver method */
+  method?: "newton" | "bisection" | "secant" | "auto";
+  /** Search interval [min, max] */
+  interval?: [number, number];
+  /** Initial guess for Newton/secant */
+  initialGuess?: number;
+  /** Tolerance */
+  tolerance?: number;
+  /** Maximum iterations */
+  maxIterations?: number;
+  /** Whether to find all roots in interval */
+  findAllRoots?: boolean;
+}
+
+/** Function Plotter Component — 2D plots */
+export interface FunctionPlotterComponent extends InteractiveComponentBase {
+  type: "function_plotter";
+  /** Function expression */
+  expression: string;
+  /** Plot type */
+  plotType?: "cartesian" | "parametric" | "polar";
+  /** Domain for independent variable [min, max] */
+  domain: [number, number];
+  /** For parametric: y(t) expression */
+  yExpression?: string;
+  /** Variable name (default: 'x' for cartesian, 't' for parametric/polar) */
+  variable?: string;
+  /** Number of sample points */
+  samples?: number;
+  /** Show asymptotes */
+  showAsymptotes?: boolean;
+  /** Y-axis range override [min, max] */
+  yRange?: [number, number];
+}
+
+/** Surface Plotter Component — 3D surface plots */
+export interface SurfacePlotterComponent extends InteractiveComponentBase {
+  type: "surface_plotter";
+  /** Surface expression z = f(x, y) */
+  expression: string;
+  /** X domain [min, max] */
+  xDomain: [number, number];
+  /** Y domain [min, max] */
+  yDomain: [number, number];
+  /** Grid resolution */
+  resolution?: number;
+  /** Variable names */
+  variables?: { x: string; y: string };
+  /** Color scheme */
+  colorScheme?: "height" | "slope" | "curvature";
+  /** Show wireframe */
+  wireframe?: boolean;
+  /** Camera position */
+  cameraPosition?: { x: number; y: number; z: number };
+}
+
+/** Geometry Construction Component */
+export interface GeometryComponent extends InteractiveComponentBase {
+  type: "geometry";
+  /** Construction steps to execute */
+  constructions: GeometryConstructionStep[];
+  /** Measurements to display */
+  measurements?: GeometryMeasurementSpec[];
+  /** Canvas bounds [xMin, yMin, xMax, yMax] */
+  bounds?: [number, number, number, number];
+  /** Show grid */
+  showGrid?: boolean;
+  /** Show axes */
+  showAxes?: boolean;
+}
+
+export interface GeometryConstructionStep {
+  /** Operation type */
+  op: "point" | "line" | "segment" | "circle" | "circle_three_points" | "polygon" | "intersect_lines" | "intersect_line_circle" | "midpoint" | "perp_bisector";
+  /** Label for the created object */
+  label?: string;
+  /** Parameters for the operation */
+  params: Record<string, string | number | boolean>;
+}
+
+export interface GeometryMeasurementSpec {
+  /** Measurement type */
+  type: "distance" | "angle" | "area" | "perimeter" | "midpoint" | "intersection";
+  /** Object labels involved */
+  objects: string[];
+  /** Label for display */
+  label?: string;
+}
+
+/** Calculus Visualization Component */
+export interface CalculusVisualizationComponent extends InteractiveComponentBase {
+  type: "calculus_visualization";
+  /** Visualization type */
+  vizType: "tangent" | "area" | "taylor" | "limit";
+  /** Function expression */
+  expression: string;
+  /** Variable name */
+  variable?: string;
+  /** Domain [min, max] */
+  domain: [number, number];
+  /** For tangent: point of tangency */
+  point?: number;
+  /** For area: interval [a, b] */
+  interval?: [number, number];
+  /** For area: Riemann sum method */
+  areaMethod?: "left" | "right" | "midpoint" | "trapezoid";
+  /** For area: number of partitions */
+  partitions?: number;
+  /** For Taylor: center point */
+  center?: number;
+  /** For Taylor: order */
+  order?: number;
+  /** For limit: target point */
+  target?: number;
+  /** For limit: direction */
+  limitDirection?: "left" | "right" | "both";
+}
+
+/** Series Visualization Component */
+export interface SeriesVisualizationComponent extends InteractiveComponentBase {
+  type: "series_visualization";
+  /** Series term expression (function of n) */
+  termExpression: string;
+  /** Maximum terms to show */
+  maxTerms?: number;
+  /** Convergence tolerance */
+  tolerance?: number;
+  /** Variable name (default: 'n') */
+  variable?: string;
+}
+
 /** Union of all interactive component types. */
 export type InteractiveComponent =
   | CalculatorComponent
@@ -354,7 +735,15 @@ export type InteractiveComponent =
   | UnitConverterComponent
   | PlannerComponent
   | QuizComponent
-  | ComparisonComponent;
+  | ComparisonComponent
+  | SimulationComponent
+  | LiveWidgetComponent
+  | EquationSolverComponent
+  | FunctionPlotterComponent
+  | SurfacePlotterComponent
+  | GeometryComponent
+  | CalculusVisualizationComponent
+  | SeriesVisualizationComponent;
 
 /** Response block — the structured protocol for streaming responses. */
 export type ResponseBlock =
@@ -405,6 +794,15 @@ export interface ValidationResult {
   valid: boolean;
   errors: string[];
   warnings: string[];
+}
+
+/** Props passed to all interactive component renderers. */
+export interface RendererProps {
+  component: InteractiveComponent;
+  onUpdate?: (key: string, inputs: Record<string, unknown>) => void;
+  className?: string;
+  /** Unique instance ID for this render (for multiple same-type components). */
+  instanceId?: string;
 }
 
 /** Component registry entry. */

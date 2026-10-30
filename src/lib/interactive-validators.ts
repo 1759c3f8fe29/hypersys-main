@@ -21,7 +21,19 @@ import {
   PlannerComponent,
   QuizComponent,
   ComparisonComponent,
+  SimulationComponent,
+  LiveWidgetComponent,
+  LiveWidgetType,
+  LiveWidgetConfig,
+  LiveWidgetData,
+  EquationSolverComponent,
+  FunctionPlotterComponent,
+  SurfacePlotterComponent,
+  GeometryComponent,
+  CalculusVisualizationComponent,
+  SeriesVisualizationComponent,
 } from "./interactive-types";
+import { getSimulation } from "./simulations";
 
 /** Default limits for all components. */
 const DEFAULT_LIMITS: ComponentLimits = {
@@ -127,7 +139,10 @@ export function validateChart(component: ChartComponent): ValidationResult {
     errors.push("Chart must have a title");
   }
 
-  const validChartTypes = ["bar", "line", "scatter", "pie", "donut", "area"] as const;
+  const validChartTypes = [
+    "bar", "line", "scatter", "pie", "donut", "area",
+    "histogram", "box_plot", "heatmap", "radar", "treemap", "waterfall", "funnel", "sankey", "network_graph"
+  ] as const;
   if (!validChartTypes.includes(component.chartType)) {
     errors.push(`Invalid chart type: ${component.chartType}`);
   }
@@ -149,7 +164,8 @@ export function validateChart(component: ChartComponent): ValidationResult {
     if (limitError) errors.push(limitError);
   }
 
-  if (["line", "scatter", "bar"].includes(component.chartType)) {
+  // Cartesian charts
+  if (["line", "scatter", "bar", "histogram", "waterfall"].includes(component.chartType)) {
     if (!component.xKey) {
       warnings.push(`${component.chartType} charts should specify xKey`);
     }
@@ -158,9 +174,39 @@ export function validateChart(component: ChartComponent): ValidationResult {
     }
   }
 
-  if (["pie", "donut"].includes(component.chartType)) {
+  if (["pie", "donut", "funnel"].includes(component.chartType)) {
     if (!component.labelKey || !component.valueKey) {
       warnings.push(`${component.chartType} charts should specify labelKey and valueKey`);
+    }
+  }
+
+  if (component.chartType === "box_plot") {
+    if (!component.yKeys || component.yKeys.length === 0) {
+      warnings.push("box_plot charts should specify yKeys");
+    }
+  }
+
+  if (["heatmap", "radar"].includes(component.chartType)) {
+    if (!component.categoryKey || !component.seriesKey || !component.valueKey) {
+      warnings.push(`${component.chartType} charts should specify categoryKey, seriesKey, and valueKey`);
+    }
+  }
+
+  if (component.chartType === "treemap") {
+    if (!component.labelKey || !component.valueKey) {
+      warnings.push("treemap charts should specify labelKey and valueKey");
+    }
+  }
+
+  if (component.chartType === "sankey") {
+    if (!component.sourceKey || !component.targetKey || !component.weightKey) {
+      warnings.push("sankey charts should specify sourceKey, targetKey, and weightKey");
+    }
+  }
+
+  if (component.chartType === "network_graph") {
+    if (!component.nodeIdKey || !component.linkSourceKey || !component.linkTargetKey) {
+      warnings.push("network_graph charts should specify nodeIdKey, linkSourceKey, and linkTargetKey");
     }
   }
 
@@ -553,6 +599,446 @@ export function validateComparison(component: ComparisonComponent): ValidationRe
   return errors.length > 0 ? fail(errors, warnings) : ok(warnings);
 }
 
+/** Validate a simulation component. */
+export function validateSimulation(component: SimulationComponent): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!component.title || component.title.trim().length === 0) {
+    errors.push("Simulation must have a title");
+  }
+
+  if (!component.simulationId) {
+    errors.push("Simulation must have a simulationId");
+  } else {
+    const template = getSimulation(component.simulationId);
+    if (!template) {
+      errors.push(`Unknown simulation: ${component.simulationId}`);
+    } else {
+      // Validate parameters against template
+      for (const param of template.parameters) {
+        const value = component.parameters[param.id];
+        if (value === undefined) {
+          warnings.push(`Missing parameter: ${param.id} (using default: ${param.default})`);
+        } else if (param.type === "number") {
+          const num = Number(value);
+          if (isNaN(num)) {
+            errors.push(`Parameter ${param.id} must be a number`);
+          } else if (param.min !== undefined && num < param.min) {
+            errors.push(`${param.id} below minimum ${param.min}`);
+          } else if (param.max !== undefined && num > param.max) {
+            errors.push(`${param.id} above maximum ${param.max}`);
+          }
+        } else if (param.type === "select" && param.options) {
+          const validValues = param.options.map(o => o.value);
+          if (typeof value === "string" || typeof value === "number") {
+            if (!validValues.includes(value)) {
+              warnings.push(`Parameter ${param.id} has unexpected value: ${value}`);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (component.speed !== undefined && (component.speed < 0.1 || component.speed > 10)) {
+    warnings.push("Speed should be between 0.1 and 10");
+  }
+
+  return errors.length > 0 ? fail(errors, warnings) : ok(warnings);
+}
+
+/** Valid widget types for live widgets */
+const VALID_WIDGET_TYPES: LiveWidgetType[] = [
+  "weather", "currency", "stocks", "sports", "news", "crypto", "world_clock", "countdown"
+];
+
+/** Required config fields per widget type */
+const REQUIRED_CONFIG: Record<LiveWidgetType, string[]> = {
+  weather: ["location"],
+  currency: ["fromCurrency", "toCurrency"],
+  stocks: ["symbols"],
+  sports: ["league"],
+  news: ["category"],
+  crypto: ["coins"],
+  world_clock: ["timezones"],
+  countdown: ["targetDate"],
+};
+
+/** Validate a live widget component. */
+export function validateLiveWidget(component: LiveWidgetComponent): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!component.title || component.title.trim().length === 0) {
+    errors.push("Live widget must have a title");
+  }
+
+  if (!component.widgetType) {
+    errors.push("Live widget must have a widgetType");
+  } else if (!VALID_WIDGET_TYPES.includes(component.widgetType)) {
+    errors.push(`Invalid widget type: ${component.widgetType}`);
+  }
+
+  if (!component.config) {
+    errors.push("Live widget must have a config");
+  } else {
+    const required = REQUIRED_CONFIG[component.widgetType] || [];
+    for (const field of required) {
+      const value = component.config[field as keyof LiveWidgetConfig];
+      if (value === undefined || value === null || (Array.isArray(value) && value.length === 0) || (typeof value === "string" && value.trim() === "")) {
+        errors.push(`Live widget ${component.widgetType} requires config field: ${field}`);
+      }
+    }
+
+    // Validate refresh interval
+    if (component.config.refreshInterval) {
+      const validIntervals = ["manual", "30s", "1m", "5m", "15m"];
+      if (!validIntervals.includes(component.config.refreshInterval)) {
+        warnings.push(`Invalid refresh interval: ${component.config.refreshInterval}`);
+      }
+    }
+
+    // Validate layout
+    if (component.config.layout) {
+      const validLayouts = ["compact", "detailed", "dashboard"];
+      if (!validLayouts.includes(component.config.layout)) {
+        warnings.push(`Invalid layout: ${component.config.layout}`);
+      }
+    }
+
+    // Widget-specific validations
+    if (component.widgetType === "weather" && component.config.units) {
+      if (!["metric", "imperial"].includes(component.config.units)) {
+        warnings.push("Weather units must be 'metric' or 'imperial'");
+      }
+    }
+
+    if (component.widgetType === "world_clock" && component.config.format) {
+      if (!["12h", "24h"].includes(component.config.format)) {
+        warnings.push("World clock format must be '12h' or '24h'");
+      }
+    }
+
+    if (component.widgetType === "countdown" && component.config.targetDate) {
+      const target = new Date(component.config.targetDate).getTime();
+      if (isNaN(target)) {
+        errors.push("Countdown targetDate must be a valid ISO date string");
+      }
+    }
+  }
+
+  return errors.length > 0 ? fail(errors, warnings) : ok(warnings);
+}
+
+/** Validate an equation solver component. */
+export function validateEquationSolver(component: EquationSolverComponent): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!component.title || component.title.trim().length === 0) {
+    errors.push("Equation solver must have a title");
+  }
+
+  if (!component.expression || component.expression.trim().length === 0) {
+    errors.push("Equation solver must have an expression");
+  }
+
+  if (component.method && !["newton", "bisection", "secant", "auto"].includes(component.method)) {
+    errors.push(`Invalid method: ${component.method}`);
+  }
+
+  if (component.method === "bisection" && !component.interval) {
+    errors.push("Bisection method requires an interval");
+  }
+
+  if (component.method === "newton" && component.initialGuess === undefined) {
+    warnings.push("Newton method works best with an initialGuess");
+  }
+
+  if (component.interval) {
+    const [min, max] = component.interval;
+    if (min >= max) {
+      errors.push("Interval min must be less than max");
+    }
+    if (!isFinite(min) || !isFinite(max)) {
+      errors.push("Interval bounds must be finite");
+    }
+  }
+
+  if (component.tolerance !== undefined && (component.tolerance <= 0 || component.tolerance > 1)) {
+    warnings.push("Tolerance should be between 0 and 1");
+  }
+
+  if (component.maxIterations !== undefined && (component.maxIterations < 1 || component.maxIterations > 10000)) {
+    warnings.push("Max iterations should be between 1 and 10000");
+  }
+
+  return errors.length > 0 ? fail(errors, warnings) : ok(warnings);
+}
+
+/** Validate a function plotter component. */
+export function validateFunctionPlotter(component: FunctionPlotterComponent): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!component.title || component.title.trim().length === 0) {
+    errors.push("Function plotter must have a title");
+  }
+
+  if (!component.expression || component.expression.trim().length === 0) {
+    errors.push("Function plotter must have an expression");
+  }
+
+  if (!component.domain || component.domain.length !== 2) {
+    errors.push("Function plotter must have a domain [min, max]");
+  } else {
+    const [min, max] = component.domain;
+    if (min >= max) {
+      errors.push("Domain min must be less than max");
+    }
+    if (!isFinite(min) || !isFinite(max)) {
+      errors.push("Domain bounds must be finite");
+    }
+  }
+
+  if (component.plotType && !["cartesian", "parametric", "polar"].includes(component.plotType)) {
+    errors.push(`Invalid plot type: ${component.plotType}`);
+  }
+
+  if (component.plotType === "parametric" && !component.yExpression) {
+    errors.push("Parametric plots require yExpression");
+  }
+
+  if (component.samples !== undefined && (component.samples < 10 || component.samples > 10000)) {
+    warnings.push("Samples should be between 10 and 10000");
+  }
+
+  return errors.length > 0 ? fail(errors, warnings) : ok(warnings);
+}
+
+/** Validate a surface plotter component. */
+export function validateSurfacePlotter(component: SurfacePlotterComponent): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!component.title || component.title.trim().length === 0) {
+    errors.push("Surface plotter must have a title");
+  }
+
+  if (!component.expression || component.expression.trim().length === 0) {
+    errors.push("Surface plotter must have an expression");
+  }
+
+  if (!component.xDomain || component.xDomain.length !== 2) {
+    errors.push("Surface plotter must have an xDomain [min, max]");
+  } else {
+    const [min, max] = component.xDomain;
+    if (min >= max) errors.push("xDomain min must be less than max");
+  }
+
+  if (!component.yDomain || component.yDomain.length !== 2) {
+    errors.push("Surface plotter must have a yDomain [min, max]");
+  } else {
+    const [min, max] = component.yDomain;
+    if (min >= max) errors.push("yDomain min must be less than max");
+  }
+
+  if (component.resolution !== undefined && (component.resolution < 5 || component.resolution > 200)) {
+    warnings.push("Resolution should be between 5 and 200");
+  }
+
+  if (component.colorScheme && !["height", "slope", "curvature"].includes(component.colorScheme)) {
+    warnings.push(`Unknown color scheme: ${component.colorScheme}`);
+  }
+
+  return errors.length > 0 ? fail(errors, warnings) : ok(warnings);
+}
+
+/** Validate a geometry component. */
+export function validateGeometry(component: GeometryComponent): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!component.title || component.title.trim().length === 0) {
+    errors.push("Geometry component must have a title");
+  }
+
+  if (!component.constructions || component.constructions.length === 0) {
+    warnings.push("Geometry component has no constructions");
+  } else {
+    const validOps = ["point", "line", "segment", "circle", "circle_three_points", "polygon", "intersect_lines", "intersect_line_circle", "midpoint", "perp_bisector"] as const;
+    const seenLabels = new Set<string>();
+
+    for (const step of component.constructions) {
+      if (!validOps.includes(step.op)) {
+        errors.push(`Invalid construction operation: ${step.op}`);
+      }
+
+      if (step.label) {
+        if (seenLabels.has(step.label)) {
+          errors.push(`Duplicate label: ${step.label}`);
+        }
+        seenLabels.add(step.label);
+      }
+
+      // Validate required params per operation
+      switch (step.op) {
+        case "point":
+          if (typeof step.params.x !== "number" || typeof step.params.y !== "number") {
+            errors.push("Point requires numeric x and y params");
+          }
+          break;
+        case "line":
+        case "segment":
+          if (!step.params.point1 || !step.params.point2) {
+            errors.push(`${step.op} requires point1 and point2 params`);
+          }
+          break;
+        case "circle":
+          if (!step.params.center || typeof step.params.radius !== "number") {
+            errors.push("Circle requires center and radius params");
+          }
+          break;
+        case "circle_three_points":
+          if (!step.params.point1 || !step.params.point2 || !step.params.point3) {
+            errors.push("Circle through three points requires point1, point2, point3 params");
+          }
+          break;
+        case "polygon":
+          if (!Array.isArray(step.params.points) || step.params.points.length < 3) {
+            errors.push("Polygon requires points array with at least 3 labels");
+          }
+          break;
+        case "intersect_lines":
+          if (!step.params.line1 || !step.params.line2) {
+            errors.push("Line intersection requires line1 and line2 params");
+          }
+          break;
+        case "intersect_line_circle":
+          if (!step.params.line || !step.params.circle) {
+            errors.push("Line-circle intersection requires line and circle params");
+          }
+          break;
+        case "midpoint":
+          if (!step.params.point1 || !step.params.point2) {
+            errors.push("Midpoint requires point1 and point2 params");
+          }
+          break;
+        case "perp_bisector":
+          if (!step.params.point1 || !step.params.point2) {
+            errors.push("Perpendicular bisector requires point1 and point2 params");
+          }
+          break;
+      }
+    }
+  }
+
+  if (component.measurements) {
+    const validMeasurements = ["distance", "angle", "area", "perimeter", "midpoint", "intersection"] as const;
+    for (const m of component.measurements) {
+      if (!validMeasurements.includes(m.type)) {
+        errors.push(`Invalid measurement type: ${m.type}`);
+      }
+      if (!m.objects || m.objects.length === 0) {
+        errors.push("Measurement must specify objects");
+      }
+    }
+  }
+
+  return errors.length > 0 ? fail(errors, warnings) : ok(warnings);
+}
+
+/** Validate a calculus visualization component. */
+export function validateCalculusVisualization(component: CalculusVisualizationComponent): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!component.title || component.title.trim().length === 0) {
+    errors.push("Calculus visualization must have a title");
+  }
+
+  if (!component.expression || component.expression.trim().length === 0) {
+    errors.push("Calculus visualization must have an expression");
+  }
+
+  if (!["tangent", "area", "taylor", "limit"].includes(component.vizType)) {
+    errors.push(`Invalid visualization type: ${component.vizType}`);
+  }
+
+  if (!component.domain || component.domain.length !== 2) {
+    errors.push("Calculus visualization must have a domain [min, max]");
+  } else {
+    const [min, max] = component.domain;
+    if (min >= max) errors.push("Domain min must be less than max");
+  }
+
+  switch (component.vizType) {
+    case "tangent":
+      if (component.point === undefined) {
+        errors.push("Tangent visualization requires a point");
+      } else if (component.point < component.domain[0] || component.point > component.domain[1]) {
+        warnings.push("Tangent point is outside the domain");
+      }
+      break;
+    case "area":
+      if (!component.interval || component.interval.length !== 2) {
+        errors.push("Area visualization requires an interval [a, b]");
+      } else if (component.interval[0] >= component.interval[1]) {
+        errors.push("Area interval start must be less than end");
+      }
+      if (component.areaMethod && !["left", "right", "midpoint", "trapezoid"].includes(component.areaMethod)) {
+        warnings.push(`Unknown area method: ${component.areaMethod}`);
+      }
+      if (component.partitions !== undefined && (component.partitions < 1 || component.partitions > 1000)) {
+        warnings.push("Partitions should be between 1 and 1000");
+      }
+      break;
+    case "taylor":
+      if (component.center === undefined) {
+        errors.push("Taylor series requires a center point");
+      }
+      if (component.order === undefined || component.order < 0 || component.order > 20) {
+        errors.push("Taylor series requires order between 0 and 20");
+      }
+      break;
+    case "limit":
+      if (component.target === undefined) {
+        errors.push("Limit evaluation requires a target point");
+      }
+      if (component.limitDirection && !["left", "right", "both"].includes(component.limitDirection)) {
+        warnings.push(`Unknown limit direction: ${component.limitDirection}`);
+      }
+      break;
+  }
+
+  return errors.length > 0 ? fail(errors, warnings) : ok(warnings);
+}
+
+/** Validate a series visualization component. */
+export function validateSeriesVisualization(component: SeriesVisualizationComponent): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!component.title || component.title.trim().length === 0) {
+    errors.push("Series visualization must have a title");
+  }
+
+  if (!component.termExpression || component.termExpression.trim().length === 0) {
+    errors.push("Series visualization must have a term expression");
+  }
+
+  if (component.maxTerms !== undefined && (component.maxTerms < 1 || component.maxTerms > 500)) {
+    warnings.push("Max terms should be between 1 and 500");
+  }
+
+  if (component.tolerance !== undefined && (component.tolerance <= 0 || component.tolerance > 1)) {
+    warnings.push("Tolerance should be between 0 and 1");
+  }
+
+  return errors.length > 0 ? fail(errors, warnings) : ok(warnings);
+}
+
 /** Generic validator dispatcher. */
 export function validateComponent(component: InteractiveComponent): ValidationResult {
   switch (component.type) {
@@ -578,6 +1064,22 @@ export function validateComponent(component: InteractiveComponent): ValidationRe
       return validateQuiz(component as QuizComponent);
     case "comparison":
       return validateComparison(component as ComparisonComponent);
+    case "simulation":
+      return validateSimulation(component as SimulationComponent);
+    case "live_widget":
+      return validateLiveWidget(component as LiveWidgetComponent);
+    case "equation_solver":
+      return validateEquationSolver(component as EquationSolverComponent);
+    case "function_plotter":
+      return validateFunctionPlotter(component as FunctionPlotterComponent);
+    case "surface_plotter":
+      return validateSurfacePlotter(component as SurfacePlotterComponent);
+    case "geometry":
+      return validateGeometry(component as GeometryComponent);
+    case "calculus_visualization":
+      return validateCalculusVisualization(component as CalculusVisualizationComponent);
+    case "series_visualization":
+      return validateSeriesVisualization(component as SeriesVisualizationComponent);
     default:
       return fail([`Unknown component type: ${(component as InteractiveComponent).type}`]);
   }
@@ -933,6 +1435,69 @@ export function initializeComponentRegistry(): void {
     validate: validateComparison,
     defaults: { orientation: "horizontal" },
     limits: { maxItems: 10, maxCriteria: 15, maxTextLength: 5000 },
+  });
+
+  interactiveComponentRegistry.register({
+    type: "simulation",
+    name: "Interactive Simulation",
+    description: "Educational simulations for physics, math, CS, chemistry, and economics",
+    validate: validateSimulation,
+    defaults: { running: false, speed: 1, parameters: {} },
+    limits: { maxTextLength: 5000 },
+  });
+
+  interactiveComponentRegistry.register({
+    type: "equation_solver",
+    name: "Equation Solver",
+    description: "Find roots of equations using Newton-Raphson, bisection, or secant methods",
+    validate: validateEquationSolver,
+    defaults: { method: "auto", tolerance: 1e-10, maxIterations: 100 },
+    limits: { maxTextLength: 5000 },
+  });
+
+  interactiveComponentRegistry.register({
+    type: "function_plotter",
+    name: "Function Plotter",
+    description: "2D function plots (cartesian, parametric, polar)",
+    validate: validateFunctionPlotter,
+    defaults: { plotType: "cartesian", samples: 500, variable: "x" },
+    limits: { maxTextLength: 5000 },
+  });
+
+  interactiveComponentRegistry.register({
+    type: "surface_plotter",
+    name: "Surface Plotter",
+    description: "3D surface plots z = f(x, y)",
+    validate: validateSurfacePlotter,
+    defaults: { resolution: 50, colorScheme: "height", wireframe: false },
+    limits: { maxTextLength: 5000 },
+  });
+
+  interactiveComponentRegistry.register({
+    type: "geometry",
+    name: "Geometry Construction",
+    description: "Interactive geometric constructions and measurements",
+    validate: validateGeometry,
+    defaults: { showGrid: true, showAxes: true },
+    limits: { maxTextLength: 5000 },
+  });
+
+  interactiveComponentRegistry.register({
+    type: "calculus_visualization",
+    name: "Calculus Visualization",
+    description: "Visualize tangent lines, areas under curves, Taylor series, and limits",
+    validate: validateCalculusVisualization,
+    defaults: { variable: "x", areaMethod: "midpoint", partitions: 20 },
+    limits: { maxTextLength: 5000 },
+  });
+
+  interactiveComponentRegistry.register({
+    type: "series_visualization",
+    name: "Series Visualization",
+    description: "Visualize infinite series convergence and partial sums",
+    validate: validateSeriesVisualization,
+    defaults: { maxTerms: 100, tolerance: 1e-10, variable: "n" },
+    limits: { maxTextLength: 5000 },
   });
 }
 
