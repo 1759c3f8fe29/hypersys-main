@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
 import { createPortal } from 'react-dom';
-import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Maximize2, X, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ListChecks, Ellipsis, ImageOff } from 'lucide-react';
+import { Sparkles, Copy, Check, Volume2, VolumeX, Loader2, FileText, Download, RefreshCw, Play, Maximize2, X, Globe, ExternalLink, ArrowUpRight, Pencil, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, FileCode2, Terminal, Brain, ListChecks, Ellipsis, ImageOff, LayoutDashboard } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -351,6 +351,8 @@ function ToolCallsDisplay({ toolCalls, isStreaming }: { toolCalls: StreamingTool
         return 'OCR Image';
       case 'search_images':
         return 'Image Search';
+      case 'render_component':
+        return 'Render Component';
       default:
         return name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     }
@@ -373,6 +375,8 @@ function ToolCallsDisplay({ toolCalls, isStreaming }: { toolCalls: StreamingTool
         return <ImageOff className="w-3.5 h-3.5" />;
       case 'search_images':
         return <Globe className="w-3.5 h-3.5" />;
+      case 'render_component':
+        return <LayoutDashboard className="w-3.5 h-3.5" />;
       default:
         return <Sparkles className="w-3.5 h-3.5" />;
     }

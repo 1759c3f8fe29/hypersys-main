@@ -683,6 +683,9 @@ export interface GeometryMeasurementSpec {
   label?: string;
 }
 
+/** 2D Point type for geometry components */
+export interface Point2D { x: number; y: number; }
+
 /** Calculus Visualization Component */
 export interface CalculusVisualizationComponent extends InteractiveComponentBase {
   type: "calculus_visualization";
