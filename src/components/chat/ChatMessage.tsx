@@ -318,19 +318,71 @@ function FollowUpChips({ followUps, onFollowUp }: { followUps: string[]; onFollo
 function ToolCallsDisplay({ toolCalls, isStreaming }: { toolCalls: StreamingToolCall[]; isStreaming: boolean }) {
   const [expanded, setExpanded] = useState(true);
 
-  // Format tool call arguments for display
+  // Format tool call arguments for display - show human-readable description
   const formatArgs = (args: Record<string, unknown>): string => {
     try {
+      // For render_component, show a friendly description instead of raw JSON
+      if (args.component && typeof args.component === 'object') {
+        const comp = args.component as Record<string, unknown>;
+        const type = typeof comp.type === 'string' ? comp.type : 'component';
+        const title = typeof comp.title === 'string' ? comp.title : '';
+
+        const typeLabels: Record<string, string> = {
+          'calculator': 'Calculator',
+          'chart': 'Chart',
+          'data_table': 'Data Table',
+          'map': 'Map',
+          'bill_splitter': 'Bill Splitter',
+          'unit_converter': 'Unit Converter',
+          'planner': 'Planner',
+          'quiz': 'Quiz',
+          'comparison': 'Comparison Table',
+          'simulation': 'Simulation',
+          'equation_solver': 'Equation Solver',
+          'function_plotter': 'Function Plotter',
+          'surface_plotter': '3D Surface Plotter',
+          'geometry': 'Geometry',
+          'calculus_visualization': 'Calculus Visualization',
+          'series_visualization': 'Series Visualization',
+        };
+
+        const label = typeLabels[type] || type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        return title ? `Rendering ${label}: "${title}"` : `Rendering ${label}`;
+      }
+
+      // For other tools, show a brief summary
       const entries = Object.entries(args);
       if (entries.length === 0) return '{}';
-      return entries
-        .map(([key, value]) => {
-          const strValue = typeof value === 'string' ? `"${value}"` : JSON.stringify(value);
-          return `${key}: ${strValue}`;
-        })
-        .join(', ');
+
+      // For web_search, show the query
+      if (args.query && typeof args.query === 'string') {
+        return `Query: "${args.query}"`;
+      }
+      // For generate_image, show the prompt
+      if (args.prompt && typeof args.prompt === 'string') {
+        return `Prompt: "${args.prompt.slice(0, 80)}${args.prompt.length > 80 ? '...' : ''}"`;
+      }
+      // For create_file, show filename
+      if (args.filename && typeof args.filename === 'string') {
+        return `File: ${args.filename}`;
+      }
+      // For run_code, show language
+      if (args.language && typeof args.language === 'string') {
+        return `Language: ${args.language}`;
+      }
+      // For search_images, show query
+      if (args.query && typeof args.query === 'string') {
+        return `Search: "${args.query}"`;
+      }
+      // For ocr_image, show attachment
+      if (args.attachment_id && typeof args.attachment_id === 'string') {
+        return `Image attachment: ${args.attachment_id}`;
+      }
+
+      // Fallback: show first few keys
+      return entries.slice(0, 3).map(([k]) => k).join(', ') + (entries.length > 3 ? '...' : '');
     } catch {
-      return JSON.stringify(args);
+      return 'Arguments';
     }
   };
 
@@ -418,7 +470,7 @@ function ToolCallsDisplay({ toolCalls, isStreaming }: { toolCalls: StreamingTool
                 )}
               </div>
               <div className="ml-9 flex flex-col gap-1">
-                <div className="font-mono text-xs text-muted-foreground/80 bg-background/50 rounded px-2 py-1.5 border border-border/30">
+                <div className="text-xs text-muted-foreground/80 bg-background/50 rounded px-2 py-1.5 border border-border/30">
                   {formatArgs(call.arguments)}
                 </div>
               </div>

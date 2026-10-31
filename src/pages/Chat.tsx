@@ -1892,15 +1892,9 @@ export default function Chat() {
                   ...(a.type === 'image' ? { url: a.url } : {}),
                 })),
               onToolCall: ({ id, name, arguments: args }) => {
-                // Store the tool call in the message so the UI can display it
-                // in real-time during streaming (e.g., "Searching for...").
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === assistantMessage.id
-                      ? { ...m, streamingToolCalls: [...(m.streamingToolCalls || []), { id, name, arguments: args }] }
-                      : m
-                  )
-                );
+                // Intentionally NOT storing raw tool calls in streamingToolCalls.
+                // The user only sees friendly status text from onToolStart (e.g., "Rendering equation_solver...").
+                // Raw model tool queries (with full JSON arguments) are hidden from the UI.
               },
               onToolStart: ({ name, args }) => {
                 // A tool call is proof of life just as much as a first token is:

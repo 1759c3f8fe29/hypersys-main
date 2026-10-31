@@ -491,7 +491,7 @@ export const MODELS: ModelSpec[] = [
     supportsTools: true,
     emoji: "🇫🇷",
     kind: "Chat",
-    hidden: true,
+    featured: true,
   },
   {
     id: "kimi-k3",

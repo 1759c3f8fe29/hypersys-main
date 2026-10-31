@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useEffect, useRef } from "react";
 import { GeometryComponent, RendererProps, Point2D, GeometryConstructionStep, GeometryMeasurementSpec } from "../../lib/interactive-types";
 import { GeometryEngine, GeometryObject, GeometryConstruction, GeometryMeasurement } from "../../lib/math-environment";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 
 interface GeometryRendererProps extends RendererProps {
   component: GeometryComponent;
@@ -37,6 +37,7 @@ export default function GeometryRenderer({
   const [error, setError] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hoveredObject, setHoveredObject] = useState<string | null>(null);
+  const prefersReducedMotion = useReducedMotion();
 
   // Execute constructions
   useEffect(() => {
@@ -173,7 +174,6 @@ export default function GeometryRenderer({
       else if (obj.type === "line" || obj.type === "segment") {
         points.push(obj.point1, obj.point2);
       } else if (obj.type === "ray") {
-        // Extend ray for bounds calculation
         const extend = Math.max(xSpan || 1, ySpan || 1) * 2;
         points.push(
           obj.origin,
@@ -204,9 +204,9 @@ export default function GeometryRenderer({
   }, [objects, component.bounds]);
 
   const [xMin, yMin, xMax, yMax] = bounds;
-  const width = 500;
-  const height = 400;
-  const margin = 40;
+  const width = 560;
+  const height = 440;
+  const margin = 48;
   const plotWidth = width - 2 * margin;
   const plotHeight = height - 2 * margin;
   const xSpan = xMax - xMin;
@@ -233,7 +233,7 @@ export default function GeometryRenderer({
 
     // Grid
     if (component.showGrid !== false) {
-      ctx.strokeStyle = "#e5e7eb";
+      ctx.strokeStyle = "var(--border-1, #e5e7eb)";
       ctx.lineWidth = 0.5;
       const gridStep = Math.max(1, Math.pow(10, Math.floor(Math.log10(Math.max(xSpan, ySpan) / 10))));
       for (let x = Math.ceil(xMin / gridStep) * gridStep; x <= xMax; x += gridStep) {
@@ -254,7 +254,7 @@ export default function GeometryRenderer({
 
     // Axes
     if (component.showAxes !== false) {
-      ctx.strokeStyle = "#9ca3af";
+      ctx.strokeStyle = "var(--fg-muted, #9ca3af)";
       ctx.lineWidth = 1.5;
       // X-axis
       if (yMin <= 0 && yMax >= 0) {
@@ -292,7 +292,7 @@ export default function GeometryRenderer({
     const isHovered = (label: string | undefined) => label === hoveredObject;
 
     for (const obj of objects) {
-      const color = isHovered(obj.label) ? "#2563eb" : "#374151";
+      const color = isHovered(obj.label) ? "var(--primary-500, #2563eb)" : "var(--fg-primary, #374151)";
       const lineWidth = isHovered(obj.label) ? 2.5 : 1.5;
 
       ctx.strokeStyle = color;
@@ -304,16 +304,15 @@ export default function GeometryRenderer({
           const sx = toScreenX(obj.point.x);
           const sy = toScreenY(obj.point.y);
           ctx.beginPath();
-          ctx.arc(sx, sy, isHovered(obj.label) ? 6 : 4, 0, 2 * Math.PI);
+          ctx.arc(sx, sy, isHovered(obj.label) ? 7 : 5, 0, 2 * Math.PI);
           ctx.fill();
           if (obj.label) {
-            ctx.font = "12px system-ui";
-            ctx.fillText(obj.label, sx + 8, sy - 8);
+            ctx.font = "13px var(--font-sans, system-ui)";
+            ctx.fillText(obj.label, sx + 10, sy - 10);
           }
           break;
         }
         case "line": {
-          // Extend line beyond bounds
           const { point1, point2 } = obj;
           const dx = point2.x - point1.x;
           const dy = point2.y - point1.y;
@@ -333,14 +332,13 @@ export default function GeometryRenderer({
             if (obj.label) {
               const mx = toScreenX((x1 + x2) / 2);
               const my = toScreenY((y1 + y2) / 2);
-              ctx.font = "11px system-ui";
-              ctx.fillText(obj.label, mx + 5, my - 5);
+              ctx.font = "12px var(--font-sans, system-ui)";
+              ctx.fillText(obj.label, mx + 6, my - 6);
             }
           }
           break;
         }
         case "ray": {
-          // Draw ray from origin in direction
           const { origin, direction } = obj;
           const len = Math.sqrt(direction.x * direction.x + direction.y * direction.y);
           if (len > 0) {
@@ -356,7 +354,7 @@ export default function GeometryRenderer({
             ctx.lineTo(toScreenX(x2), toScreenY(y2));
             ctx.stroke();
             // Arrow head at end
-            const arrowLen = 10;
+            const arrowLen = 12;
             const arrowAngle = Math.PI / 6;
             const headX = toScreenX(x2);
             const headY = toScreenY(y2);
@@ -370,8 +368,8 @@ export default function GeometryRenderer({
             if (obj.label) {
               const mx = toScreenX((x1 + x2) / 2);
               const my = toScreenY((y1 + y2) / 2);
-              ctx.font = "11px system-ui";
-              ctx.fillText(obj.label, mx + 5, my - 5);
+              ctx.font = "12px var(--font-sans, system-ui)";
+              ctx.fillText(obj.label, mx + 6, my - 6);
             }
           }
           break;
@@ -384,8 +382,8 @@ export default function GeometryRenderer({
           if (obj.label) {
             const mx = toScreenX((obj.point1.x + obj.point2.x) / 2);
             const my = toScreenY((obj.point1.y + obj.point2.y) / 2);
-            ctx.font = "11px system-ui";
-            ctx.fillText(obj.label, mx + 5, my - 5);
+            ctx.font = "12px var(--font-sans, system-ui)";
+            ctx.fillText(obj.label, mx + 6, my - 6);
           }
           break;
         }
@@ -397,12 +395,12 @@ export default function GeometryRenderer({
           ctx.arc(sx, sy, r, 0, 2 * Math.PI);
           ctx.stroke();
           if (obj.label) {
-            ctx.font = "11px system-ui";
-            ctx.fillText(obj.label, sx + r + 5, sy - r - 5);
+            ctx.font = "12px var(--font-sans, system-ui)";
+            ctx.fillText(obj.label, sx + r + 6, sy - r - 6);
           }
           // Center point
           ctx.beginPath();
-          ctx.arc(sx, sy, 3, 0, 2 * Math.PI);
+          ctx.arc(sx, sy, 4, 0, 2 * Math.PI);
           ctx.fill();
           break;
         }
@@ -418,26 +416,25 @@ export default function GeometryRenderer({
           if (obj.label) {
             const cx = obj.vertices.reduce((sum, v) => sum + v.x, 0) / obj.vertices.length;
             const cy = obj.vertices.reduce((sum, v) => sum + v.y, 0) / obj.vertices.length;
-            ctx.font = "11px system-ui";
-            ctx.fillText(obj.label, toScreenX(cx) + 5, toScreenY(cy) - 5);
+            ctx.font = "12px var(--font-sans, system-ui)";
+            ctx.fillText(obj.label, toScreenX(cx) + 6, toScreenY(cy) - 6);
           }
           break;
         }
         case "angle": {
-          // Draw angle arc
           const { vertex, point1, point2 } = obj;
           const vx = toScreenX(vertex.x);
           const vy = toScreenY(vertex.y);
           const a1 = Math.atan2(point1.y - vertex.y, point1.x - vertex.x);
           const a2 = Math.atan2(point2.y - vertex.y, point2.x - vertex.x);
-          const radius = 30;
+          const radius = 36;
           ctx.beginPath();
           ctx.arc(vx, vy, radius, -a1, -a2);
           ctx.stroke();
           if (obj.label) {
             const midAngle = (a1 + a2) / 2;
-            ctx.font = "11px system-ui";
-            ctx.fillText(obj.label, vx + Math.cos(-midAngle) * (radius + 10), vy + Math.sin(-midAngle) * (radius + 10));
+            ctx.font = "12px var(--font-sans, system-ui)";
+            ctx.fillText(obj.label, vx + Math.cos(-midAngle) * (radius + 14), vy + Math.sin(-midAngle) * (radius + 14));
           }
           break;
         }
@@ -461,7 +458,7 @@ export default function GeometryRenderer({
         const sx = toScreenX(obj.point.x);
         const sy = toScreenY(obj.point.y);
         const dist = Math.hypot(x - sx, y - sy);
-        if (dist < 10 && dist < minDist) {
+        if (dist < 14 && dist < minDist) {
           minDist = dist;
           found = obj.label;
         }
@@ -472,13 +469,37 @@ export default function GeometryRenderer({
 
   const handleMouseLeave = () => setHoveredObject(null);
 
+  const transition = prefersReducedMotion ? { duration: 0 } : { duration: 0.3, ease: [0.16, 1, 0.3, 1] };
+
   return (
-    <div className="geometry-renderer" style={{ fontFamily: "system-ui, sans-serif" }}>
+    <div className="geometry-renderer" style={{
+      fontFamily: "var(--font-sans, system-ui, sans-serif)",
+      background: "var(--surface-1, white)",
+      border: "1px solid var(--border-1, #e5e7eb)",
+      borderRadius: "var(--radius-xl, 12px)",
+      padding: "16px",
+      boxShadow: "var(--shadow-sm, 0 1px 2px 0 rgb(0 0 0 / 0.05))",
+    }}>
       <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "flex-start" }}>
         {/* Canvas Panel */}
-        <div style={{ flex: "2", minWidth: "400px" }}>
-          <h3 style={{ margin: "0 0 12px", fontSize: "16px", fontWeight: 600 }}>{component.title}</h3>
-          {component.description && <p style={{ margin: "0 0 16px", color: "#666", fontSize: "14px" }}>{component.description}</p>}
+        <motion.div
+          style={{ flex: "2", minWidth: "420px" }}
+          initial={{ opacity: 0, x: -20 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={transition}
+        >
+          <h3 style={{
+            margin: "0 0 4px",
+            fontSize: "var(--text-lg, 1.125rem)",
+            fontWeight: 600,
+            color: "var(--fg-primary, #111827)"
+          }}>{component.title}</h3>
+          {component.description && <p style={{
+            margin: "0 0 16px",
+            color: "var(--fg-muted, #6b7280)",
+            fontSize: "var(--text-sm, 0.875rem)",
+            lineHeight: 1.5
+          }}>{component.description}</p>}
 
           <div style={{ position: "relative" }}>
             <canvas
@@ -488,76 +509,102 @@ export default function GeometryRenderer({
               onMouseMove={handleMouseMove}
               onMouseLeave={handleMouseLeave}
               style={{
-                background: "#fafafa",
-                borderRadius: "8px",
-                border: "1px solid #e5e7eb",
+                background: "var(--surface-2, #fafafa)",
+                borderRadius: "var(--radius-lg, 8px)",
+                border: "1px solid var(--border-1, #e5e7eb)",
                 cursor: "crosshair",
                 touchAction: "none",
               }}
             />
             {error && (
-              <div style={{ position: "absolute", bottom: 12, left: 12, right: 12, padding: "8px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "6px", color: "#dc2626", fontSize: "13px" }}>
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                style={{ position: "absolute", bottom: 12, left: 12, right: 12, padding: "10px 12px", background: "var(--error-bg, #fef2f2)", border: "1px solid var(--error-border, #fecaca)", borderRadius: "var(--radius-lg, 8px)", color: "var(--error-fg, #dc2626)", fontSize: "var(--text-sm, 0.875rem)" }}
+                role="alert"
+              >
                 {error}
-              </div>
+              </motion.div>
             )}
           </div>
 
           <div style={{ marginTop: "12px", display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px" }}>
-            <div style={{ padding: "12px", background: "#f0fdf4", borderRadius: "8px", border: "1px solid #bbf7d0" }}>
-              <div style={{ fontSize: "11px", color: "#166534", textTransform: "uppercase", letterSpacing: "0.5px" }}>Objects</div>
-              <div style={{ fontSize: "18px", fontWeight: 600 }}>{objects.length}</div>
-            </div>
-            <div style={{ padding: "12px", background: "#eff6ff", borderRadius: "8px", border: "1px solid #bfdbfe" }}>
-              <div style={{ fontSize: "11px", color: "#1e40af", textTransform: "uppercase", letterSpacing: "0.5px" }}>Measurements</div>
-              <div style={{ fontSize: "18px", fontWeight: 600 }}>{measurements.length}</div>
-            </div>
-            <div style={{ padding: "12px", background: "#faf5ff", borderRadius: "8px", border: "1px solid #e9d5ff" }}>
-              <div style={{ fontSize: "11px", color: "#7c3aed", textTransform: "uppercase", letterSpacing: "0.5px" }}>Bounds</div>
-              <div style={{ fontSize: "12px", fontFamily: "monospace" }}>
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              style={{ padding: "14px", background: "var(--success-bg, #f0fdf4)", borderRadius: "var(--radius-lg, 8px)", border: "1px solid var(--success-border, #bbf7d0)" }}
+            >
+              <div style={{ fontSize: "var(--text-xs, 0.75rem)", color: "var(--success-700, #166534)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Objects</div>
+              <div style={{ fontSize: "var(--text-2xl, 1.5rem)", fontWeight: 700, color: "var(--fg-primary, #111827)" }}>{objects.length}</div>
+            </motion.div>
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.15 }}
+              style={{ padding: "14px", background: "var(--primary-bg, #eff6ff)", borderRadius: "var(--radius-lg, 8px)", border: "1px solid var(--primary-border, #bfdbfe)" }}
+            >
+              <div style={{ fontSize: "var(--text-xs, 0.75rem)", color: "var(--primary-700, #1e40af)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Measurements</div>
+              <div style={{ fontSize: "var(--text-2xl, 1.5rem)", fontWeight: 700, color: "var(--fg-primary, #111827)" }}>{measurements.length}</div>
+            </motion.div>
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+              style={{ padding: "14px", background: "var(--purple-bg, #faf5ff)", borderRadius: "var(--radius-lg, 8px)", border: "1px solid var(--purple-border, #e9d5ff)" }}
+            >
+              <div style={{ fontSize: "var(--text-xs, 0.75rem)", color: "var(--purple-700, #7c3aed)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Bounds</div>
+              <div style={{ fontSize: "var(--text-sm, 0.875rem)", fontFamily: "var(--font-mono, ui-monospace, monospace)" }}>
                 X: [{formatNumber(xMin)}, {formatNumber(xMax)}]
               </div>
-            </div>
+            </motion.div>
           </div>
-        </div>
+        </motion.div>
 
         {/* Sidebar: Constructions & Measurements */}
-        <div style={{ flex: "1", minWidth: "280px", maxWidth: "350px", display: "flex", flexDirection: "column", gap: "16px" }}>
+        <motion.div
+          style={{ flex: "1", minWidth: "300px", maxWidth: "380px", display: "flex", flexDirection: "column", gap: "16px" }}
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={transition}
+        >
           <div>
-            <h4 style={{ margin: "0 0 12px", fontSize: "14px", fontWeight: 600 }}>Constructions</h4>
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px", maxHeight: "300px", overflow: "auto" }}>
+            <h4 style={{ margin: "0 0 12px", fontSize: "var(--text-base, 1rem)", fontWeight: 600, color: "var(--fg-primary, #111827)" }}>Constructions</h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px", maxHeight: "340px", overflow: "auto", paddingRight: "4px" }}>
               {(component.constructions || []).map((step, i) => (
                 <motion.div
                   key={i}
-                  initial={{ opacity: 0, x: -20 }}
+                  initial={{ opacity: 0, x: -10 }}
                   animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.05 }}
+                  transition={{ delay: i * 0.03 }}
                   style={{
-                    padding: "10px 12px",
-                    background: "#f9fafb",
-                    border: "1px solid #e5e7eb",
-                    borderRadius: "8px",
-                    fontSize: "13px",
+                    padding: "12px",
+                    background: "var(--surface-2, #f9fafb)",
+                    border: "1px solid var(--border-1, #e5e7eb)",
+                    borderRadius: "var(--radius-lg, 8px)",
+                    fontSize: "var(--text-sm, 0.875rem)",
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
                     <span
                       style={{
-                        padding: "2px 8px",
-                        background: "#2563eb",
+                        padding: "3px 10px",
+                        background: "var(--primary-500, #2563eb)",
                         color: "white",
-                        borderRadius: "4px",
-                        fontSize: "10px",
+                        borderRadius: "var(--radius-full, 9999px)",
+                        fontSize: "var(--text-xs, 0.75rem)",
                         fontWeight: 600,
                         textTransform: "uppercase",
+                        letterSpacing: "0.3px",
                       }}
                     >
                       {OP_LABELS[step.op] || step.op}
                     </span>
                     {step.label && (
-                      <span style={{ fontWeight: 600, fontFamily: "monospace", fontSize: "13px" }}>{step.label}</span>
+                      <span style={{ fontWeight: 600, fontFamily: "var(--font-mono, ui-monospace, monospace)", fontSize: "var(--text-sm, 0.875rem)" }}>{step.label}</span>
                     )}
                   </div>
-                  <div style={{ fontSize: "11px", color: "#6b7280", fontFamily: "monospace" }}>
+                  <div style={{ fontSize: "var(--text-xs, 0.75rem)", color: "var(--fg-muted, #6b7280)", fontFamily: "var(--font-mono, ui-monospace, monospace)" }}>
                     {Object.entries(step.params)
                       .map(([k, v]) => `${k}=${v}`)
                       .join(", ")}
@@ -565,36 +612,37 @@ export default function GeometryRenderer({
                 </motion.div>
               ))}
               {(component.constructions || []).length === 0 && (
-                <div style={{ padding: "16px", textAlign: "center", color: "#9ca3af" }}>No constructions defined</div>
+                <div style={{ padding: "20px", textAlign: "center", color: "var(--fg-muted, #9ca3af)", fontSize: "var(--text-sm, 0.875rem)" }}>No constructions defined</div>
               )}
             </div>
           </div>
 
           {measurements.length > 0 && (
             <div>
-              <h4 style={{ margin: "0 0 12px", fontSize: "14px", fontWeight: 600 }}>Measurements</h4>
+              <h4 style={{ margin: "0 0 12px", fontSize: "var(--text-base, 1rem)", fontWeight: 600, color: "var(--fg-primary, #111827)" }}>Measurements</h4>
               <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 {measurements.map((m, i) => (
                   <motion.div
                     key={i}
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: i * 0.03 }}
                     style={{
-                      padding: "10px 12px",
-                      background: "#f0fdf4",
-                      border: "1px solid #bbf7d0",
-                      borderRadius: "8px",
-                      fontSize: "13px",
+                      padding: "12px",
+                      background: "var(--success-bg, #f0fdf4)",
+                      border: "1px solid var(--success-border, #bbf7d0)",
+                      borderRadius: "var(--radius-lg, 8px)",
+                      fontSize: "var(--text-sm, 0.875rem)",
                     }}
                   >
-                    <div style={{ fontWeight: 600 }}>{m.label}</div>
-                    <div style={{ fontFamily: "monospace", fontSize: "14px", color: "#166534" }}>{m.value}</div>
+                    <div style={{ fontWeight: 600, color: "var(--fg-primary, #111827)" }}>{m.label}</div>
+                    <div style={{ fontFamily: "var(--font-mono, ui-monospace, monospace)", fontSize: "var(--text-base, 1rem)", color: "var(--success-700, #166534)", marginTop: "2px" }}>{m.value}</div>
                   </motion.div>
                 ))}
               </div>
             </div>
           )}
-        </div>
+        </motion.div>
       </div>
     </div>
   );
